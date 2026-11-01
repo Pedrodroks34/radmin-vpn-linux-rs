@@ -27,6 +27,7 @@ pub struct TunnelConfig {
     pub local_ip: Option<String>,
     pub remote_ip: Option<String>,
     pub subnet: Option<String>,
+    pub mac_address: Option<[u8; 6]>,
     pub mock_mode: bool,
 }
 
@@ -39,6 +40,7 @@ impl Default for TunnelConfig {
             local_ip: None,
             remote_ip: None,
             subnet: None,
+            mac_address: None,
             mock_mode: false,
         }
     }
@@ -93,6 +95,13 @@ impl Tunnel {
                 // Configurar MTU
                 if let Err(e) = InterfaceConfigurator::set_mtu(&name, self.config.mtu) {
                     warn!("Não foi possível configurar MTU via Netlink/ioctl: {}", e);
+                }
+
+                // Configurar MAC se fornecido
+                if let Some(mac) = self.config.mac_address {
+                    if let Err(e) = InterfaceConfigurator::set_mac_address(&name, mac) {
+                        warn!("Não foi possível configurar endereço MAC via ioctl: {}", e);
+                    }
                 }
 
                 // Configurar IP se fornecido
@@ -283,7 +292,7 @@ impl ForwardingPump {
         }
 
         running_pump.store(false, Ordering::SeqCst);
-        let _ = tap_reader_handle.abort();
+        tap_reader_handle.abort();
         match crypto_failure {
             Some(reason) => Err(anyhow::anyhow!("falha criptográfica no canal: {}", reason)),
             None => Ok(()),
@@ -307,8 +316,10 @@ mod tests {
         let (mock_tap, _endpoint) = MockTap::new();
         let tap = Arc::new(AnyTap::Mock(mock_tap));
 
-        let mut crypto_cfg = CryptoChannelConfig::default();
-        crypto_cfg.enabled = true;
+        let crypto_cfg = CryptoChannelConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let crypto = Arc::new(CryptoChannel::with_key(crypto_cfg, [0x33u8; 32]));
 
         let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
@@ -342,8 +353,10 @@ mod tests {
         let tap = Arc::new(AnyTap::Mock(mock_tap));
 
         let shared_key = [0x33u8; 32];
-        let mut crypto_cfg = CryptoChannelConfig::default();
-        crypto_cfg.enabled = true;
+        let crypto_cfg = CryptoChannelConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let crypto = Arc::new(CryptoChannel::with_key(crypto_cfg, shared_key));
 
         let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())

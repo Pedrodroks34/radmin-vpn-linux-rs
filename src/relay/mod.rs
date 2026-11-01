@@ -14,18 +14,21 @@
 //!    - 0x40000001: Flag de protocolo/cifra (1 byte, ex: 0x05)
 //!    - 0x50000020: Nonce / token de sessão aleatório (32 bytes = 0x20)
 //!    - 0x600000c0: Bloco de troca de chaves do cliente (192 bytes = 0xc0)
-//!    - 0x70000014: Digest de autenticação / HMAC (20 bytes = 0x14)
+//!    - 0x70000014: Digest de autenticação / HMAC-SHA1 (20 bytes = 0x14)
 //! 3. Após a etapa de autenticação (sequências 5 e 6), a comunicação é 100% cifrada
 //!    com AES-256-CBC em múltiplos estritos de 16 bytes.
 //! 4. Conexão P2P direta: o cliente tenta UDP com encapsulamento Teredo (RFC 4380,
 //!    prefixo 2001:0000::/32) e STUN (RFC 3489) / TCP simultaneous open. Se falhar
 //!    ou sofrer timeout, faz fallback automático para o TcpRelay na porta 17351.
 
+use crate::nat::{attempt_tcp_simultaneous_open, UdpHolePuncher};
 use crate::transport::{ChannelConfig, ChannelType, TcpChannel};
 use crate::Result;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
 
 pub const DEFAULT_RELAY_PORT: u16 = 17351;
@@ -46,6 +49,8 @@ pub enum RelayError {
     BufferTooShort { needed: usize, available: usize },
     #[error("tag de relay inválida ou inesperada: 0x{0:08x}")]
     InvalidTag(u32),
+    #[error("sequência inesperada de relay: esperado {expected}, recebido {actual}")]
+    UnexpectedSequence { expected: u32, actual: u32 },
     #[error("canal de relay não conectado")]
     NotConnected,
     #[error("erro de E/S no canal de relay: {0}")]
@@ -241,9 +246,11 @@ impl RelayClient {
 
     pub async fn connect(&mut self) -> Result<()> {
         info!("Conectando ao servidor TcpRelay em {}", self.server.address);
-        let mut config = ChannelConfig::default();
-        config.channel_type = ChannelType::Relay;
-        config.connect_timeout = Duration::from_secs(5);
+        let config = ChannelConfig {
+            channel_type: ChannelType::Relay,
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
 
         let channel = TcpChannel::connect(&self.server.address.to_string(), config).await?;
         self.channel = Some(channel);
@@ -272,6 +279,22 @@ impl RelayClient {
             peer_node_id
         );
 
+        // 2. Aguarda resposta com sequência do servidor (pacote #691)
+        let resp_frame = channel.receive().await?;
+        let resp_msg = TcpRelayMessage::parse(&resp_frame.payload)?;
+        let seq = resp_msg
+            .get_seq()
+            .ok_or_else(|| anyhow::anyhow!("Resposta de relay sem contador de sequência"))?;
+        if seq != self.sequence {
+            return Err(RelayError::UnexpectedSequence {
+                expected: self.sequence,
+                actual: seq,
+            }
+            .into());
+        }
+        self.sequence += 1;
+
+        debug!("Handshake de TcpRelay validado na sequência {}", seq);
         Ok(())
     }
 
@@ -320,61 +343,108 @@ impl RelayClient {
     }
 }
 
-/// Seletor inteligente de caminho: Direct P2P (Teredo/STUN) vs Relay Fallback.
+/// Caminho de conexão P2P estabelecido.
+pub enum PathConnection {
+    /// Rota P2P direta via UDP Hole Punching / Teredo RFC 4380
+    UdpDirect(Arc<UdpSocket>, SocketAddr),
+    /// Rota P2P direta via TCP Simultaneous-Open
+    TcpDirect(TcpChannel),
+    /// Fallback para Relay via TcpRelay na porta 17351
+    Relay(RelayClient),
+}
+
+/// Seletor inteligente de caminho com NAT Traversal completo:
+/// 1. Tenta UDP Hole Punching / Teredo RFC 4380
+/// 2. Tenta TCP Simultaneous-Open com SO_REUSEADDR/SO_REUSEPORT
+/// 3. Fallback automático para TcpRelay (porta 17351)
 pub struct PathSelector {
     direct_timeout: Duration,
+    udp_hole_puncher: Option<Arc<UdpHolePuncher>>,
 }
 
 impl Default for PathSelector {
     fn default() -> Self {
         Self {
-            direct_timeout: Duration::from_secs(3),
+            direct_timeout: Duration::from_secs(2),
+            udp_hole_puncher: None,
         }
     }
 }
 
 impl PathSelector {
     pub fn new(direct_timeout: Duration) -> Self {
-        Self { direct_timeout }
+        Self {
+            direct_timeout,
+            udp_hole_puncher: None,
+        }
     }
 
-    /// Tenta conexão direta P2P; se falhar ou expirar o timeout, realiza fallback
-    /// transparente para o servidor TcpRelay.
+    pub fn with_hole_puncher(mut self, puncher: Arc<UdpHolePuncher>) -> Self {
+        self.udp_hole_puncher = Some(puncher);
+        self
+    }
+
+    /// Executa o fluxo de seleção de rota resiliente:
+    /// 1. Se configurado, dispara sondas UDP Hole Punching para `peer_udp_addr`
+    /// 2. Se falhar, tenta TCP Simultaneous-Open para `peer_tcp_addr`
+    /// 3. Se ambos falharem, aciona fallback transparente para `relay_server`
+    pub async fn select_path(
+        &self,
+        peer_udp_addr: Option<SocketAddr>,
+        peer_tcp_addr: SocketAddr,
+        relay_server: RelayServer,
+        peer_node_id: u64,
+        local_tcp_port: u16,
+    ) -> Result<PathConnection> {
+        // 1. Tentar UDP Hole Punching direto (Teredo / NAT traversal)
+        if let (Some(udp_addr), Some(puncher)) = (peer_udp_addr, &self.udp_hole_puncher) {
+            info!("Tentando caminho direto P2P UDP com {}", udp_addr);
+            if let Ok(true) = puncher.punch_hole(udp_addr, self.direct_timeout, 2).await {
+                info!(
+                    "Conexão P2P direta UDP estabelecida com sucesso com {}",
+                    udp_addr
+                );
+                let socket = UdpSocket::bind("0.0.0.0:0").await?;
+                return Ok(PathConnection::UdpDirect(Arc::new(socket), udp_addr));
+            }
+            warn!("UDP Hole Punching falhou com {}", udp_addr);
+        }
+
+        // 2. Tentar TCP Simultaneous-Open
+        info!("Tentando TCP Simultaneous-Open com {}", peer_tcp_addr);
+        if let Ok(tcp_stream) =
+            attempt_tcp_simultaneous_open(local_tcp_port, peer_tcp_addr, self.direct_timeout).await
+        {
+            let config = ChannelConfig {
+                connect_timeout: self.direct_timeout,
+                ..Default::default()
+            };
+            let direct_channel = TcpChannel::from_stream(tcp_stream, config);
+            info!("Conexão P2P direta TCP estabelecida com {}", peer_tcp_addr);
+            return Ok(PathConnection::TcpDirect(direct_channel));
+        }
+
+        // 3. Fallback para TcpRelay
+        warn!(
+            "Caminhos diretos P2P falharam. Acionando fallback para TcpRelay em {}",
+            relay_server.address
+        );
+        let mut relay = RelayClient::new(relay_server);
+        relay.connect().await?;
+        relay.initiate_relay_session(peer_node_id).await?;
+        Ok(PathConnection::Relay(relay))
+    }
+
+    /// Método simplificado mantendo compatibilidade com testes existentes.
     pub async fn connect_with_fallback(
         &self,
         direct_addr: SocketAddr,
         relay_server: RelayServer,
         peer_node_id: u64,
     ) -> Result<PathConnection> {
-        info!("Tentando caminho direto P2P com {}", direct_addr);
-        let mut config = ChannelConfig::default();
-        config.connect_timeout = self.direct_timeout;
-
-        match TcpChannel::connect(&direct_addr.to_string(), config).await {
-            Ok(direct_channel) => {
-                info!(
-                    "Conexão P2P direta estabelecida com sucesso com {}",
-                    direct_addr
-                );
-                Ok(PathConnection::Direct(direct_channel))
-            }
-            Err(e) => {
-                warn!(
-                    "Caminho P2P direto falhou ({}). Acionando fallback para TcpRelay em {}",
-                    e, relay_server.address
-                );
-                let mut relay = RelayClient::new(relay_server);
-                relay.connect().await?;
-                relay.initiate_relay_session(peer_node_id).await?;
-                Ok(PathConnection::Relay(relay))
-            }
-        }
+        self.select_path(None, direct_addr, relay_server, peer_node_id, 0)
+            .await
     }
-}
-
-pub enum PathConnection {
-    Direct(TcpChannel),
-    Relay(RelayClient),
 }
 
 #[cfg(test)]
@@ -440,7 +510,7 @@ mod tests {
             let mut server_ch = listener.accept().await.unwrap();
             let frame = server_ch.receive().await.unwrap();
 
-            // Valida a mensagem inicial de relay
+            // Valida a mensagem inicial de relay (Seq 1)
             let msg = TcpRelayMessage::parse(&frame.payload).unwrap();
             assert_eq!(msg.get_seq(), Some(1));
             assert_eq!(msg.get_node_id(), Some(target_node_id));
@@ -455,14 +525,6 @@ mod tests {
         let mut client = RelayClient::new(RelayServer::new(addr));
         client.connect().await.unwrap();
         client.initiate_relay_session(target_node_id).await.unwrap();
-
-        let resp_bytes = client.receive_frame().await.unwrap();
-        let resp_msg = TcpRelayMessage::parse(&resp_bytes).unwrap();
-        assert_eq!(resp_msg.get_seq(), Some(2));
-        assert_eq!(
-            resp_msg.get_record(TAG_RELAY_FLAG).unwrap().value,
-            vec![0x05]
-        );
 
         handle.await.unwrap();
         client.disconnect().await.unwrap();

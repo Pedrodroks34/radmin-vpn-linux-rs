@@ -76,12 +76,8 @@ impl LinuxTap {
 
         info!("Interface TAP Linux criada com sucesso: {}", assigned_name);
 
-        let async_fd = unsafe { AsyncFd::register(file) }.map_err(|e| {
-            TapError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        let async_fd = unsafe { AsyncFd::register(file) }
+            .map_err(|e| TapError::Io(std::io::Error::other(e.to_string())))?;
         Ok(Self {
             name: assigned_name,
             async_fd,

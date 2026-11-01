@@ -206,6 +206,55 @@ impl InterfaceConfigurator {
         Ok(())
     }
 
+    /// Configura o endereço MAC físico da interface (SIOCSIFHWADDR).
+    pub fn set_mac_address(ifname: &str, mac: [u8; 6]) -> std::result::Result<(), NetlinkError> {
+        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if sock < 0 {
+            return Err(NetlinkError::Io(std::io::Error::last_os_error()));
+        }
+
+        struct SockCloser(libc::c_int);
+        impl Drop for SockCloser {
+            fn drop(&mut self) {
+                unsafe { libc::close(self.0) };
+            }
+        }
+        let _guard = SockCloser(sock);
+
+        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+        Self::copy_ifname(ifname, &mut ifr.ifr_name)?;
+
+        unsafe {
+            ifr.ifr_ifru.ifru_hwaddr.sa_family = libc::ARPHRD_ETHER;
+            for (i, &b) in mac.iter().enumerate() {
+                ifr.ifr_ifru.ifru_hwaddr.sa_data[i] = b as libc::c_char;
+            }
+        }
+
+        let res = unsafe { libc::ioctl(sock, libc::SIOCSIFHWADDR as _, &ifr) };
+        if res < 0 {
+            let last_err = std::io::Error::last_os_error();
+            if last_err.raw_os_error() == Some(libc::EPERM)
+                || last_err.raw_os_error() == Some(libc::EACCES)
+            {
+                return Err(NetlinkError::PermissionDenied(last_err.to_string()));
+            }
+            if last_err.raw_os_error() == Some(libc::ENODEV) {
+                return Err(NetlinkError::InterfaceNotFound(ifname.to_string()));
+            }
+            return Err(NetlinkError::IoctlFailed(format!(
+                "SIOCSIFHWADDR falhou: {}",
+                last_err
+            )));
+        }
+
+        info!(
+            "Endereço MAC da interface '{}' configurado para {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            ifname, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        Ok(())
+    }
+
     fn copy_ifname(
         ifname: &str,
         dest: &mut [libc::c_char; libc::IFNAMSIZ],

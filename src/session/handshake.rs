@@ -172,18 +172,17 @@ impl HandshakeNegotiator {
             let mut decrypted = vec![0u8; 256];
             let len = rsa
                 .private_decrypt(payload, &mut decrypted, Padding::PKCS1)
-                .or_else(|_| rsa.private_decrypt(payload, &mut decrypted, Padding::NONE))
                 .map_err(|e| {
                     HandshakeError::RsaDecryptionFailed(format!("Erro ao descriptografar: {}", e))
                 })?;
 
-            // Deriva ou extrai os 32 bytes da chave AES
-            let mut key = [0u8; 32];
-            if len >= 32 {
-                key.copy_from_slice(&decrypted[..32]);
-            } else {
-                key[..len].copy_from_slice(&decrypted[..len]);
+            if len < 32 {
+                return Err(HandshakeError::InvalidCryptoBlockSize(len).into());
             }
+
+            // Extrai estritamente os 32 bytes da chave AES
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&decrypted[..32]);
 
             self.session_key = Some(key);
             self.stage = HandshakeStage::CipherActivated;
