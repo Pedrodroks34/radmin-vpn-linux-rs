@@ -1,13 +1,11 @@
 //! Comunicação Inter-Processos (IPC) entre GUI/CLI e o serviço daemon Radmin VPN.
 //!
-//! Engenharia reversa dos binários RvRvpnGui.exe (FUN_004e8eb0, FUN_004e2ac0)
-//! e RvControlSvc.exe (0x40f040, 0x40f0c4, 0x51a420):
-//! - No Windows oficial: Named Pipe `\\.\pipe\RadminVpnGuiChannel`.
-//! - No Linux: Unix Domain Socket em `/run/radmin-vpn/gui.sock` (com fallback
-//!   para diretório de usuário ou caminho configurado).
-//! - Handshake inicial: Estrutura binária de 25 bytes (0x19 bytes):
+//! Protocolo IPC no Linux:
+//! - Unix Domain Socket com permissões restritas (0600 para o socket, 0700 para o diretório).
+//! - Caminho padrão: `/run/radmin-vpn/gui.sock` (com fallback para `~/.config/radmin-vpn/gui.sock` ou temporário).
+//! - Handshake inicial: Estrutura binária de 25 bytes (`0x19` bytes):
 //!   `[u32 magic=4][u32 flags=1][u32 pid][u32 reserved=0][u32 buf_size=0x80][u32 version=1][u8 status=1]`
-//! - Comandos de serviço FamRT/Qt5:
+//! - Despacho de Comandos:
 //!   - 0x03ec (1004): SwitchPower (conectar/ligar túnel)
 //!   - 0x03ed (1005): JoinNetwork (entrar em rede)
 //!   - 0x03ee (1006): CreateNetwork (criar nova rede)
@@ -20,11 +18,14 @@
 use crate::Result;
 use bytes::BufMut;
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{debug, info};
+use tokio::sync::broadcast;
+use tracing::{debug, error, info, warn};
 
 pub const IPC_HANDSHAKE_SIZE: usize = 25;
 pub const IPC_DEFAULT_MAGIC: u32 = 0x00000004;
@@ -32,6 +33,24 @@ pub const IPC_DEFAULT_FLAGS: u32 = 0x00000001;
 pub const IPC_DEFAULT_BUF_SIZE: u32 = 0x00000080;
 pub const IPC_DEFAULT_VERSION: u32 = 0x00000001;
 pub const IPC_STATUS_READY: u8 = 0x01;
+
+/// Resolve o caminho padrão do socket IPC, verificando /run e /tmp com base no usuário e existência.
+pub fn resolve_socket_path() -> PathBuf {
+    let system_path = PathBuf::from(crate::GUI_CHANNEL_PATH);
+    if system_path.exists() {
+        return system_path;
+    }
+    let uid = unsafe { libc::getuid() };
+    let user_path = PathBuf::from(format!("/tmp/radmin-vpn-{}/gui.sock", uid));
+    if user_path.exists() {
+        return user_path;
+    }
+    if unsafe { libc::geteuid() } == 0 {
+        system_path
+    } else {
+        user_path
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum IpcError {
@@ -197,7 +216,7 @@ impl IpcCommand {
     }
 
     /// Serializa o comando em framing binário:
-    /// `[u16 command_id][u32 payload_len][json/binary payload]`
+    /// `[u16 command_id][u32 payload_len][json payload]`
     pub fn serialize(&self) -> Result<Vec<u8>> {
         let payload = serde_json::to_vec(self)?;
         let mut buf = Vec::with_capacity(6 + payload.len());
@@ -213,8 +232,7 @@ impl IpcCommand {
             return Err(anyhow::anyhow!("Buffer IPC truncado (< 6 bytes)"));
         }
         let raw_id = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-        let _cmd_id =
-            IpcCommandId::from_u16(raw_id).ok_or_else(|| IpcError::UnknownCommand(raw_id))?;
+        let _cmd_id = IpcCommandId::from_u16(raw_id).ok_or(IpcError::UnknownCommand(raw_id))?;
         let len = u32::from_le_bytes(buf[2..6].try_into().unwrap()) as usize;
         if buf.len() < 6 + len {
             return Err(anyhow::anyhow!(
@@ -247,6 +265,11 @@ pub enum IpcResponse {
     NetworkList {
         networks: Vec<String>,
     },
+    NodeInfo {
+        node_id: u64,
+        virtual_ip: Option<String>,
+        online: bool,
+    },
 }
 
 impl IpcResponse {
@@ -277,6 +300,14 @@ impl IpcResponse {
     }
 }
 
+/// Handler abstrato para processar comandos do daemon.
+pub trait IpcHandler: Send + Sync + 'static {
+    fn handle(
+        &self,
+        cmd: IpcCommand,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = IpcResponse> + Send + '_>>;
+}
+
 /// Servidor IPC que escuta requisições de controle da GUI ou CLI via Unix Domain Socket.
 pub struct IpcServer {
     socket_path: PathBuf,
@@ -295,18 +326,25 @@ impl IpcServer {
         &self.socket_path
     }
 
-    /// Inicia o listener removendo sockets órfãos anteriores se existirem.
+    /// Inicia o listener garantindo permissões seguras (0700 dir, 0600 socket)
+    /// e removendo sockets órfãos anteriores se existirem.
     pub fn bind(&mut self) -> Result<()> {
         if let Some(parent) = self.socket_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
+            // Permissão restrita no diretório pai: 0700
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
         }
 
         let listener = UnixListener::bind(&self.socket_path)?;
+
+        // Permissão restrita no arquivo do socket: 0600
+        let _ = std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600));
+
         self.listener = Some(listener);
-        info!("IPC Server ouvindo em {:?}", self.socket_path);
+        info!("IPC Server ouvindo com segurança em {:?}", self.socket_path);
         Ok(())
     }
 
@@ -333,6 +371,117 @@ impl IpcServer {
         stream.write_all(&server_handshake.to_bytes()).await?;
 
         Ok((stream, client_handshake))
+    }
+
+    /// Executa o loop assíncrono do servidor atendendo múltiplos clientes concorrentes
+    /// com despacho real de comandos e encerramento gracioso via shutdown channel.
+    pub async fn run_loop<H: IpcHandler>(
+        mut self,
+        handler: Arc<H>,
+        mut shutdown_rx: broadcast::Receiver<()>,
+    ) -> Result<()> {
+        self.bind()?;
+        let listener = self.listener.take().unwrap();
+
+        info!("Loop de processamento IPC iniciado");
+
+        loop {
+            tokio::select! {
+                accept_res = listener.accept() => {
+                    match accept_res {
+                        Ok((mut stream, _addr)) => {
+                            let handler_clone = handler.clone();
+                            tokio::spawn(async move {
+                                // 1. Handshake do cliente
+                                let mut handshake_buf = [0u8; IPC_HANDSHAKE_SIZE];
+                                if let Err(e) = stream.read_exact(&mut handshake_buf).await {
+                                    warn!("Falha ao ler handshake IPC do cliente: {}", e);
+                                    return;
+                                }
+                                if let Err(e) = IpcHandshake::parse(&handshake_buf) {
+                                    warn!("Handshake IPC inválido do cliente: {}", e);
+                                    return;
+                                }
+                                // Responde com handshake do servidor
+                                let server_hs = IpcHandshake::new(std::process::id());
+                                if let Err(e) = stream.write_all(&server_hs.to_bytes()).await {
+                                    warn!("Falha ao responder handshake IPC: {}", e);
+                                    return;
+                                }
+
+                                // 2. Loop de leitura de comandos deste cliente
+                                loop {
+                                    let mut cmd_header = [0u8; 6];
+                                    match stream.read_exact(&mut cmd_header).await {
+                                        Ok(_) => {},
+                                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                                            debug!("Cliente IPC desconectou");
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            debug!("Erro de leitura IPC do cliente: {}", e);
+                                            break;
+                                        }
+                                    }
+
+                                    let payload_len = u32::from_le_bytes(cmd_header[2..6].try_into().unwrap()) as usize;
+                                    let mut payload = vec![0u8; payload_len];
+                                    if let Err(e) = stream.read_exact(&mut payload).await {
+                                        warn!("Falha ao ler payload do comando IPC: {}", e);
+                                        break;
+                                    }
+
+                                    let mut full_cmd = Vec::with_capacity(6 + payload_len);
+                                    full_cmd.extend_from_slice(&cmd_header);
+                                    full_cmd.extend_from_slice(&payload);
+
+                                    let cmd = match IpcCommand::deserialize(&full_cmd) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            warn!("Comando IPC malformado: {}", e);
+                                            let err_resp = IpcResponse::Error {
+                                                code: 400,
+                                                message: format!("Comando inválido: {}", e),
+                                            };
+                                            if let Ok(b) = err_resp.serialize() {
+                                                let _ = stream.write_all(&b).await;
+                                            }
+                                            continue;
+                                        }
+                                    };
+
+                                    let resp = handler_clone.handle(cmd).await;
+                                    match resp.serialize() {
+                                        Ok(resp_bytes) => {
+                                            if let Err(e) = stream.write_all(&resp_bytes).await {
+                                                warn!("Falha ao enviar resposta IPC: {}", e);
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Falha ao serializar resposta IPC: {}", e);
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!("Erro ao aceitar conexão IPC: {}", e);
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Sinal de encerramento IPC recebido. Finalizando servidor...");
+                    break;
+                }
+            }
+        }
+
+        if self.socket_path.exists() {
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
+        Ok(())
     }
 }
 
@@ -454,63 +603,96 @@ mod tests {
         assert_eq!(resp, parsed);
     }
 
-    #[tokio::test]
-    async fn test_ipc_server_client_handshake_and_exchange() {
-        let temp_dir = std::env::temp_dir();
-        let sock_path = temp_dir.join(format!("radmin_test_ipc_{}.sock", std::process::id()));
+    struct MockHandler;
+    impl IpcHandler for MockHandler {
+        fn handle(
+            &self,
+            cmd: IpcCommand,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = IpcResponse> + Send + '_>> {
+            Box::pin(async move {
+                match cmd {
+                    IpcCommand::QueryStatus => IpcResponse::Status {
+                        connected: true,
+                        virtual_ip: Some("26.1.2.3".to_string()),
+                        active_network: Some("RedeMock".to_string()),
+                        peers_online: 2,
+                    },
+                    IpcCommand::JoinNetwork { network_name, .. } => IpcResponse::Success {
+                        message: format!("Conectado a {}", network_name),
+                    },
+                    IpcCommand::EnumNetworks => IpcResponse::NetworkList {
+                        networks: vec!["RedeMock".to_string()],
+                    },
+                    IpcCommand::GetNodeInfo { node_id } => IpcResponse::NodeInfo {
+                        node_id,
+                        virtual_ip: Some("26.1.2.99".to_string()),
+                        online: true,
+                    },
+                    _ => IpcResponse::Success {
+                        message: "OK".to_string(),
+                    },
+                }
+            })
+        }
+    }
 
-        let mut server = IpcServer::new(&sock_path);
-        server.bind().unwrap();
+    #[tokio::test]
+    async fn test_ipc_server_client_full_lifecycle_and_multiclient() {
+        let temp_dir = std::env::temp_dir();
+        let sock_path = temp_dir.join(format!("radmin_test_ipc_mc_{}.sock", std::process::id()));
+
+        let server = IpcServer::new(&sock_path);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
         let srv_sock_path = sock_path.clone();
-        let server_task = tokio::spawn(async move {
-            let (mut stream, handshake) = server.accept_client().await.unwrap();
-            assert_eq!(handshake.magic, IPC_DEFAULT_MAGIC);
+        let handler = Arc::new(MockHandler);
 
-            // Ler comando enviado pelo cliente
-            let mut cmd_header = [0u8; 6];
-            stream.read_exact(&mut cmd_header).await.unwrap();
-            let len = u32::from_le_bytes(cmd_header[2..6].try_into().unwrap()) as usize;
-            let mut payload = vec![0u8; len];
-            stream.read_exact(&mut payload).await.unwrap();
-
-            let mut full_cmd = Vec::new();
-            full_cmd.extend_from_slice(&cmd_header);
-            full_cmd.extend_from_slice(&payload);
-            let cmd = IpcCommand::deserialize(&full_cmd).unwrap();
-            assert_eq!(cmd, IpcCommand::QueryStatus);
-
-            // Responder ao cliente
-            let resp = IpcResponse::Status {
-                connected: true,
-                virtual_ip: Some("26.1.2.3".to_string()),
-                active_network: Some("RedeEngReversa".to_string()),
-                peers_online: 3,
-            };
-            let resp_bytes = resp.serialize().unwrap();
-            stream.write_all(&resp_bytes).await.unwrap();
+        let server_handle = tokio::spawn(async move {
+            server.run_loop(handler, shutdown_rx).await.unwrap();
         });
 
-        let mut client = IpcClient::connect(&srv_sock_path).await.unwrap();
-        assert_eq!(client.server_pid(), std::process::id());
+        // Aguarda inicialização do socket
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let resp = client.send_command(&IpcCommand::QueryStatus).await.unwrap();
-        match resp {
+        // Cliente 1
+        let mut client1 = IpcClient::connect(&srv_sock_path).await.unwrap();
+        assert_eq!(client1.server_pid(), std::process::id());
+
+        let resp1 = client1
+            .send_command(&IpcCommand::QueryStatus)
+            .await
+            .unwrap();
+        match resp1 {
             IpcResponse::Status {
                 connected,
                 virtual_ip,
-                active_network,
-                peers_online,
+                ..
             } => {
                 assert!(connected);
                 assert_eq!(virtual_ip, Some("26.1.2.3".to_string()));
-                assert_eq!(active_network, Some("RedeEngReversa".to_string()));
-                assert_eq!(peers_online, 3);
             }
             _ => panic!("Resposta inesperada"),
         }
 
-        server_task.await.unwrap();
-        let _ = std::fs::remove_file(&sock_path);
+        // Cliente 2 concorrente
+        let mut client2 = IpcClient::connect(&srv_sock_path).await.unwrap();
+        let resp2 = client2
+            .send_command(&IpcCommand::JoinNetwork {
+                network_name: "RedeNova".to_string(),
+                password: "123".to_string(),
+            })
+            .await
+            .unwrap();
+
+        match resp2 {
+            IpcResponse::Success { message } => assert_eq!(message, "Conectado a RedeNova"),
+            _ => panic!("Resposta inesperada"),
+        }
+
+        // Encerramento gracioso
+        shutdown_tx.send(()).unwrap();
+        server_handle.await.unwrap();
+
+        assert!(!sock_path.exists());
     }
 }

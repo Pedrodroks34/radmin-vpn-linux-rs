@@ -39,3 +39,9 @@ impl PeerManager {
             .find(|p| p.node_address.ip == addr.ip() && p.node_address.port == addr.port())
     }
 }
+
+impl Default for PeerManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}

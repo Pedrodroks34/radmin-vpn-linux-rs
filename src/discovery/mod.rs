@@ -37,3 +37,9 @@ impl NodeResolver {
         ))
     }
 }
+
+impl Default for NodeResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}

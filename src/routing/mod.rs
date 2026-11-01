@@ -27,3 +27,9 @@ impl RouteTable {
         ))
     }
 }
+
+impl Default for RouteTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}

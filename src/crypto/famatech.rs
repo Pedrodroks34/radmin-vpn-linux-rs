@@ -29,6 +29,7 @@ pub enum CryptoError {
 /// Calcula o checksum aditivo little-endian de 64 bits (FUN_1006a0c0).
 /// Percorre palavras de 64 bits em little-endian. Se restar cauda (< 8 bytes),
 /// preenche com zeros à direita até 8 bytes e soma.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn famatech_checksum_64(data: &[u8]) -> u64 {
     let mut sum: u64 = 0;
     let chunks = data.chunks_exact(8);
@@ -80,7 +81,7 @@ pub fn famatech_pad_and_sign(payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let total_len = ((payload_len + 24) / BLOCK_SIZE) * BLOCK_SIZE;
     let pad_len = total_len - payload_len;
 
-    debug_assert!(pad_len >= MIN_PAD_LEN && pad_len <= MAX_PAD_LEN);
+    debug_assert!((MIN_PAD_LEN..=MAX_PAD_LEN).contains(&pad_len));
 
     let mut buf = vec![0u8; total_len];
     buf[..payload_len].copy_from_slice(payload);
@@ -104,7 +105,7 @@ pub fn famatech_pad_and_sign(payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
 
 /// Verifica a integridade, remove o trailer e descarta o padding (FUN_10069f90).
 pub fn famatech_verify_and_unpad(buf: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    if buf.len() < BLOCK_SIZE || buf.len() % BLOCK_SIZE != 0 {
+    if buf.len() < BLOCK_SIZE || !buf.len().is_multiple_of(BLOCK_SIZE) {
         return Err(CryptoError::InvalidCiphertextSize { size: buf.len() });
     }
 
@@ -219,7 +220,7 @@ impl FamatechCipherState {
     /// 3. Atualiza dec_iv com o último bloco de 16 bytes do ciphertext recebido
     /// 4. Valida padding 0xCC, verifica integridade do trailer e retorna payload original
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.len() < BLOCK_SIZE || ciphertext.len() % BLOCK_SIZE != 0 {
+        if ciphertext.len() < BLOCK_SIZE || !ciphertext.len().is_multiple_of(BLOCK_SIZE) {
             return Err(CryptoError::InvalidCiphertextSize {
                 size: ciphertext.len(),
             });
@@ -269,7 +270,7 @@ mod tests {
             let padded = famatech_pad_and_sign(&data).expect("padding deve ter sucesso");
             assert_eq!(padded.len() % 16, 0);
             let pad_len = padded[padded.len() - 1] as usize;
-            assert!(pad_len >= 9 && pad_len <= 24);
+            assert!((9..=24).contains(&pad_len));
             assert_eq!(padded.len() - pad_len, len);
 
             let unpadded = famatech_verify_and_unpad(&padded).expect("unpad deve ter sucesso");

@@ -10,21 +10,11 @@ pub struct VirtualAddress {
     pub gateway: Option<std::net::IpAddr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LocalIdentity {
     pub device_id: Option<DeviceId>,
     pub auth_session: Option<crate::protocol::AuthSessionId>,
     pub virtual_address: Option<VirtualAddress>,
-}
-
-impl Default for LocalIdentity {
-    fn default() -> Self {
-        Self {
-            device_id: None,
-            auth_session: None,
-            virtual_address: None,
-        }
-    }
 }
 
 pub struct IdentityStore;

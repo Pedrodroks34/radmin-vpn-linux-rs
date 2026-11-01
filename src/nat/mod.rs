@@ -1,9 +1,11 @@
 pub mod stun;
+pub mod teredo;
 
 pub use stun::{
     StunClient, StunError, StunMappedAddress, StunMessage, STUN_BINDING_REQUEST,
     STUN_BINDING_RESPONSE,
 };
+pub use teredo::{TeredoAddress, TeredoDecapsulated, TeredoPacket, UdpHolePuncher};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;

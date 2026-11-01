@@ -34,3 +34,9 @@ impl Authenticator {
         ))
     }
 }
+
+impl Default for Authenticator {
+    fn default() -> Self {
+        Self::new()
+    }
+}

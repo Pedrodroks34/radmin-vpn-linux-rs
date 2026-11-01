@@ -35,3 +35,9 @@ impl NetworkManager {
         ))
     }
 }
+
+impl Default for NetworkManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}

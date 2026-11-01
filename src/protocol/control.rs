@@ -3,17 +3,18 @@
 //! Engenharia reversa a partir da tabela de descritores de propriedades do
 //! RvControlSvc.exe (endereço 0x00498fe0 e função 0x4aec20):
 //!
-//! Principais tags TLV de controle:
+//! Principais tags TLV de controle (verificadas na tabela de registro 0x00498fe0):
 //! - 0x010001d8 (TAG_CLIENT_VERSION): Versão do cliente (uint32)
 //! - 0x010001db (TAG_MACHINE_ID): ID único da máquina/instalação (uint32)
 //! - 0x010001de (TAG_VIRTUAL_IPV4): Endereço IPv4 virtual atribuído (26.x.x.x, uint32)
 //! - 0x010001df (TAG_SESSION_TOKEN): Token identificador da sessão ativa (uint32)
 //! - 0x0100032b (TAG_PEER_STATUS): Estado do peer (1=Offline, 2=Online, 3=Connecting)
+//! - 0x010001e3 (TAG_MEMBER_COUNT): Contagem de membros da rede (uint32)
 //! - 0x020001d5 (TAG_NETWORK_ID): Identificador único da rede Radmin (uint64)
 //! - 0x020001e1 (TAG_TIMESTAMP): Timestamp em milissegundos UTC (uint64)
 //! - 0x090001ca (TAG_RSA_PUBLIC_KEY): Chave pública RSA-2048 (256 bytes)
 //! - 0x090001dc (TAG_NETWORK_NAME): Nome da rede virtual (string UTF-8)
-//! - 0x090001dd (TAG_PASSWORD_HASH): Hash da senha da rede (32 bytes SHA-256)
+//! - 0x090001dd (TAG_PASSWORD_HASH): Hash SHA-1 da senha (20 bytes, CALG_SHA1 0x8004 em shelper.dll)
 //! - 0x090001e0 (TAG_VIRTUAL_IPV6): Endereço IPv6 virtual / Teredo (16 bytes)
 
 use crate::protocol::tlv::{TlvMessage, TlvTag};
@@ -27,6 +28,7 @@ pub const TAG_MACHINE_ID: TlvTag = TlvTag(0x010001db);
 pub const TAG_VIRTUAL_IPV4: TlvTag = TlvTag(0x010001de);
 pub const TAG_SESSION_TOKEN: TlvTag = TlvTag(0x010001df);
 pub const TAG_PEER_STATUS: TlvTag = TlvTag(0x0100032b);
+pub const TAG_MEMBER_COUNT: TlvTag = TlvTag(0x010001e3);
 pub const TAG_NETWORK_ID: TlvTag = TlvTag(0x020001d5);
 pub const TAG_TIMESTAMP: TlvTag = TlvTag(0x020001e1);
 pub const TAG_RSA_PUBLIC_KEY: TlvTag = TlvTag(0x090001ca);
@@ -34,6 +36,11 @@ pub const TAG_NETWORK_NAME: TlvTag = TlvTag(0x090001dc);
 pub const TAG_PASSWORD_HASH: TlvTag = TlvTag(0x090001dd);
 pub const TAG_VIRTUAL_IPV6: TlvTag = TlvTag(0x090001e0);
 pub const TAG_NODE_ID: TlvTag = TlvTag(0x02000008);
+
+/// Gera o hash da senha de rede no padrão verificado do Radmin VPN (SHA-1, CALG_SHA1 0x8004 em shelper.dll).
+pub fn hash_network_password(password: &str) -> [u8; 20] {
+    openssl::sha::sha1(password.as_bytes())
+}
 
 #[derive(Debug, Error)]
 pub enum ControlProtocolError {
@@ -136,7 +143,7 @@ impl ControlMessage {
                 node_id,
             } => {
                 msg.add_u32(TAG_SESSION_TOKEN, *session_token);
-                msg.add_u32(TAG_VIRTUAL_IPV4, u32::from(virtual_ip.to_bits()));
+                msg.add_u32(TAG_VIRTUAL_IPV4, virtual_ip.to_bits());
                 msg.add_u64(TAG_NODE_ID, *node_id);
             }
             Self::JoinNetwork {
@@ -156,7 +163,7 @@ impl ControlMessage {
             } => {
                 msg.add_u64(TAG_NETWORK_ID, *network_id);
                 msg.add_buffer(TAG_NETWORK_NAME, name.as_bytes().to_vec());
-                msg.add_u32(TAG_PEER_STATUS, *member_count);
+                msg.add_u32(TAG_MEMBER_COUNT, *member_count);
             }
             Self::PeerInfo {
                 node_id,
@@ -165,7 +172,7 @@ impl ControlMessage {
                 last_seen_ms,
             } => {
                 msg.add_u64(TAG_NODE_ID, *node_id);
-                msg.add_u32(TAG_VIRTUAL_IPV4, u32::from(virtual_ip.to_bits()));
+                msg.add_u32(TAG_VIRTUAL_IPV4, virtual_ip.to_bits());
                 msg.add_u32(TAG_PEER_STATUS, (*status).into());
                 msg.add_u64(TAG_TIMESTAMP, *last_seen_ms);
             }
@@ -260,11 +267,14 @@ impl ControlMessage {
         }
 
         // 7. Verificar se é NetworkInfo
-        if let (Some(net_id), Some(name_bytes), Some(members)) = (
+        if let (Some(net_id), Some(name_bytes)) = (
             msg.get_u64(TAG_NETWORK_ID),
             msg.get_buffer(TAG_NETWORK_NAME),
-            msg.get_u32(TAG_PEER_STATUS),
         ) {
+            let members = msg
+                .get_u32(TAG_MEMBER_COUNT)
+                .or_else(|| msg.get_u32(TAG_PEER_STATUS))
+                .unwrap_or(0);
             let name = String::from_utf8(name_bytes.to_vec())?;
             return Ok(Self::NetworkInfo {
                 network_id: net_id,
@@ -317,9 +327,11 @@ mod tests {
 
     #[test]
     fn test_join_network_roundtrip() {
+        let hash = hash_network_password("secret123");
+        assert_eq!(hash.len(), 20); // SHA-1 / CALG_SHA1 0x8004
         let msg = ControlMessage::JoinNetwork {
             network_name: "RedeAmigos".to_string(),
-            password_hash: vec![0xaa; 32],
+            password_hash: hash.to_vec(),
         };
 
         let bytes = msg.to_bytes();
