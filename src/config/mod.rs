@@ -1,21 +1,6 @@
-//! # Módulo `config` — Configuração persistente
-//
-//! ## Evidências da engenharia reversa (REA)
-//
-//! **Confirmado:**
-//! - Registro do Windows: `HKLM\SOFTWARE\Famatech\RadminVPN\1.0`.
-//! - Logs: `RadminVPN_%hs_%04u%02u%02u_%02u%02u%02u%03d.log`.
-//! - Driver versions: `Driver.1.0/NetMP60.inf` e `Driver.1.1/NetMP60.inf`.
-//! - `InstallDriverStatus`, `DriverInstallStatus` — status de instalação do driver.
-//!
-//! **Mapeamento Linux:**
-//! - Configuração em `~/.config/radmin-vpn/config.toml`.
-//! - Logs em `~/.local/share/radmin-vpn/logs/` ou `/var/log/radmin-vpn/`.
-
 use crate::Result;
 use serde::{Deserialize, Serialize};
 
-/// Configuração do cliente
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: String,
@@ -52,7 +37,6 @@ impl Default for Config {
     }
 }
 
-/// Carrega configuração de arquivo
 pub fn load(path: &std::path::Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
@@ -62,7 +46,6 @@ pub fn load(path: &std::path::Path) -> Result<Config> {
     Ok(config)
 }
 
-/// Salva configuração em arquivo
 pub fn save(path: &std::path::Path, config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

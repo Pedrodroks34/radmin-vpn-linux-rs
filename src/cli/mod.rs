@@ -1,18 +1,3 @@
-//! # Módulo `cli` — Interface de linha de comando
-//
-//! ## Evidências da engenharia reversa (REA)
-//
-//! **Confirmado:**
-//! - GUI Windows: `RvRvpnGui.exe` (Qt 5.15/QML) com widgets `node_widget`,
-//!   `networkwidget`, `StatusIndicator`, `UnsupportedRegionBar`, `ReportReason`.
-//! - Status visuais: `node_applicant.svg`, `node_connecting.svg`,
-//!   `ping_disconnected.svg`, `disconnected.svg`.
-//! - Comandos de rede inferidos: join, leave, create, delete, enable, update.
-//!
-//! **Mapeamento Linux:**
-//! - CLI substitui a GUI Qt.
-//! - Comunica com o daemon via socket Unix (`/run/radmin-vpn/gui.sock`).
-
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -24,25 +9,25 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Entrar em uma rede virtual
+
     Join {
         #[arg(short, long)]
         network: String,
     },
-    /// Sair de uma rede virtual
+
     Leave {
         #[arg(short, long)]
         network: String,
     },
-    /// Listar redes e peers
+
     List,
-    /// Mostrar status da conexão
+
     Status,
-    /// Iniciar o daemon
+
     Start,
-    /// Parar o daemon
+
     Stop,
-    /// Configurar o cliente
+
     Config,
 }
 

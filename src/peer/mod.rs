@@ -1,33 +1,15 @@
-//! # Módulo `peer` — Descoberta e gerenciamento de membros (nós)
-//
-//! ## Evidências da engenharia reversa (REA)
-//
-//! **Confirmado:**
-//! - `ROLClient_GetNodes` e `ROLClient_GetNodeRegionSupport` — obtenha nós e suporte regional.
-//! - `ROLClient_EnumPublicNetworks` — enumere redes públicas.
-//! - `VCNodeMapEntry`, `VCUiNode`, `VCUiNetworkItem` — nós e itens de rede na UI.
-//! - `USNodeVisualStatus`, `W4ENodeVisualStatus` — status visual (aplicant, connecting, disconnected).
-//! - `ChatRegionSupportCache` — cache de suporte de região para chat.
-//!
-//! **Desconhecido:**
-//! - Formato da lista de nós retornada pelo servidor.
-//! - Como peers são selecionados para comunicação direta vs relay.
-//! - Detecção de entrada/saída de membros.
-
 use crate::protocol::RosNodeAddress;
 use crate::Result;
 
-/// Status visual de um nó (inferido da GUI QML: node_applicant, node_connecting, etc.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeVisualStatus {
     Unknown,
-    Applicant,   // solicitando entrada
-    Connecting,  // estabelecendo conexão
-    Connected,   // conectado
+    Applicant,
+    Connecting,
+    Connected,
     Disconnected,
 }
 
-/// Um membro/peer na rede virtual
 #[derive(Debug, Clone)]
 pub struct Peer {
     pub node_address: RosNodeAddress,
@@ -36,7 +18,6 @@ pub struct Peer {
     pub region: Option<String>,
 }
 
-/// Gerenciador de peers (placeholder)
 pub struct PeerManager {
     pub peers: Vec<Peer>,
 }

@@ -1,168 +1,175 @@
-# Análise do Projeto de Referência — Radmin VPN para Linux (Wine)
+# Reference Project Analysis: Radmin VPN for Linux (Wine)
 
-**Alvo:** https://github.com/baptisterajaut/radmin-vpn-linux (clonado em `/home/pedrodroks/Downloads/radmin/references/radmin-vpn-linux/`)
+**Target:** https://github.com/baptisterajaut/radmin-vpn-linux (cloned to `references/radmin-vpn-linux/`, git-ignored)
 
-**Licença:** GPL-3.0
+**License:** GPL-3.0
 
-**Objetivo desta análise:** extrair descobertas de engenharia reversa do projeto externo e cruzá-las com nossa engenharia reversa estática + tráfego capturado, para acelerar a construção de um cliente Rust independente — sem incorporar Wine, drivers Windows, DLLs ou hooks externos como dependência.
+**Goal of this analysis:** extract reverse engineering findings from the external project and cross-check them against our static reverse engineering and captured traffic. The aim is to speed up building an independent Rust client without using Wine, Windows drivers, DLLs, or external hooks as dependencies.
+
+**Scope note:** the findings in sections 2 and 3 describe the external project's own work. They are not verified by this repository's captures unless section 4 says so.
 
 ---
 
-## 1. Arquitetura do Projeto Externo
+## 1. Architecture of the external project
 
-O projeto roda o cliente oficial Windows (`RvControlSvc.exe` + `RvRvpnGui.exe`) sob **Wine**, substituindo componentes incompatíveis por implementações nativas Linux. O fluxo de dados é:
+The project runs the official Windows client (`RvControlSvc.exe` and `RvRvpnGui.exe`) under **Wine**, replacing incompatible components with native Linux implementations. The data flow is:
 
 ```
 RvControlSvc.exe (Wine)
     ├─ DeviceIoControl \\.\RVPNNETMP (IOCTLs: VERSION, STATUS, CONNECT, SETUP, PEERMAC, ...)
     │     │
     │     ▼
-    └─ rvpnnetmp.sys (driver shim PE, rodando sob Wine)
-            │ TLV-encoded frames via named pipes (FIFOs)
-            │   Z:\tmp\rvpn_b2d   (bridge→driver)
-            │   Z:\tmp\rvpn_d2b_high (driver→bridge, alta prioridade)
-            │   Z:\tmp\rvpn_d2b_low  (driver→bridge, baixa prioridade)
+    └─ rvpnnetmp.sys (PE shim driver, running under Wine)
+            │ TLV-encoded frames over named pipes (FIFOs)
+            │   Z:\tmp\rvpn_b2d         (bridge to driver)
+            │   Z:\tmp\rvpn_d2b_high    (driver to bridge, high priority)
+            │   Z:\tmp\rvpn_d2b_low     (driver to bridge, low priority)
             ▼
-    tap_bridge (nativo Linux)
-            │ [u16 len][frame] sobre FIFO / raw frame sobre TAP
+    tap_bridge (native Linux)
+            │ [u16 len][frame] over FIFO / raw frame over TAP
             ▼
-    TAP device (radminvpn0) ←─ rede virtual L2 visível ao Linux
+    TAP device (radminvpn0) ←─ virtual L2 network visible to Linux
 ```
 
-Componentes principais:
+Main components:
 
-| Componente | Tipo | Papel |
+| Component | Type | Role |
 |---|---|---|
-| `rvpnnetmp.sys` | driver PE (mingw) | Emula o NDIS miniport `NetMP60.sys`. Cria `\Device\RVPNNETMP`. Aceita IOCTLs do serviço, enfileira frames em IRP queue, faz roteamento por MAC, envia/recebe via FIFOs. |
-| `tap_bridge` | binário nativo C | Lê/grava frames entre TAP Linux e FIFOs. Duas threads (incoming/outgoing). ARP snoop + gratuitous ARP. Replicação de multicast Minecraft. Filtros JSON. |
-| `adapter_hook.dll` | DLL PE injetada | IAT hooks no `RvControlSvc.exe` e `RvROLClient.dll`: renomeia adaptador, `RegSetKeySecurity` no-op, `GetProcAddress` hook para `GetNameInfoW`, perflib stubs, `LoadLibrary` watcher para `RvROLClient.dll`. |
-| `rvpn_launcher.exe` | EXE PE injecor | Cria `RvControlSvc.exe` suspenso, injeta `adapter_hook.dll` via `CreateRemoteThread`+`LoadLibraryA`. |
-| `drvinst.exe` | EXE PE stub | Substitui o instalador de driver NDIS da Famatech (causaria `abort()` no Wine). Retorna 0. |
-| `netsh.exe/netsh64.exe` | EXE PE wrapper | Traduz comandos `netsh interface ip` do Radmin para `ip addr`/`ip link` no Linux via arquivo de relay. |
-| `rvpn_dnsfix.so` | LD_PRELOAD (glibc) | Intercepta `getnameinfo`/`gethostbyaddr` para endereços privados → retorna numérico imediatamente (evita PTR bloqueado). |
-| `rvpn_reuseport.so` | LD_PRELOAD (wineserver) | Força `SO_REUSEPORT` em todo socket TCP criado pelo wineserver, permitindo SO_REUSEADDR duplo no Windows (NAT traversal). |
+| `rvpnnetmp.sys` | PE driver (mingw) | Emulates the NDIS miniport `NetMP60.sys`. Creates `\Device\RVPNNETMP`. Accepts IOCTLs from the service, queues frames in an IRP queue, routes by MAC, and sends and receives through FIFOs. |
+| `tap_bridge` | native C binary | Reads and writes frames between the Linux TAP and the FIFOs. Two threads (incoming and outgoing). ARP snooping and gratuitous ARP. Minecraft multicast replication. JSON filters. |
+| `adapter_hook.dll` | injected PE DLL | IAT hooks in `RvControlSvc.exe` and `RvROLClient.dll`: renames the adapter, no-op `RegSetKeySecurity`, `GetProcAddress` hook for `GetNameInfoW`, perflib stubs, `LoadLibrary` watcher for `RvROLClient.dll`. |
+| `rvpn_launcher.exe` | PE injector | Creates `RvControlSvc.exe` suspended and injects `adapter_hook.dll` with `CreateRemoteThread` and `LoadLibraryA`. |
+| `drvinst.exe` | PE stub | Replaces Famatech's NDIS driver installer, which would cause `abort()` under Wine. Returns 0. |
+| `netsh.exe` / `netsh64.exe` | PE wrapper | Translates the Radmin `netsh interface ip` commands into `ip addr` and `ip link` on Linux, through a relay file. |
+| `rvpn_dnsfix.so` | LD_PRELOAD (glibc) | Intercepts `getnameinfo` and `gethostbyaddr`. For private addresses, returns the numeric form immediately (avoids blocked PTR lookups). |
+| `rvpn_reuseport.so` | LD_PRELOAD (wineserver) | Forces `SO_REUSEPORT` on every TCP socket created by the wineserver, allowing double `SO_REUSEADDR` on Windows (NAT traversal). |
 
 ---
 
-## 2. Descobertas Técnicas Extraídas
+## 2. Technical findings extracted from the external project
 
-### 2.1 Protocolo de Frame (TLV)
+These findings are the reference project's own claims, taken from its comments and code. They are not verified in this repository.
 
-Extraído dos comentários e código de `rvpnnetmp.c`:
+### 2.1 Frame protocol (TLV)
 
-| Contexto | Formato | Campo 1 | Campo 2 | Campo 3 |
+Extracted from the comments and code of `rvpnnetmp.c`:
+
+| Context | Format | Field 1 | Field 2 | Field 3 |
 |---|---|---|---|---|
-| Service Read (driver→serviço) | TLV, modo >= 2 | `u32 dest_mac_prefix` (host byte order, byte-swapado) | `u32 frame_len` | `frame_data` (mínimo 60 bytes, zero-padded) |
-| Service Write (serviço→driver) | raw frame | Ethernet frame (14 + payload) | — | — |
-| FIFO bridge (driver↔tap_bridge) | `[u16 len][frame]` | `u16 frame_len` (native byte order) | `frame_data` | — |
+| Service read (driver to service) | TLV, mode 2 or higher | `u32 dest_mac_prefix` (host byte order, byte-swapped) | `u32 frame_len` | `frame_data` (minimum 60 bytes, zero-padded) |
+| Service write (service to driver) | raw frame | Ethernet frame (14 bytes of header plus payload) | none | none |
+| Bridge FIFO (driver and tap_bridge) | `[u16 len][frame]` | `u16 frame_len` (native byte order) | `frame_data` | none |
 
-**Detalhe importante do TLV de leitura:** O `dest_mac_prefix` são os **primeiros 4 bytes do MAC de destino** do frame Ethernet, byte-swapados (`ntohl`). O serviço compara isso contra MACs de peers registrados via `IOCTL_RVPN_PEERMAC`. Sem o byte-swap, unicast não matcha nenhum peer → silenciosamente dropado.
+**Important detail of the read TLV:** `dest_mac_prefix` is the **first 4 bytes of the destination MAC** of the Ethernet frame, byte-swapped (`ntohl`). The service compares it with the MACs of peers registered through `IOCTL_RVPN_PEERMAC`. Without the byte swap, unicast frames match no peer and are silently dropped.
 
-**Padding:** Frames com menos de 60 bytes são zero-padded até 60 bytes (mínimo de frame Ethernet).
+**Padding:** frames shorter than 60 bytes are zero-padded to 60 bytes (the Ethernet minimum).
 
-### 2.2 IOCTLs Identificados
+### 2.2 IOCTLs identified
 
-Todos derivados da RE de `RvNetMP60.sys` e pontos de chamada de `RvControlSvc.exe`:
+All derived from the reverse engineering of `RvNetMP60.sys` and the call sites in `RvControlSvc.exe`:
 
-| IOCTL | Código | Entrada | Saída | Papel inferido |
+| IOCTL | Code | Input | Output | Inferred role |
 |---|---|---|---|---|
-| `IOCTL_RVPN_VERSION` | `0x0022C004` | 8B (versão + MAC) | 12B | Registro de versão. Se versão == 4: retorna `[status=0][MAC 6 bytes][pad 2]`. Senão: `[status=1]`. |
-| `IOCTL_RVPN_STATUS` | `0x00224018` | 0 | 4B | Status do adaptador. Bit 0 = media presente/ativo. Serviço checa `status != 0 && (status & 1)`. |
-| `IOCTL_RVPN_CONNECT` | `0x00224020` | 0 | 1B | Estado de conexão do NDIS. Retorna `0x20` (NdisMediaStateConnected). Se 0 bytes escritos, `DeviceIoControl` falha → `CDeviceRemoved`. |
-| `IOCTL_RVPN_SETLINK` | `0x00224010` | 0xB8B | 0xB8 | Estatísticas/link. Responde bloco zeroado de 0xB8 bytes. |
-| `IOCTL_RVPN_SETUP` | `0x0022801C` | 4B (modo) | 0 | Define modo de formato TLV. Modo >= 2 ativa `dest_mac_prefix` no TLV de leitura. |
-| `IOCTL_RVPN_PEERMAC` | `0x00228014` | 6B (MAC) | 0 | Registra qual `FILE_OBJECT` (handle) responde a qual MAC de peer. Usado pelo RX thread para rotear unicast. |
-| `IOCTL_RVPN_SETMAC` | `0x00228024` | variável | variável | ACK de propriedade por-peer. Retorna 1 byte. |
+| `IOCTL_RVPN_VERSION` | `0x0022C004` | 8 bytes (version and MAC) | 12 bytes | Version registration. If version is 4, returns `[status=0][MAC 6 bytes][pad 2]`. Otherwise `[status=1]`. |
+| `IOCTL_RVPN_STATUS` | `0x00224018` | 0 | 4 bytes | Adapter status. Bit 0 means media present and active. The service checks `status != 0 && (status & 1)`. |
+| `IOCTL_RVPN_CONNECT` | `0x00224020` | 0 | 1 byte | NDIS connection state. Returns `0x20` (`NdisMediaStateConnected`). If 0 bytes are written, `DeviceIoControl` fails and the service sees `CDeviceRemoved`. |
+| `IOCTL_RVPN_SETLINK` | `0x00224010` | 0xB8B | 0xB8 | Statistics or link. Responds with a zeroed block of 0xB8 bytes. |
+| `IOCTL_RVPN_SETUP` | `0x0022801C` | 4 bytes (mode) | 0 | Sets the TLV format mode. Mode 2 or higher enables `dest_mac_prefix` in the read TLV. |
+| `IOCTL_RVPN_PEERMAC` | `0x00228014` | 6 bytes (MAC) | 0 | Registers which `FILE_OBJECT` (handle) answers for which peer MAC. Used by the RX thread to route unicast. |
+| `IOCTL_RVPN_SETMAC` | `0x00228024` | variable | variable | Per-peer ownership ACK. Returns 1 byte. |
 
-### 2.3 FIFOs (Named Pipes via Wine Z: drive)
+### 2.3 FIFOs (named pipes through Wine's `Z:` drive)
 
-| Caminho | Direção | Propósito |
+| Path | Direction | Purpose |
 |---|---|---|
-| `Z:\tmp\rvpn_b2d` | bridge→driver | Frames do TAP chegando ao serviço (RX) |
-| `Z:\tmp\rvpn_d2b_high` | driver→bridge | Alta prioridade: TCP, ICMP, unicast UDP, ARP |
-| `Z:\tmp\rvpn_d2b_low` | driver→bridge | Baixa prioridade: broadcast, multicast, não-IP |
-| `Z:\tmp\rvpn_d2b` | legião | Pipe único legado — não usado pelo código novo |
+| `Z:\tmp\rvpn_b2d` | bridge to driver | Frames from the TAP arriving at the service (RX) |
+| `Z:\tmp\rvpn_d2b_high` | driver to bridge | High priority: TCP, ICMP, unicast UDP, ARP |
+| `Z:\tmp\rvpn_d2b_low` | driver to bridge | Low priority: broadcast, multicast, non-IP |
+| `Z:\tmp\rvpn_d2b` | legacy | Single legacy pipe, not used by the new code |
 
-### 2.4 Roteamento por MAC (PeerMAC)
+### 2.4 MAC routing (PeerMAC)
 
-O driver mantém uma tabela de pares `(FILE_OBJECT, MAC[6])`, dinâmica (começa em 16 slots, dobra até 4096). Frames unicast são roteados para o `FILE_OBJECT` cujo MAC de destino bate. Frames de grupo (broadcast/multicast, bit 0 do primeiro byte do MAC setado) são entregues a **um IRP por `FILE_OBJECT` único**.
+The driver keeps a table of pairs `(FILE_OBJECT, MAC[6])`. It is dynamic: it starts with 16 slots and doubles up to 4,096. Unicast frames go to the `FILE_OBJECT` whose MAC matches the destination. Group frames (broadcast or multicast, where bit 0 of the first MAC byte is set) are delivered to **one IRP per distinct `FILE_OBJECT`**.
 
-### 2.5 Detecção de Prioridade (Driver→Bridge)
+### 2.5 Priority detection (driver to bridge)
 
-| Protocolo | Prioridade |
+| Protocol | Priority |
 |---|---|
-| ARP (0x0806) | Alta |
-| IPv4 TCP (6), ICMP (1) | Alta |
-| IPv4 UDP unicast (17, bit 0 do dst MAC claro) | Alta |
-| IPv6 TCP (6), ICMPv6 (58) | Alta |
-| IPv6 UDP unicast (17, bit 0 do dst MAC claro) | Alta |
-| Broadcast/Multicast, não-IP | Baixa |
+| ARP (0x0806) | High |
+| IPv4 TCP (6), ICMP (1) | High |
+| IPv4 UDP unicast (17, bit 0 of the destination MAC clear) | High |
+| IPv6 TCP (6), ICMPv6 (58) | High |
+| IPv6 UDP unicast (17, bit 0 of the destination MAC clear) | High |
+| Broadcast and multicast, non-IP | Low |
 
-### 2.6 Detecção de Endereço Uplink
+### 2.6 Uplink address detection
 
-O projeto determina qual interface é o "uplink" (caminho para a Internet) de duas formas:
-1. `GetBestInterface(8.8.8.8)` — confia apenas se o IfIndex estiver na enumeração de adaptadores.
-2. Fallback: o **único** adaptador UP que tem `FirstGatewayAddress` E um IPv4 roteável (não loopback, não link-local 169.254/16, não CGNAT 100.64/10).
+The project determines which interface is the "uplink" (the path to the Internet) in two ways:
 
-Se for ambíguo (0 ou >1 candidato), retorna 0 e não filtra (comportamento seguro).
+1. `GetBestInterface(8.8.8.8)`: trusted only if the IfIndex appears in the adapter enumeration.
+2. Fallback: the **only** adapter that is UP, has a `FirstGatewayAddress`, and has a routable IPv4 address (not loopback, not link-local 169.254/16, not CGNAT 100.64/10).
 
-### 2.7 Filtragem de Interfaces (GetAdaptersAddresses / GetAdaptersInfo)
+If the result is ambiguous (0 or more than 1 candidate), it returns 0 and does not filter, which is the safe behavior.
 
-O hook `adapter_hook.dll` intercepta ambas as funções da `IPHLPAPI`:
-- Renomeia o adaptador TAP para `Famatech Radmin VPN Ethernet Adapter` / `Radmin VPN`.
-- Oculta todo adaptador que **não** é o TAP nem o default-route, zerando `FirstUnicastAddress` (GAA) ou `IpAddressList` (GAI).
-- Isso impede que o conector ROL anuncie IPs de docker0/vmnet/tailscale como candidatos NAT.
+### 2.7 Interface filtering (`GetAdaptersAddresses` / `GetAdaptersInfo`)
 
-### 2.8 Reverse-DNS Short-Circuit (`rvpn_dnsfix.so`)
+The `adapter_hook.dll` intercepts both `IPHLPAPI` functions:
 
-Intercepta `getnameinfo`/`gethostbyaddr` no nível glibc (LD_PRELOAD no serviço). Para endereços privados (loopback 127/8, 10/8, 172.16/12, 192.168/16, APIPA 169.254/16, CGNAT 100.64/10), retorna imediatamente a forma numérica + porta numérica, sem consultar DNS. Endereços públicos passam para a função real.
+- Renames the TAP adapter to `Famatech Radmin VPN Ethernet Adapter` or `Radmin VPN`.
+- Hides every adapter that is neither the TAP nor the default route, by zeroing `FirstUnicastAddress` (GAA) or `IpAddressList` (GAI).
+- This stops the ROL connector from advertising the IPs of docker0, vmnet, or tailscale as NAT candidates.
 
-Mesmo feito para IPv6 (loopback, link-local, site-local, ULA fc00::/7).
+### 2.8 Reverse DNS short-circuit (`rvpn_dnsfix.so`)
+
+Intercepts `getnameinfo` and `gethostbyaddr` at the glibc level (LD_PRELOAD on the service). For private addresses (loopback 127/8, 10/8, 172.16/12, 192.168/16, APIPA 169.254/16, CGNAT 100.64/10), returns the numeric address and numeric port immediately, without querying DNS. Public addresses go to the real function.
+
+The same is done for IPv6 (loopback, link-local, site-local, and ULA fc00::/7).
 
 ### 2.9 SO_REUSEPORT (`rvpn_reuseport.so`)
 
-Intercepta `socket()` no `wineserver` (LD_PRELOAD). Para sockets TCP, força `SO_REUSEPORT` antes de `bind()`. Isso permite que o Radmin 2.1 faça **TCP port-reuse NAT traversal**: bind listener em `uplink:PORT`, adverte o mapping, depois bind sockets de saída na mesma porta local. Sem isso, o kernel Linux rejeita o segundo bind com `EADDRINUSE` que o wineserver relabela como `WSAEACCES`.
+Intercepts `socket()` in the `wineserver` (LD_PRELOAD). For TCP sockets, forces `SO_REUSEPORT` before `bind()`. This lets Radmin 2.1 perform **TCP port-reuse NAT traversal**: bind a listener on `uplink:PORT`, advertise the mapping, then bind outgoing sockets to the same local port. Without it, the Linux kernel rejects the second bind with `EADDRINUSE`, which the wineserver relabels as `WSAEACCES`.
 
-### 2.10 Perflib Stubs
+### 2.10 Perflib stubs
 
-Wine está faltando 4 exports da `advapi32`:
+Wine is missing four `advapi32` exports:
+
 - `PerfIncrementULongCounterValue`
 - `PerfIncrementULongLongCounterValue`
 - `PerfDecrementULongCounterValue`
 - `PerfDecrementULongLongCounterValue`
 
-O Radmin 2.1 resolve 7 exports em cascata; se qualquer um falhar, o counterset não é criado, o per-peer counter object fica NULL, e o handshake de peer é descartado → `error: 0x700000000`. O projeto responde com stubs no-op (`ERROR_SUCCESS`) via hook de `GetProcAddress`.
+Radmin 2.1 resolves seven exports in a cascade. If any of them fails, the counterset is not created, the per-peer counter object stays NULL, and the peer handshake is discarded, producing `error: 0x700000000`. The project answers with no-op stubs (`ERROR_SUCCESS`) through a `GetProcAddress` hook.
 
-### 2.11 Replicação de Multicast Minecraft
+### 2.11 Minecraft multicast replication
 
-O `tap_bridge` detecta pacotes IPv4 UDP para `224.0.2.60` (Minecraft LAN) e os replica como broadcast para `26.255.255.255` e `255.255.255.255`, recalculando checksum IP e zerando checksum UDP.
+`tap_bridge` detects IPv4 UDP packets to `224.0.2.60` (Minecraft LAN) and replicates them as broadcast to `26.255.255.255` and `255.255.255.255`, recalculating the IP checksum and zeroing the UDP checksum.
 
 ---
 
-## 3. Estruturas Binárias Identificadas
+## 3. Binary structures identified
 
-### 3.1 Estruturas Internas do Driver (`rvpnnetmp.c`)
+### 3.1 Internal driver structures (`rvpnnetmp.c`)
 
 ```c
-// Device extension (estado por instância do driver)
+// Device extension (per-instance driver state)
 struct _DEVICE_EXTENSION {
     BOOLEAN Connected;
     UCHAR   MacAddress[6];
     LONG    IoctlCount;
     LONG    StatusCount;
-    ULONG   SetupMode;       // setado por IOCTL_RVPN_SETUP (0x22801c)
-    HANDLE  FifoB2D;         // bridge→driver (RX)
-    HANDLE  FifoD2B_High;    // driver→bridge alta prioridade
-    HANDLE  FifoD2B_Low;     // driver→bridge baixa prioridade
+    ULONG   SetupMode;       // set by IOCTL_RVPN_SETUP (0x22801c)
+    HANDLE  FifoB2D;         // bridge to driver (RX)
+    HANDLE  FifoD2B_High;    // driver to bridge, high priority
+    HANDLE  FifoD2B_Low;     // driver to bridge, low priority
 };
 
-// Tabela de rotas por peer (MAC → FILE_OBJECT)
+// Per-peer route table (MAC to FILE_OBJECT)
 struct _PEER_ROUTE {
     PFILE_OBJECT fo;
     UCHAR mac[6];
 };
 
-// RX Ring (fallback quando não há IRP pendente)
+// RX ring (fallback when no IRP is pending)
 struct _RX_RING {
     volatile ULONG write_idx;
     volatile ULONG read_idx;
@@ -170,171 +177,174 @@ struct _RX_RING {
 };
 ```
 
-### 3.2 Formato de Frame Ethernet
+### 3.2 Ethernet frame format
 
-Campos padrão Ethernet II:
-- Offset 0-5: Destination MAC
-- Offset 6-11: Source MAC
-- Offset 12-13: Ethertype (big-endian): `0x0800` = IPv4, `0x0806` = ARP, `0x86DD` = IPv6
-- Offset 14+: payload
+Standard Ethernet II fields:
 
-Para IPv4:
-- Offset 14+9 (byte 23 do frame): IP protocol (1=ICMP, 6=TCP, 17=UDP)
-- Offset 14+12 (byte 26 do frame): Source IP
-- Offset 14+16 (byte 30 do frame): Destination IP
+- Offset 0 to 5: destination MAC.
+- Offset 6 to 11: source MAC.
+- Offset 12 to 13: EtherType (big-endian): `0x0800` IPv4, `0x0806` ARP, `0x86DD` IPv6.
+- Offset 14 onward: payload.
+
+For IPv4:
+
+- Offset 14 + 9 (byte 23 of the frame): IP protocol (1 ICMP, 6 TCP, 17 UDP).
+- Offset 14 + 12 (byte 26 of the frame): source IP.
+- Offset 14 + 16 (byte 30 of the frame): destination IP.
 
 ---
 
-## 4. Cruzamento com Nossa Engenharia Reversa
+## 4. Cross-check with our reverse engineering
 
-### 4.1 Confirmações Independentes (nossa RE estática + tráfego)
+### 4.1 Independent confirmations (our static RE and captured traffic)
 
-| Descoberta do projeto externo | Nossa evidência | Status |
+| Finding of the external project | Our evidence | Status |
 |---|---|---|
-| `\Device\RVPNNETMP` | Strings do `NetMP60_1_1_64.sys` | **Confirmada** |
-| Driver é NDIS 6 miniport, x86-64 | `file` + strings `.sys` | **Confirmada** |
-| Serviço é `RvControlSvc.exe` | Imports PE (`StartServiceCtrlDispatcherW`, etc.) | **Confirmada** |
-| GUI se conecta via named pipe `\\.\pipe\RadminVpnGuiChannel` | Strings do serviço | **Confirmada** |
-| Porta de controle TCP **17301** | Captura Wireshark (porta não-HTTP com tráfego significativo) | **Confirmada** |
-| Servidor `148.113.190.78:17301` | Captura Wireshark | **Confirmada** |
-| Cabeçalho de frame: 4 bytes big-endian = tamanho do payload | Captura Wireshark (múltiplos exemplos) | **Confirmada** |
-| Pacote de controle `00 00 00 04 03 00 00 00` | Captura Wireshark | **Confirmado (estrutura), significado não confirmado** |
-| Reconexão abre nova conexão TCP (porta origem diferente) | Captura Wireshark (porta 49526 após 56923) | **Confirmada** |
-| Driver assinado por Microsoft WHQL | `inspect_pe_certificates` | **Confirmada** |
-| Driver versão `NetMP60_1_1` | Strings `.inf` + `.sys` | **Confirmada** |
-| DNS-over-HTTPS `https://%hs/dns-query` | Strings `RvROLClient.dll` | **Confirmada** |
-| Resolvers públicos hardcoded (1.1.1.1, 8.8.8.8, 9.9.9.9...) | Strings `RvROLClient.dll` | **Confirmada** |
+| `\\Device\\RVPNNETMP` | Strings in `NetMP60_1_1_64.sys` | **Confirmed** |
+| The driver is an NDIS 6 miniport, x86-64 | `file` and `.sys` strings | **Confirmed** |
+| The service is `RvControlSvc.exe` | PE imports (`StartServiceCtrlDispatcherW`, and others) | **Confirmed** |
+| The GUI connects through the named pipe `\\.\pipe\RadminVpnGuiChannel` | Service strings | **Confirmed** |
+| Control port TCP **17301** | Wireshark capture (non-HTTP port with significant traffic) | **Confirmed** |
+| Server `148.113.190.78:17301` | Wireshark capture | **Confirmed** |
+| Frame header: 4-byte big-endian payload size | Wireshark capture (several examples) | **Confirmed** |
+| Control packet `00 00 00 04 03 00 00 00` | Wireshark capture | **Confirmed (structure), meaning not confirmed** |
+| Reconnection opens a new TCP connection (different source port) | Wireshark capture (port 49526 after 56923) | **Confirmed** |
+| Driver signed by Microsoft WHQL | `inspect_pe_certificates` | **Confirmed** |
+| Driver version `NetMP60_1_1` | `.inf` and `.sys` strings | **Confirmed** |
+| DNS over HTTPS `https://%hs/dns-query` | `RvROLClient.dll` strings | **Confirmed** |
+| Hardcoded public resolvers (1.1.1.1, 8.8.8.8, 9.9.9.9, and others) | `RvROLClient.dll` strings | **Confirmed** |
 
-### 4.2 Descobertas do Projeto Externo que Corroboram Nossa RE
+### 4.2 Findings of the external project that corroborate our RE
 
-| Descoberta | Evidência externa | Nossa evidência | Status |
+| Finding | External evidence | Our evidence | Status |
 |---|---|---|---|
-| Driver NDIS emulado substitui `NetMP60.sys` | Código do `rvpnnetmp.sys` | Strings do `.sys` original | **Confirmada** |
-| Frames Ethernet trafegam sobre o adaptador virtual | Código do `tap_bridge` + `rvpnnetmp.c` | Captura Wireshark (não vemos frames Ethernet, vemos TCP 17301) | **Provável** |
-| Roteamento por MAC para multi-peer | Código do driver (`g_peer_routes`) | RTTI `VCUniqueConnectionId`, `VCConnection` | **Provável** |
-| Prioridade de frames (TCP/ICMP acima de broadcast) | Código do driver (`classify_high_priority`) | Não observado diretamente | **Hipótese** |
-| Per-peer NAT traversal com SO_REUSEADDR/TCP port reuse | Código `rvpn_reuseport.so` + docs | Strings `TcpNatChecker`, `Connections TCP/nat` no serviço | **Provável** |
-| Handshake de peer falha sem perflib counters | Docs `wine-perflib.md` | RTTI `CAuthSessionId`, `CMsgAuth*` | **Provável** |
+| The emulated NDIS driver replaces `NetMP60.sys` | Code of `rvpnnetmp.sys` | Strings of the original `.sys` | **Confirmed** |
+| Ethernet frames travel over the virtual adapter | Code of `tap_bridge` and `rvpnnetmp.c` | Wireshark capture (we see TCP 17301, not Ethernet frames) | **Probable** |
+| MAC routing for multiple peers | Driver code (`g_peer_routes`) | RTTI `VCUniqueConnectionId`, `VCConnection` | **Probable** |
+| Frame priority (TCP and ICMP above broadcast) | Driver code (`classify_high_priority`) | Not observed directly | **Hypothesis** |
+| Per-peer NAT traversal with SO_REUSEADDR and TCP port reuse | Code of `rvpn_reuseport.so` and docs | Strings `TcpNatChecker` and `Connections TCP/nat` in the service | **Probable** |
+| Peer handshake fails without perflib counters | `wine-perflib.md` docs | RTTI `CAuthSessionId`, `CMsgAuth*` | **Probable** |
 
-### 4.3 Diferenças Arquiteturais (Nosso Cliente Rust vs Projeto Externo)
+### 4.3 Architectural differences (our Rust client vs the external project)
 
-| Aspecto | Projeto Externo | Nosso Projeto (Rust independente) |
+| Aspect | External project | Our project (independent Rust) |
 |---|---|---|
-| Execução do cliente | Wine + cliente Windows oficial | Código Rust nativo (não usamos Wine) |
-| Driver de rede | `rvpnnetmp.sys` (PE) emulado sob Wine | TUN/TAP nativo Linux |
-| Canal de serviço↔driver | FIFOs nomeados + IOCTL Windows | Não aplicável (sem driver Windows) |
-| Canal de driver↔TAP | FIFOs + `tap_bridge` | TUN/TAP diretamente no Rust |
-| Tradução netsh | `netsh_wrapper.exe` | `netlink`/`rtnetlink` no Rust |
-| Reverse-DNS fix | `rvpn_dnsfix.so` (LD_PRELOAD glibc) | Não necessário (Rust controla seu próprio DNS) |
-| SO_REUSEPORT fix | `rvpn_reuseport.so` (LD_PRELOAD wineserver) | Rust controla sockets diretamente |
-| Perflib stubs | Hook IAT `advapi32` | Não aplicável (não usamos advapi32) |
-| Filtragem de interfaces | Hook `GetAdaptersAddresses/Info` | Não necessário (controlamos quais IPs anunciar) |
-| GUI | Qt do cliente Windows (Wine) | CLI Rust (opcional TUI futuramente) |
+| Client execution | Wine plus the official Windows client | Native Rust code (no Wine) |
+| Network driver | `rvpnnetmp.sys` (PE) emulated under Wine | Native Linux TUN/TAP |
+| Service to driver channel | Named FIFOs plus Windows IOCTL | Not applicable (no Windows driver) |
+| Driver to TAP channel | FIFOs plus `tap_bridge` | TUN/TAP directly from Rust |
+| netsh translation | `netsh_wrapper.exe` | `netlink` / `rtnetlink` in Rust |
+| Reverse DNS fix | `rvpn_dnsfix.so` (LD_PRELOAD on glibc) | Not needed (Rust controls its own DNS) |
+| SO_REUSEPORT fix | `rvpn_reuseport.so` (LD_PRELOAD on wineserver) | Rust controls sockets directly |
+| Perflib stubs | IAT hook on `advapi32` | Not applicable (we do not use `advapi32`) |
+| Interface filtering | Hook on `GetAdaptersAddresses` / `GetAdaptersInfo` | Not needed (we control which IPs to advertise) |
+| GUI | Windows client Qt (under Wine) | Rust CLI (optional TUI later) |
 
 ---
 
-## 5. Componentes Reutilizáveis Conceitualmente (não código)
+## 5. Reusable components (concepts, not code)
 
-O código do projeto externo está sob **GPL-3.0**. Não podemos copiar código-fonte C/C++ para nosso projeto Rust sem respeitar a licença e documentar a proveniência. Entretanto, podemos **reutilizar conceitos e estruturas documentadas**:
+The external project's code is under **GPL-3.0**. We cannot copy C or C++ source into our Rust project without respecting the license and documenting provenance. We can, however, reuse documented concepts and structures:
 
-| Conceito | Fonte | Aplicação no nosso cliente Rust |
+| Concept | Source | Use in our Rust client |
 |---|---|---|
-| TLV framing: 4-byte length prefix | `rvpnnetmp.c` `tlv_encode_frame` | Parser de framing TCP no nosso módulo `transport` |
-| TLV com dest MAC prefix (4 bytes) | `rvpnnetmp.c` | Estrutura de endereçamento de peer |
-| Prioridade TCP/ICMP acima de broadcast | `classify_high_priority` | Fila de prioridade no nosso transporte |
-| Roteamento unicast por MAC | `g_peer_routes` | Tabela de peers por endereço virtual |
-| ARP snoop + gratuitous ARP | `tap_bridge.c` | Cache de endereçamento virtual no nosso módulo `network` |
-| Reverse-DNS numérico para privados | `rvpn_dnsfix.c` | Não necessário (Rust não chama glibc getnameinfo indiretamente) |
-| SO_REUSEPORT para NAT traversal | `rvpn_reuseport.c` | Rust define `SO_REUSEADDR`/`SO_REUSEPORT` diretamente nos sockets |
-| Perflib counters para handshake de peer | `wine-perflib.md` | Estrutura de sessão/autenticação a ser descoberta via RE dinâmica |
-| Minecraft multicast → broadcast | `replicate_mcast_to_bcast` | Não necessário (escopo limitado) |
+| TLV framing: 4-byte length prefix | `rvpnnetmp.c`, `tlv_encode_frame` | Parser for TCP framing in our `transport` module |
+| TLV with destination MAC prefix (4 bytes) | `rvpnnetmp.c` | Peer addressing structure |
+| TCP and ICMP priority over broadcast | `classify_high_priority` | Priority queue in our transport |
+| Unicast routing by MAC | `g_peer_routes` | Peer table keyed by virtual address |
+| ARP snooping and gratuitous ARP | `tap_bridge.c` | Virtual address cache in our `network` module |
+| Numeric reverse DNS for private addresses | `rvpn_dnsfix.c` | Not needed (Rust does not call glibc `getnameinfo` indirectly) |
+| SO_REUSEPORT for NAT traversal | `rvpn_reuseport.c` | Rust sets `SO_REUSEADDR` and `SO_REUSEPORT` directly on sockets |
+| Perflib counters for peer handshake | `wine-perflib.md` | Session and authentication structure to be found through dynamic RE |
+| Minecraft multicast to broadcast | `replicate_mcast_to_bcast` | Not needed (limited scope) |
 
 ---
 
-## 6. Limitações e Incompatibilidades
+## 6. Limitations and incompatibilities
 
-| Item | Detalhe |
+| Item | Detail |
 |---|---|
-| **Licença GPL-3.0** | O código C/C++ do projeto externo não pode ser copiado diretamente para nosso projeto Rust sem torná-lo GPL-3.0 também e documentar a origem. Usamos apenas como referência conceitual. |
-| **Não é um cliente nativo** | O projeto externo roda o cliente Windows oficial sob Wine. Não há código de protocolo de rede nativo — apenas adaptação de ambiente. |
-| **Versão específica** | Validado contra Radmin VPN 2.1.4951.1 (mesma versão do nosso alvo). 2.0.4899.9 também funciona. 1.4 não é suportado. |
-| **Não revela protocolo de pacote** | O projeto externo nunca decodificou o conteúdo dos frames Ethernet TCP entre peers — ele apenas os transporta. O protocolo de controle ROS e os pacotes de dados permanecem desconhecidos. |
-| **Não revela handshake de autenticação** | O handshake entre peers e com o servidor ROS continua desconhecido. |
-| **Não revela algoritmos de criptografia** | `CCryptoChannel` continua não analisado por nenhum dos dois projetos. |
+| **GPL-3.0 license** | The C and C++ code of the external project cannot be copied into our Rust project without making it GPL-3.0 as well and documenting its origin. We use it only as a conceptual reference. |
+| **Not a native client** | The external project runs the official Windows client under Wine. It contains no native network protocol code, only environment adaptation. |
+| **Specific version** | Validated against Radmin VPN 2.1.4951.1 (the same version as our target). The reference project reports that 2.0.4899.9 also works. It reports that 1.4 is not supported. |
+| **Does not reveal the packet protocol** | The external project never decoded the content of the TCP Ethernet frames between peers. It only carries them. The ROS control protocol and the data packets remain unknown. |
+| **Does not reveal the authentication handshake** | The handshake between peers and with the ROS server remains unknown. |
+| **Does not reveal the encryption algorithms** | `CCryptoChannel` has not been analyzed by either project. (The static analysis in `CONTROL_PROTOCOL.md` covers the code, but not from this reference project.) |
 
 ---
 
-## 7. Relação com Nossa Especificação (`docs/PROTOCOL_SPEC.md`)
+## 7. Relation to our specification (`docs/PROTOCOL_SPEC.md`)
 
-### 7.1 O que o projeto externo confirma
+### 7.1 What the external project confirms
 
-| Nosso campo | Status anterior | Novo status | Base |
+| Our field | Previous status | New status | Basis |
 |---|---|---|---|
-| Porta 17301 TCP | Confirmada (captura) | **Confirmada** | Projeto usa a mesma porta indiretamente (via serviço Windows) |
-| Servidor `148.113.190.78` | Confirmado (captura) | **Confirmado** | Mesmo alvo |
-| Cabeçalho 4 bytes BE = tamanho | Confirmado (captura) | **Confirmado** | O TLV do driver usa `u32 frame_len` (embora em contexto diferente) |
-| `dest_mac_prefix` em TLV | Não conhecido | **Confirmado (conceito)** | `rvpnnetmp.c` linha 328-375 |
-| Frame mínimo 60 bytes | Não conhecido | **Confirmado** | `ETH_FRAME_MIN 60` em `rvpnnetmp.c` |
+| TCP port 17301 | Confirmed (capture) | **Confirmed** | The project uses the same port indirectly, through the Windows service |
+| Server `148.113.190.78` | Confirmed (capture) | **Confirmed** | Same target |
+| 4-byte big-endian header is the size | Confirmed (capture) | **Confirmed** | The driver's TLV uses `u32 frame_len`, though in a different context |
+| `dest_mac_prefix` in TLV | Unknown | **Confirmed (concept)** | `rvpnnetmp.c`, lines 328 to 375 |
+| 60-byte minimum frame | Unknown | **Confirmed** | `ETH_FRAME_MIN 60` in `rvpnnetmp.c` |
 
-### 7.2 O que permanece desconhecido (ambos os projetos)
+### 7.2 What remains unknown (both projects)
 
-- Estrutura binária dos pacotes ROS (`CRosPkt*`, `CMsg*`, `CLoginPacket`, etc.)
-- Handshake de autenticação dispositivo↔servidor
-- Algoritmos de criptografia (`CCryptoChannel`)
-- Formato dos frames Ethernet entre peers (o que vai dentro do payload do TLV)
-- Endereçamento IP virtual (faixa 26.x.x.x não confirmada em nenhum dos dois)
-- Portas de peer-to-peer (NAT traversal usa porta 17301 para controle; portas de dados desconhecidas)
-
----
-
-## 8. Próximas Etapas para Implementação Independente em Rust
-
-Com base em tudo que foi levantado, estas são as etapas recomendadas em ordem:
-
-### Fase I — Protocolo de Controle (alto valor, baixo custo)
-
-1. **Parser de framing TCP** (módulo `transport`):
-   - Ler `u32` big-endian = tamanho do payload
-   - Ler payload completo
-   - Lidar com frames fragmentados (múltiplas leituras TCP)
-   - Lidar com múltiplos frames em uma leitura
-   - Validar tamanho máximo (ex: 65535 bytes) para evitar alocação excessiva
-   - Testes unitários com frames reais capturados nos PCAPs
-
-2. **Análise de payload dos frames capturados**:
-   - Agrupar frames por tamanho (36, 68, 100, 116, 148, 180, 244, 260, 308, 356, 388, 708, 1440, 1960, 3396 bytes)
-   - Procurar bytes constantes (magic, tipo de mensagem, versão)
-   - Procurar campos que variam com a ação (conectar, msg chat, desconectar, reconectar)
-
-### Fase II — Decompilação (para preencher o que o tráfego não revela)
-
-3. **Abrir o banco Ghidra** (`/tmp/opencode/ghidra_project/radmin_project.rep`) na GUI:
-   - Analisar `ROLClient_Connect`, `ROLClient_Send`, `ROLClient_Receive`
-   - Analisar `CCryptoChannel` (estrutura, métodos)
-   - Analisar `CRosPktHeartbeat` e outros tipos de pacote ROS
-   - Extrair funções de serialização/desserialização
-
-4. **Mais capturas de tráfego direcionadas**:
-   - Uma ação por vez (só conectar, só join network, só chat, só desconectar)
-   - Correlacionar tipo de pacote com ação
-
-### Fase III — Implementação Rust (após evidências suficientes)
-
-5. Substituir `_raw: Vec<u8>` em `src/protocol/packets.rs` por estruturas reais
-6. Implementar módulos `session`, `identity`, `authentication`, `crypto`
-7. Implementar `tunnel` (TUN/TAP nativo)
-8. Implementar `daemon` (serviço systemd)
+- Binary structure of the ROS packets (`CRosPkt*`, `CMsg*`, `CLoginPacket`, and others).
+- Device-to-server authentication handshake.
+- Encryption algorithms in `CCryptoChannel` (static candidates are in `CONTROL_PROTOCOL.md`).
+- Format of the Ethernet frames between peers (what is inside the TLV payload).
+- Virtual IP addressing (the 26.x.x.x range is not confirmed by either project).
+- Peer-to-peer ports (NAT traversal uses port 17301 for control; data ports are unknown).
 
 ---
 
-## 9. Conclusão
+## 8. Next steps for an independent Rust implementation
 
-O projeto de referência confirma nossa arquitetura de alto nível (serviço Windows + driver de rede virtual + interface TAP) e fornece detalhes valiosos sobre o **framing de baixo nível** (TLV com tamanho prefixado, roteamento por MAC, priorização de tráfego). No entanto, ele **não revela o protocolo de aplicação** (ROS, pacotes de controle, autenticação, criptografia) — isso continua sendo nossa principal fronteira desconhecida.
+Based on everything gathered so far, these are the recommended steps in order:
 
-O caminho mais curto para um cliente Rust independente é:
-1. Implementar o parser de framing TCP agora (baseado nas capturas);
-2. Fazer mais capturas direcionadas para identificar tipos de mensagem;
-3. Usar o banco Ghidra existente para decompilar as funções de serialização;
-4. Só então implementar as estruturas de pacote e a lógica de sessão.
+### Phase I: control protocol (high value, low cost)
 
-Não há atalho: o protocolo de controle e os algoritmos criptográficos só serão conhecidos por meio de análise dos binários oficiais + tráfego real.
+1. **TCP framing parser** (`transport` module):
+   - Read a big-endian `u32` as the payload size.
+   - Read the full payload.
+   - Handle fragmented frames (multiple TCP reads).
+   - Handle multiple frames in one read.
+   - Validate a maximum size (for example 65,535 bytes) to avoid excessive allocation.
+   - Unit tests with real frames captured in the PCAPs.
+
+2. **Payload analysis of the captured frames**:
+   - Group frames by size (36, 68, 100, 116, 148, 180, 244, 260, 308, 356, 388, 708, 1,440, 1,960, 3,396 bytes).
+   - Look for constant bytes (magic, message type, version).
+   - Look for fields that change with the action (connect, chat message, disconnect, reconnect).
+
+### Phase II: decompilation (to fill in what the traffic does not reveal)
+
+3. **Open the Ghidra project** (`/tmp/opencode/ghidra_project/radmin_project.rep`) in the GUI:
+   - Analyze `ROLClient_Connect`, `ROLClient_Send`, and `ROLClient_Receive`.
+   - Analyze `CCryptoChannel` (structure and methods).
+   - Analyze `CRosPktHeartbeat` and other ROS packet types.
+   - Extract serialization and deserialization functions.
+
+4. **More targeted traffic captures**:
+   - One action at a time (only connect, only join network, only chat, only disconnect).
+   - Correlate packet type with action.
+
+### Phase III: Rust implementation (after enough evidence)
+
+5. Replace `_raw: Vec<u8>` in `src/protocol/packets.rs` with real structures.
+6. Implement the `session`, `identity`, `authentication`, and `crypto` modules.
+7. Implement `tunnel` (native TUN/TAP).
+8. Implement `daemon` (systemd service).
+
+---
+
+## 9. Conclusion
+
+The reference project confirms our high-level architecture (a Windows service, a virtual network driver, and a TAP interface) and provides useful details about **low-level framing** (size-prefixed TLV, MAC routing, traffic prioritization). However, it does **not reveal the application protocol** (ROS, control packets, authentication, encryption). That remains the main unknown boundary of our work.
+
+The shortest path to an independent Rust client is:
+
+1. Implement the TCP framing parser now, based on the captures.
+2. Make more targeted captures to identify message types.
+3. Use the existing Ghidra project to decompile the serialization functions.
+4. Only then implement the packet structures and session logic.
+
+There is no shortcut: the control protocol and the cryptographic algorithms will only be known through analysis of the official binaries and real traffic.

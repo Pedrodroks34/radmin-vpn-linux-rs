@@ -1,32 +1,13 @@
-//! # Módulo `network` — Gerenciamento de redes virtuais e rotas
-//
-//! ## Evidências da engenharia reversa (REA)
-//
-//! **Confirmado:**
-//! - Serviço Windows manipula rotas via IPHLPAPI:
-//!   `CreateIpNetEntry`, `DeleteIpForwardEntry2`, `NotifyRouteChange2`,
-//!   `ConvertInterfaceGuidToLuid`, `GetAdaptersAddresses`, `GetAdaptersInfo`.
-//! - `ROLClient_SetVirtualAddresses` define endereços virtuais do dispositivo.
-//! - `ROLClient_ManageNetwork2`, `ManageNetwork`, `CreateNetwork`,
-//!   `DeleteNetwork`, `EnableNetwork`, `LeaveNetwork`, `UpdateNetwork`.
-//!
-//! **Desconhecido:**
-//! - Faixa de IP das redes virtuais (não encontrada estaticamente).
-//! - Como os IPs são atribuídos a cada membro.
-//! - Isolamento entre redes (VLAN-like?).
-
 use crate::Result;
 
-/// Rede virtual do Radmin VPN
 #[derive(Debug, Clone)]
 pub struct VirtualNetwork {
     pub network_id: uuid::Uuid,
     pub name: String,
-    pub subnet: Option<String>, // CIDR (a confirmar via REA dinâmica)
+    pub subnet: Option<String>,
     pub members: Vec<crate::protocol::RosNodeAddress>,
 }
 
-/// Gerenciador de rede virtual (placeholder)
 pub struct NetworkManager {
     pub networks: Vec<VirtualNetwork>,
 }

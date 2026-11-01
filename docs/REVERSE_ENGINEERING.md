@@ -1,154 +1,156 @@
-# Relatório de Engenharia Reversa — Radmin VPN 2.1.4951.1
+# Reverse Engineering Report: Radmin VPN 2.1.4951.1
 
-## Resumo executivo
+## Executive summary
 
-O instalador `Radmin_VPN_2.1.4951.1.exe` (54,3 MB, Inno Setup + MSI) contém:
-- `RvRvpnGui.exe` — GUI Qt 5.15/QML
-- `RvControlSvc.exe` — serviço Windows, motor FamRT/C++ com IOCP
-- `RvROLClient.dll` — cliente ROL (47 exports: conectar, registrar, juntar rede, enviar, receber, NAT, etc.)
-- `RvUESClient.dll` — detecção de tipo de NAT
-- `NetMP60.sys` — driver NDIS virtual (`\Device\RVPNNETMP`, L2 Ethernet)
-- Componentes legacy do Radmin Server 3 (`Radmin.exe`, `rchatx.dll`, `voicex.dll`, etc.)
+The installer `Radmin_VPN_2.1.4951.1.exe` (54.3 MB, Inno Setup with a nested MSI) contains:
 
-## Arquitetura (confirmada via REA)
+- `RvRvpnGui.exe`: GUI, Qt 5.15 / QML.
+- `RvControlSvc.exe`: Windows service, FamRT/C++ engine with IOCP.
+- `RvROLClient.dll`: ROL client (47 exports: connect, register, join network, send, receive, NAT, and others).
+- `RvUESClient.dll`: NAT type detection.
+- `NetMP60.sys`: virtual NDIS driver (`\\Device\\RVPNNETMP`, L2 Ethernet).
+- Legacy Radmin Server 3 components (`Radmin.exe`, `rchatx.dll`, `voicex.dll`, and others).
+
+## Architecture (confirmed by reverse engineering)
 
 ```
-GUI (Qt) ── named pipe \\.\pipe\RadminVpnGuiChannel ──> Serviço RvControlSvc.exe
+GUI (Qt) ── named pipe \\.\pipe\RadminVpnGuiChannel ──> Service RvControlSvc.exe
                                                         │
-                          ├─ RvROLClient.dll ─────────► ROS (servidor de sinalização)
-                          ├─ RvUESClient.dll ──────────► Detecção de tipo de NAT
-                          ├─ WFP (fwpuclnt) ───────────► Regras de firewall
-                          ├─ IPHLPAPI ─────────────────► Rotas e IPNet
-                          └─ DeviceIoControl ──────────► NetMP60.sys (adapter virtual L2)
+                          ├─ RvROLClient.dll ─────────► ROS (signaling server)
+                          ├─ RvUESClient.dll ──────────► NAT type detection
+                          ├─ WFP (fwpuclnt) ───────────► Firewall rules
+                          ├─ IPHLPAPI ─────────────────► Routes and IP config
+                          └─ DeviceIoControl ──────────► NetMP60.sys (virtual L2 adapter)
 ```
 
-## Componentes e papéis (tabela detalhada)
+## Components and roles
 
-Ver `README.md`.
+See `README.md`.
 
-## Tipos de pacote identificados via RTTI (RvROLClient.dll)
+## Packet types identified via RTTI (RvROLClient.dll)
 
-Os seguintes tipos de pacote foram extraídos dos nomes de classes C++ nos binários
-(strings `?AV*Packet@RolClient@@`). Suas estruturas binárias são **desconhecidas**.
+The following packet types were extracted from the C++ class names in the binaries (strings like `?AV*Packet@RolClient@@`). Their binary structures are **unknown**.
 
-| Pacote | Inferência de papel |
+| Packet | Inferred role |
 |---|---|
-| `CAbstractClnPacket` / `VIClnPacket` | Pacote cliente abstrato / interface |
-| `CAbstractConnectionPacket` | Pacote de conexão abstrato |
-| `CCancelJoinPacket` | Cancelar entrada em rede |
-| `CChatCommandPacket` | Comando de chat |
-| `CChatGetNodesPacket` | Obter nós via chat |
-| `CClientVersionInfo` | Informação de versão do cliente |
-| `CConflictedIpAddressPacket` | Detecção de conflito de IP |
-| `CConnectResultPacket` | Resultado de conexão |
-| `CDirectEnetInfoPacket` | Info de rede Enet direta |
-| `CEnetInfoPacket` | Info de rede Enet |
-| `CEnumPublicNetworksPacket` | Enumerar redes públicas |
-| `CGenericPacket` | Pacote genérico |
-| `CGetNodeRegionSupportPacket` | Suporte de região do nó |
-| `CGuiLanguagePacket` | Idioma da GUI |
+| `CAbstractClnPacket` / `VIClnPacket` | Abstract client packet / interface |
+| `CAbstractConnectionPacket` | Abstract connection packet |
+| `CCancelJoinPacket` | Cancel joining a network |
+| `CChatCommandPacket` | Chat command |
+| `CChatGetNodesPacket` | Get nodes via chat |
+| `CClientVersionInfo` | Client version information |
+| `CConflictedIpAddressPacket` | IP conflict detection |
+| `CConnectResultPacket` | Connection result |
+| `CDirectEnetInfoPacket` | Direct Enet network info |
+| `CEnetInfoPacket` | Enet network info |
+| `CEnumPublicNetworksPacket` | Enumerate public networks |
+| `CGenericPacket` | Generic packet |
+| `CGetNodeRegionSupportPacket` | Node region support |
+| `CGuiLanguagePacket` | GUI language |
 | `CHeartbeatPacket` | Heartbeat / keep-alive |
-| `CIsAlivePacket` | Verificar se está vivo |
-| `CJoinNetworkPacket` | Entrar em rede virtual |
-| `CLoginPacket` | Login / autenticação |
-| `CLogPacket` | Pacote de log |
-| `CManageNetworkPacket` | Gerenciar rede virtual |
-| `CMsgAuthFailed` | Autenticação falhou |
-| `CMsgAuthFinished` | Autenticação finalizada |
-| `CMsgBadServerPacket` | Servidor ruim / inválido |
-| `CMsgNetPacket` | Pacote de rede |
-| `CMsgRosIgnored` | ROS ignorado |
-| `CNatPenPackets` / `CNatPenStatusPacket` | Pacotes de penetração de NAT |
-| `CPacketConnection` (FamRT) | Conexão de pacote |
-| `CRequestTrsPacket` | Requisição TRS |
-| `CRosConnectionPacket` | Conexão ROS |
-| `CRosPacket` / `IRosPacket` | Pacote ROS (interface) |
-| `CRosPktChatCommandReply` | Resposta de comando de chat ROS |
-| `CRosPktCollectTcpNatInfo` | Coletar info NAT TCP |
-| `CRosPktLicInfo` | Info de licença |
-| `CRosPktPushInfo` | Push de info (notificação) |
-| `CRServerInfoPacket` | Info do servidor R |
-| `CSessionSummaryPacket` | Resumo de sessão |
-| `CStartEnetPacket` | Iniciar Enet |
-| `CTcpInfoPacket` | Info TCP |
-| `CTcpNatInfoPacket` | Info NAT TCP |
-| `ReplyPacket` (ControlSvc) | Pacote de resposta do serviço |
+| `CIsAlivePacket` | Liveness check |
+| `CJoinNetworkPacket` | Join a virtual network |
+| `CLoginPacket` | Login / authentication |
+| `CLogPacket` | Log packet |
+| `CManageNetworkPacket` | Manage a virtual network |
+| `CMsgAuthFailed` | Authentication failed |
+| `CMsgAuthFinished` | Authentication finished |
+| `CMsgBadServerPacket` | Bad or invalid server |
+| `CMsgNetPacket` | Network packet |
+| `CMsgRosIgnored` | ROS message ignored |
+| `CNatPenPackets` / `CNatPenStatusPacket` | NAT penetration packets |
+| `CPacketConnection` (FamRT) | Packet connection |
+| `CRequestTrsPacket` | TRS request |
+| `CRosConnectionPacket` | ROS connection |
+| `CRosPacket` / `IRosPacket` | ROS packet (interface) |
+| `CRosPktChatCommandReply` | ROS chat command reply |
+| `CRosPktCollectTcpNatInfo` | Collect TCP NAT info |
+| `CRosPktLicInfo` | License info |
+| `CRosPktPushInfo` | Info push (notification) |
+| `CRServerInfoPacket` | R server info |
+| `CSessionSummaryPacket` | Session summary |
+| `CStartEnetPacket` | Start Enet |
+| `CTcpInfoPacket` | TCP info |
+| `CTcpNatInfoPacket` | TCP NAT info |
+| `ReplyPacket` (ControlSvc) | Service reply packet |
 
-Classes de suporte identificadas: `CPenSocket`, `USNatPenPacket`, `USNatPenWave`,
-`USPenGroup`, `USPortPara`, `CAuthSessionId`, `CRosAddress`, `CRosSessionId`,
-`CCryptoChannel`, `VCRosSessionId`, `VCConnector`, `VCConnection`, `CConnectionPool`,
-`CEnetScheduler`, `CChatRegionSupportCache`, `CNodeMapEntry`, `CVNetWorker`,
-`CConContainer`, `NTcpConnect`, `NTrsConnect`, `ENETConnect`.
+Supporting classes identified: `CPenSocket`, `USNatPenPacket`, `USNatPenWave`, `USPenGroup`, `USPortPara`, `CAuthSessionId`, `CRosAddress`, `CRosSessionId`, `CCryptoChannel`, `VCRosSessionId`, `VCConnector`, `VCConnection`, `CConnectionPool`, `CEnetScheduler`, `CChatRegionSupportCache`, `CNodeMapEntry`, `CVNetWorker`, `CConContainer`, `NTcpConnect`, `NTrsConnect`, `ENETConnect`.
 
-## Classificação das descobertas
+## Classification of findings
 
-| Item | Status | Base |
+| Item | Status | Basis |
 |---|---|---|
-| Instalador Inno Setup + MSI | Confirmada | Recursos PE, strings |
-| Serviço Windows + named pipe | Confirmada | Imports + strings |
-| GUI Qt 5.15/QML | Confirmada | Imports Qt5* |
-| Driver NDIS virtual L2 | Confirmada | .inf + strings do .sys |
-| DNS-over-HTTPS + resolvers públicos | Confirmada | String `https://%hs/dns-query` + IPs hardcoded |
-| Servidores ROS não hardcoded | Confirmada | Nenhum IP de servidor encontrado nos binários |
-| Canais criptografados + compressão | Confirmada (existem) | Exports `SetCompression`, `DisableEncryption` |
-| NAT traversal (hole punching) | Confirmada (existe) | Classes `CPenSocket`, `USNatPenPacket`, etc. |
-| Tipos de pacote ROS | Confirmada (nomes) | RTTI strings `?AV*Packet@RolClient@@` |
-| Estrutura binária dos pacotes | Desconhecida | Requer REA dinâmica |
-| Algoritmos de criptografia | Desconhecido | Sem strings identificáveis |
-| Portas de rede | Desconhecido | Nenhuma porta fixa encontrada |
-| Handshake de autenticação | Desconhecido | Requer REA dinâmica |
+| Inno Setup + MSI installer | Confirmed | PE resources, strings |
+| Windows service + named pipe | Confirmed | Imports and strings |
+| Qt 5.15 / QML GUI | Confirmed | Qt5* imports |
+| Virtual L2 NDIS driver | Confirmed | `.inf` and `.sys` strings |
+| DNS-over-HTTPS and public resolvers | Confirmed | String `https://%hs/dns-query` and hardcoded IPs |
+| ROS servers not hardcoded | Confirmed | No server IP found in the binaries |
+| Encrypted channels and compression | Confirmed to exist | Exports `SetCompression`, `DisableEncryption` |
+| NAT traversal (hole punching) | Confirmed to exist | Classes `CPenSocket`, `USNatPenPacket`, and others |
+| ROS packet types | Confirmed by name | RTTI strings `?AV*Packet@RolClient@@` |
+| Binary structure of packets | Unknown | Requires dynamic analysis |
+| Encryption algorithms | Unknown here | No identifiable strings in this document. See `CONTROL_PROTOCOL.md` for later static findings. |
+| Network ports | Unknown here | No fixed port found in this document. See `PROTOCOL_SPEC.md` for captured ports. |
+| Authentication handshake | Unknown | Requires dynamic analysis |
 
-## Descobertas de Tráfego (Captura Wireshark)
+## Traffic findings (Wireshark capture)
 
-### Setup de captura
-- Interface: `virbr0` (Libvirt Bridge)
-- VM IP: `192.168.122.77`
-- Arquivo 1: `/tmp/radmin_vm.pcap` (~21 MB, ~6360 pacotes)
-- Arquivo 2: `/tmp/radmin_vm2.pcap` (~196 KB, ~69 frames TCP para porta 17301)
-- Sub-extração porta 17301: `/tmp/radmin_17301.pcap` (~30 KB, 3 fluxos TCP distintos)
+### Capture setup
 
-### Porta de controle e servidor
-- **Porta 17301 TCP** — confirmada como porta de controle do Radmin
-- **Servidor principal:** `148.113.190.78` (alternantes: `198.244.203.247`, `45.162.230.182`)
+- Interface: `virbr0` (libvirt bridge).
+- VM IP: `192.168.122.77`.
+- File 1: `/tmp/radmin_vm.pcap` (about 21 MB, about 6,360 packets).
+- File 2: `/tmp/radmin_vm2.pcap` (about 196 KB, about 69 TCP frames to port 17301).
+- Port 17301 extract: `/tmp/radmin_17301.pcap` (about 30 KB, 3 distinct TCP flows).
 
-### Formato do frame (CONFIRMADO via captura)
-- **Cabeçalho:** 4 bytes, big-endian, `uint32_t` = tamanho do payload (NÃO inclui os 4 bytes do cabeçalho)
-- **Endianness:** Big-endian (confirmado via `00 00 00 20` = 32)
-- **Validação:** 54 frames extraídos de 3 fluxos TCP, 22824 bytes consumidos, 0 bytes restantes, sem truncamento
+### Control port and server
 
-### Validação do parser
-- Extração por fluxo TCP: Stream 0 (19 frames, 11260 bytes), Stream 1 (18 frames, 5920 bytes), Stream 2 (17 frames, 5644 bytes)
-- Todos os fluxos consumidos completamente sem truncamento
-- Parser implementado em `src/protocol/framing.rs` com 8 testes passando
-- Integração com `src/transport/mod.rs` concluída com 5 testes de integração
+- **TCP 17301**: confirmed as the Radmin control port.
+- **Main server**: `148.113.190.78` (alternates: `198.244.203.247`, `45.162.230.182`).
 
-### Pacote de controle
-- `00 00 00 04 03 00 00 00` — cabeçalho (tamanho=4) + payload `03 00 00 00`
-- Significado não confirmado (keepalive, ACK ou handshake)
+### Frame format (confirmed by capture)
 
-### Reconexão
-- Nova conexão TCP na porta de origem diferente após desconexão
-- Reconexão observada ~30 segundos após a primeira conexão
+- **Header**: 4 bytes, big-endian `uint32_t` containing the payload size. The header is not included in the size.
+- **Endianness**: big-endian (confirmed by `00 00 00 20` = 32).
+- **Validation**: 54 frames extracted from 3 TCP flows, 22,824 bytes consumed, 0 bytes left over, no truncation.
 
-## Próximos passos obrigatórios
+### Parser validation
 
-1. Executar cliente Windows em VM isolada com Wireshark para capturar tráfego real.
-2. Decompilar `RvROLClient.dll` e `RvControlSvc.exe` (Ghidra/IDA/Kuna) para extrair:
-   - Estruturas binárias dos pacotes (offsets, tamanhos, tipos).
-   - Funções de serialização/desserialização.
-   - Algoritmos criptográficos.
-   - Endereços e portas dos servidores ROS/relay.
-3. Preencher todas as células marcadas `desconhecido` nesta especificação.
-4. Somente então substituir `_raw: Vec<u8>` pelas estruturas Rust reais em `src/protocol/packets.rs`.
+- Per-flow extraction: stream 0 (19 frames, 11,260 bytes), stream 1 (18 frames, 5,920 bytes), stream 2 (17 frames, 5,644 bytes).
+- All flows fully consumed with no truncation.
+- Parser implemented in `src/protocol/framing.rs` with 8 passing tests.
+- Integration with `src/transport/mod.rs` completed with 5 integration tests.
 
-## Diretório de extração
+### Control packet
 
-Os binários foram extraídos para `/tmp/opencode/radmin_ext/` (fora deste repositório).
+- `00 00 00 04 03 00 00 00`: header (size 4) plus payload `03 00 00 00`.
+- Meaning not confirmed (keep-alive, ACK, or handshake).
 
-## Limitações
+### Reconnection
 
-- Nenhum motor de decompilação (Ghidra/IDA/Hopper) disponível neste host.
-- Nenhuma execução observada (não há depuração, emulação ou replay).
-- Declarações sobre pacotes exatos, handshake e criptografia são inferências de símbolos.
-- Não foram capturados pacotes de rede reais de peers (apenas servidor de controle).
-- A estrutura interna do payload (campos, tipos, ordem) permanece desconhecida.
+- A new TCP connection is opened from a different source port after a disconnect.
+- Reconnection was observed about 30 seconds after the first connection. To verify against the capture (see `PROTOCOL_SPEC.md` §9.6).
+
+## Required next steps
+
+1. Run the Windows client in an isolated VM with Wireshark to capture real traffic.
+2. Decompile `RvROLClient.dll` and `RvControlSvc.exe` (Ghidra, IDA, or Kuna) to extract:
+   - Binary packet structures (offsets, sizes, types).
+   - Serialization and deserialization functions.
+   - Cryptographic algorithms.
+   - Addresses and ports of the ROS and relay servers.
+3. Fill in every cell marked "unknown" in this specification.
+4. Only then replace `_raw: Vec<u8>` with real Rust structures in `src/protocol/packets.rs`.
+
+## Extraction directory
+
+Binaries were extracted to `/tmp/opencode/radmin_ext/`, outside this repository.
+
+## Limitations
+
+- No decompiler (Ghidra, IDA, Hopper) was available on this host.
+- No execution was observed (no debugging, emulation, or replay).
+- Statements about exact packets, handshake, and encryption are inferences from symbols.
+- No real packets from peers were captured, only the control server.
+- The internal payload structure (fields, types, order) remains unknown.

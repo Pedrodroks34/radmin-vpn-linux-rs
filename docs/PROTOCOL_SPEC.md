@@ -1,19 +1,14 @@
-# Especificação do Protocolo Radmin VPN — Fase 2 (Reconstrução)
+# Radmin VPN Protocol Specification: Phase 2 (Reconstruction)
 
-**Status:** ESPECIFICAÇÃO PARCIAL — baseada em análise estática de binários (REA)
-+ captura de tráfego real (tshark, VM 192.168.122.77, interface virbr0).
-Nenhuma decompilação foi realizada neste ambiente.
+**Status:** PARTIAL SPECIFICATION, based on static analysis of binaries (reverse engineering) and real traffic capture (tshark, VM 192.168.122.77, interface virbr0). No decompilation was performed in this environment. For later Ghidra findings, see `CONTROL_PROTOCOL.md`.
 
-**Regra obrigatória:** Nenhum campo, offset, tamanho, endianness, identificador numérico,
-função de serialização ou algoritmo criptográfico foi observado diretamente. Todos os
-valores marcados como `desconhecido` devem permanecer assim até análise dinâmica
-ou decompilação.
+**Rule:** No field, offset, size, endianness, numeric identifier, serialization function, or cryptographic algorithm has been directly observed unless marked as confirmed. Every value marked "unknown" must stay that way until dynamic analysis or decompilation settles it.
 
 ---
 
-## 1. Visão Geral da Arquitetura de Protocolos
+## 1. Protocol architecture overview
 
-O Radmin VPN é composto por três camadas de protocolo distintas, identificadas nos binários:
+Radmin VPN has three distinct protocol layers, identified in the binaries:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -22,11 +17,11 @@ O Radmin VPN é composto por três camadas de protocolo distintas, identificadas
                │  named pipe: \\.\pipe\RadminVpnGuiChannel
                ▼
 ┌─────────────────────────────────────────────────────────┐
-│  RvControlSvc.exe  (serviço Windows, motor FamRT/C++)   │
-│  ├── Pacotes de controle (CPacket_*): handshake,        │
-│  │   keepalive, shutdown, frame, switch, filter          │
-│  ├── Imports WS2_32 (WSARecv), WININET                  │
-│  └── Chama ROLClient_* (conectar, enviar, receber, etc) │
+│  RvControlSvc.exe  (Windows service, FamRT/C++ engine)  │
+│  ├── Control packets (CPacket_*): handshake,            │
+│  │   keep-alive, shutdown, frame, switch, filter        │
+│  ├── WS2_32 imports (WSARecv), WININET                  │
+│  └── Calls ROLClient_* (connect, send, receive, etc.)   │
 └──────────────┬──────────────────────────────────────────┘
                │  DeviceIoControl \\.\RVPNNETMP
                ▼
@@ -34,413 +29,341 @@ O Radmin VPN é composto por três camadas de protocolo distintas, identificadas
 │  NetMP60.sys  (NDIS 6 miniport, \Device\RVPNNETMP)      │
 │  ├── IOCTL start address                                │
 │  ├── Current Address / Permanent Address (MAC)          │
-│  └── Assinado por Microsoft Windows HC                  │
+│  └── Signed by Microsoft Windows HC                     │
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
-│  RvROLClient.dll  (biblioteca de cliente ROL)           │
-│  ├── Pacotes ROS (CRosPkt_*): registro, login, join,    │
-│  │   heartbeat, networks, NAT, etc.                      │
-│  ├── Pacotes de sessão (CMsg_*, CSession_*): auth, IP,  │
-│  │   Enet, shutdown, private session                     │
-│  ├── Pacotes de dados cliente (C*Packet@RolClient):     │
-│  │   login, join, manage, heartbeat, enet, etc.          │
-│  ├── Estruturas: CCryptoChannel, CAuthSessionId,        │
-│  │   VCUniqueConnectionId, VCRid, VCRosAddress,          │
-│  │   VCRosSessionId, CEnetAbstractConnection,            │
-│  │   TMBufferQueueWithCode (send/recv),                  │
-│  │   CProxyAddressPool, CGenericAddressPool,             │
-│  │   CDEnetAddresses, USPortPara, USNatPenPacket         │
-│  └── 47 exportações ROLClient_*                         │
+│  RvROLClient.dll  (ROL client library)                  │
+│  ├── ROS packets (CRosPkt_*): register, login, join,    │
+│  │   heartbeat, networks, NAT, etc.                     │
+│  ├── Session packets (CMsg_*, CSession_*): auth, IP,    │
+│  │   Enet, shutdown, private session                    │
+│  ├── Client data packets (C*Packet@RolClient):          │
+│  │   login, join, manage, heartbeat, enet, etc.         │
+│  ├── Structures: CCryptoChannel, CAuthSessionId,        │
+│  │   VCUniqueConnectionId, VCRid, VCRosAddress,         │
+│  │   VCRosSessionId, CEnetAbstractConnection,           │
+│  │   TMBufferQueueWithCode (send/recv),                 │
+│  │   CProxyAddressPool, CGenericAddressPool,            │
+│  │   CDEnetAddresses, USPortPara, USNatPenPacket        │
+│  └── 47 ROLClient_* exports                             │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Camada de Controle — `RvControlSvc.exe`
+## 2. Control layer: `RvControlSvc.exe`
 
-### 2.1 Fluxo de Inicialização (inferido de imports)
+### 2.1 Initialization flow (inferred from imports)
 
-O serviço Windows segue este fluxo (ordem inferida de imports, não observada em execução):
+The service likely follows this sequence. The order is inferred from imports and was not observed at runtime:
 
-1. `StartServiceCtrlDispatcherW` / `RegisterServiceCtrlHandlerExW` / `SetServiceStatus`
-   — registro como serviço Windows.
-2. `CreateNamedPipeW` / `ConnectNamedPipe` / `DisconnectNamedPipe`
-   — IPC com GUI via `\\.\pipe\RadminVpnGuiChannel`.
-3. `ROLClient_InitConnector` / `ROLClient_Connect` / `ROLClient_ContinueConnect`
-   — inicialização do conector ROL.
-4. `ROLClient_ListenVpn` — escuta VPN.
-5. `ROLClient_Send` / `ROLClient_Receive` / `ROLClient_WaitForSend` — transporte.
-6. `CreateServiceW` / `DeleteService` / `ChangeServiceConfigW` — gestão de serviço.
-7. `DeviceIoControl` — comunicação com `NetMP60.sys` (`\\.\RVPNNETMP`).
-8. `FwpmFilterAdd0` / `FwpmSubLayerAdd0` (fwpuclnt) — regras de firewall WFP.
-9. `CreateIpNetEntry` / `DeleteIpForwardEntry2` (IPHLPAPI) — rotas/IP.
+1. `StartServiceCtrlDispatcherW` / `RegisterServiceCtrlHandlerExW` / `SetServiceStatus`: registers as a Windows service.
+2. `CreateNamedPipeW` / `ConnectNamedPipe` / `DisconnectNamedPipe`: IPC with the GUI through `\\.\pipe\RadminVpnGuiChannel`.
+3. `ROLClient_InitConnector` / `ROLClient_Connect` / `ROLClient_ContinueConnect`: initializes the ROL connector.
+4. `ROLClient_ListenVpn`: listens for VPN traffic.
+5. `ROLClient_Send` / `ROLClient_Receive` / `ROLClient_WaitForSend`: transport.
+6. `CreateServiceW` / `DeleteService` / `ChangeServiceConfigW`: service management.
+7. `DeviceIoControl`: communication with `NetMP60.sys` (`\\.\RVPNNETMP`).
+8. `FwpmFilterAdd0` / `FwpmSubLayerAdd0` (fwpuclnt): WFP firewall rules.
+9. `CreateIpNetEntry` / `DeleteIpForwardEntry2` (IPHLPAPI): routes and IP addresses.
 
-**Evidência:** `inspect_pe_imports` (REA evidence IDs `ev_f0e6dd1...`, `ev_f2d0dc1...`)
-**Grau de confiança:** Confirmado para imports; ordem de execução é inferência, não observação.
+**Evidence:** `inspect_pe_imports` (REA evidence IDs `ev_f0e6dd1...`, `ev_f2d0dc1...`).
+**Confidence:** Confirmed for imports. The execution order is an inference, not an observation.
 
-### 2.2 Pacotes de Controle (CPacket_*@ControlSvc)
+### 2.2 Control packets (`CPacket_*@ControlSvc`)
 
-Identificados via RTTI no `RvControlSvc.exe`. Nenhum campo, tamanho ou função de
-serialização observado.
+Identified via RTTI in `RvControlSvc.exe`. No field, size, or serialization function has been observed for any of them.
 
-| Nome | Identificador | Tamanho | Campos | Tipos | Ordem | Endianness | Função Serialização | Função Desserialização | Evidência | Confiança |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `CPacket_Handshake_Syn` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string `?AVCPacket_Handshake_Syn@ControlSvc@@` | Nome confirmado; resto desconhecido |
-| `CPacket_Handshake_SynAck` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_Handshake_Ack` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_KeepAlive` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_KeepAliveAck` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_Shutdown` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_RadminPort` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_RegionSupport` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_ProductVersion` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_Frame` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_ConfirmSwitch` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_StartSwitch` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_FinalizeSwitch` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_PacketFilter` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_Invalid` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket_Unknown` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `CPacket@ControlSvc@@` (base) | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
-| `IPacket@ControlSvc@@` (interface) | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI string | Nome confirmado; resto desconhecido |
+| Name | RTTI evidence | Status |
+|---|---|---|
+| `CPacket_Handshake_Syn` | `?AVCPacket_Handshake_Syn@ControlSvc@@` | Name confirmed |
+| `CPacket_Handshake_SynAck` | RTTI | Name confirmed |
+| `CPacket_Handshake_Ack` | RTTI | Name confirmed |
+| `CPacket_KeepAlive` | RTTI | Name confirmed |
+| `CPacket_KeepAliveAck` | RTTI | Name confirmed |
+| `CPacket_Shutdown` | RTTI | Name confirmed |
+| `CPacket_RadminPort` | RTTI | Name confirmed |
+| `CPacket_RegionSupport` | RTTI | Name confirmed |
+| `CPacket_ProductVersion` | RTTI | Name confirmed |
+| `CPacket_Frame` | RTTI | Name confirmed |
+| `CPacket_ConfirmSwitch` | RTTI | Name confirmed |
+| `CPacket_StartSwitch` | RTTI | Name confirmed |
+| `CPacket_FinalizeSwitch` | RTTI | Name confirmed |
+| `CPacket_PacketFilter` | RTTI | Name confirmed |
+| `CPacket_Invalid` | RTTI | Name confirmed |
+| `CPacket_Unknown` | RTTI | Name confirmed |
+| `CPacket@ControlSvc@@` (base) | RTTI | Name confirmed |
+| `IPacket@ControlSvc@@` (interface) | RTTI | Name confirmed |
 
-**Observação:** Os nomes `Syn/SynAck/Ack` sugerem handshake tipo TCP, mas isso é inferência de nome, não evidência de comportamento.
+**Note:** The names `Syn`, `SynAck`, and `Ack` suggest a TCP-like handshake. This is inferred from the names, not from observed behavior.
 
 ---
 
-## 3. Camada de Sessão e Dados — `RvROLClient.dll`
+## 3. Session and data layer: `RvROLClient.dll`
 
-### 3.1 Exportações da API ROLClient (confirmadas)
+### 3.1 Confirmed ROLClient API exports
 
-| Export | Endereço (RVA) | Ordinal | Papel inferido | Confiança |
+| Export | RVA | Ordinal | Inferred role | Confidence |
 |---|---|---|---|---|
-| `ROLClient_InitDll` | 0x10041010 | 19 | Inicialização da DLL | Confirmado (export table) |
-| `ROLClient_ShutdownDll` | 0x10042540 | 43 | Encerramento | Confirmado |
-| `ROLClient_Register` | 0x100419d0 | 28 | Registro de dispositivo | Confirmado |
-| `ROLClient_Connect` | 0x10040670 | 6 | Conexão | Confirmado |
-| `ROLClient_ContinueConnect` | 0x10040760 | 7 | Continuação de conexão | Confirmado |
-| `ROLClient_Listen` | 0x10041380 | 21 | Escuta | Confirmado |
-| `ROLClient_ListenVpn` | 0x10041470 | 22 | Escuta VPN | Confirmado |
-| `ROLClient_Send` | 0x10041e70 | 34 | Envio de dados | Confirmado |
-| `ROLClient_Receive` | 0x100418b0 | 27 | Recepção de dados | Confirmado |
-| `ROLClient_WaitForSend` | 0x100425f0 | 44 | Aguardar envio | Confirmado |
-| `ROLClient_ShutdownChannel` | 0x100423c0 | 41 | Encerrar canal | Confirmado |
-| `ROLClient_JoinNetwork` | 0x100412a0 | 20 | Entrar em rede | Confirmado |
-| `ROLClient_CancelJoin` | 0x10040430 | 3 | Cancelar entrada | Confirmado |
-| `ROLClient_ManageNetwork` | 0x10041710 | 25 | Gerenciar rede | Confirmado |
-| `ROLClient_ManageNetwork2` | 0x10041650 | 24 | Gerenciar rede v2 | Confirmado |
-| `ROLClient_LeaveNetwork` | (não exportado) | — | Sair de rede | Inferido (string no ControlSvc) |
-| `ROLClient_GetNodes` | 0x10040de0 | 16 | Obter nós | Confirmado |
-| `ROLClient_GetNodeRegionSupport` | 0x10040d20 | 15 | Suporte de região | Confirmado |
-| `ROLClient_EnumPublicNetworks` | 0x100409a0 | 10 | Enumera redes públicas | Confirmado |
-| `ROLClient_ChatCommand` | 0x100404e0 | 4 | Comando chat | Confirmado |
-| `ROLClient_ReportIpConflict` | 0x10041b30 | 30 | Reportar conflito IP | Confirmado |
-| `ROLClient_ReportLanguage` | 0x10041bf0 | 31 | Reportar idioma | Confirmado |
-| `ROLClient_ReportRServerInfo` | 0x10041cd0 | 32 | Reportar info servidor | Confirmado |
-| `ROLClient_ReportSessionSummary` | 0x10041db0 | 33 | Resumo de sessão | Confirmado |
-| `ROLClient_NeedMasterAddress` | 0x100417f0 | 26 | Endereço mestre | Confirmado |
-| `ROLClient_SetMaxPacketSize` | 0x10042090 | 37 | Tamanho máximo pacote | Confirmado |
-| `ROLClient_SetCompression` | 0x10041fd0 | 36 | Compressão | Confirmado |
-| `ROLClient_SetPriority` | 0x10042150 | 38 | Prioridade | Confirmado |
-| `ROLClient_SetVirtualAddresses` | 0x10042300 | 40 | Endereços virtuais | Confirmado |
-| `ROLClient_SetChannelCounters` | 0x10041f10 | 35 | Contadores de canal | Confirmado |
-| `ROLClient_DisableEncryption` | 0x10040830 | 8 | Desabilitar criptografia | Confirmado |
-| `ROLClient_EnableModuleEvents` | 0x100408f0 | 9 | Eventos de módulo | Confirmado |
-| `ROLClient_AllocMemory` | 0x100403c0 | 2 | Alocar memória | Confirmado |
-| `ROLClient_FreeMemory` | 0x10040c00 | 13 | Liberar memória | Confirmado |
-| `ROLClient_GetUnsendDataSize` | 0x10040eb0 | 17 | Tamanho dados não enviados | Confirmado |
-| `ROLClient_InitConnector` | 0x10040f50 | 18 | Inicializar conector | Confirmado |
-| `ROLClient_ShutdownConnector` | 0x10042480 | 42 | Encerrar conector | Confirmado |
-| `ROLClient_FreeConnector` | 0x10040b40 | 12 | Liberar conector | Confirmado |
-| `ROLClient_RejectConnect` | 0x10041ab0 | 29 | Rejeitar conexão | Confirmado |
-| `ROLClient_WaitModuleEvent` | 0x100426a0 | 45 | Aguardar evento módulo | Confirmado |
-| `ROLClient_WaitROLEvent` | 0x10042770 | 46 | Aguardar evento RO | Confirmado |
-| `ROLClient_WaitThreads` | 0x100427d0 | 47 | Aguardar threads | Confirmado |
-| `ROLClient_GetChannelProductVersion` | 0x10040c60 | 14 | Versão produto canal | Confirmado |
+| `ROLClient_InitDll` | 0x10041010 | 19 | DLL initialization | Confirmed (export table) |
+| `ROLClient_ShutdownDll` | 0x10042540 | 43 | Shutdown | Confirmed |
+| `ROLClient_Register` | 0x100419d0 | 28 | Device registration | Confirmed |
+| `ROLClient_Connect` | 0x10040670 | 6 | Connection | Confirmed |
+| `ROLClient_ContinueConnect` | 0x10040760 | 7 | Continue connection | Confirmed |
+| `ROLClient_Listen` | 0x10041380 | 21 | Listen | Confirmed |
+| `ROLClient_ListenVpn` | 0x10041470 | 22 | Listen for VPN | Confirmed |
+| `ROLClient_Send` | 0x10041e70 | 34 | Send data | Confirmed |
+| `ROLClient_Receive` | 0x100418b0 | 27 | Receive data | Confirmed |
+| `ROLClient_WaitForSend` | 0x100425f0 | 44 | Wait for send | Confirmed |
+| `ROLClient_ShutdownChannel` | 0x100423c0 | 41 | Close channel | Confirmed |
+| `ROLClient_JoinNetwork` | 0x100412a0 | 20 | Join network | Confirmed |
+| `ROLClient_CancelJoin` | 0x10040430 | 3 | Cancel join | Confirmed |
+| `ROLClient_ManageNetwork` | 0x10041710 | 25 | Manage network | Confirmed |
+| `ROLClient_ManageNetwork2` | 0x10041650 | 24 | Manage network (v2) | Confirmed |
+| `ROLClient_LeaveNetwork` | (not exported) | none | Leave network | Inferred (string in ControlSvc) |
+| `ROLClient_GetNodes` | 0x10040de0 | 16 | Get nodes | Confirmed |
+| `ROLClient_GetNodeRegionSupport` | 0x10040d20 | 15 | Region support | Confirmed |
+| `ROLClient_EnumPublicNetworks` | 0x100409a0 | 10 | Enumerate public networks | Confirmed |
+| `ROLClient_ChatCommand` | 0x100404e0 | 4 | Chat command | Confirmed |
+| `ROLClient_ReportIpConflict` | 0x10041b30 | 30 | Report IP conflict | Confirmed |
+| `ROLClient_ReportLanguage` | 0x10041bf0 | 31 | Report language | Confirmed |
+| `ROLClient_ReportRServerInfo` | 0x10041cd0 | 32 | Report server info | Confirmed |
+| `ROLClient_ReportSessionSummary` | 0x10041db0 | 33 | Session summary | Confirmed |
+| `ROLClient_NeedMasterAddress` | 0x100417f0 | 26 | Master address | Confirmed |
+| `ROLClient_SetMaxPacketSize` | 0x10042090 | 37 | Max packet size | Confirmed |
+| `ROLClient_SetCompression` | 0x10041fd0 | 36 | Compression | Confirmed |
+| `ROLClient_SetPriority` | 0x10042150 | 38 | Priority | Confirmed |
+| `ROLClient_SetVirtualAddresses` | 0x10042300 | 40 | Virtual addresses | Confirmed |
+| `ROLClient_SetChannelCounters` | 0x10041f10 | 35 | Channel counters | Confirmed |
+| `ROLClient_DisableEncryption` | 0x10040830 | 8 | Disable encryption | Confirmed |
+| `ROLClient_EnableModuleEvents` | 0x100408f0 | 9 | Module events | Confirmed |
+| `ROLClient_AllocMemory` | 0x100403c0 | 2 | Allocate memory | Confirmed |
+| `ROLClient_FreeMemory` | 0x10040c00 | 13 | Free memory | Confirmed |
+| `ROLClient_GetUnsendDataSize` | 0x10040eb0 | 17 | Unsent data size | Confirmed |
+| `ROLClient_InitConnector` | 0x10040f50 | 18 | Initialize connector | Confirmed |
+| `ROLClient_ShutdownConnector` | 0x10042480 | 42 | Shut down connector | Confirmed |
+| `ROLClient_FreeConnector` | 0x10040b40 | 12 | Free connector | Confirmed |
+| `ROLClient_RejectConnect` | 0x10041ab0 | 29 | Reject connection | Confirmed |
+| `ROLClient_WaitModuleEvent` | 0x100426a0 | 45 | Wait for module event | Confirmed |
+| `ROLClient_WaitROLEvent` | 0x10042770 | 46 | Wait for ROL event | Confirmed |
+| `ROLClient_WaitThreads` | 0x100427d0 | 47 | Wait for threads | Confirmed |
+| `ROLClient_GetChannelProductVersion` | 0x10040c60 | 14 | Channel product version | Confirmed |
 
-**Evidência:** `inspect_native_exports` (REA) — export table completa capturada.
+**Evidence:** `inspect_native_exports` (REA). Full export table captured.
 
-### 3.2 Pacotes ROS (CRosPkt_*@RolClient)
+### 3.2 ROS packets (`CRosPkt_*@RolClient`)
 
-Identificados via RTTI. Comunicação com servidor ROS (Radmin Online Server).
+Identified via RTTI. Used to communicate with the ROS server (Radmin Online Server). Names only; no structure is known.
 
-| Nome | Identificador | Tamanho | Campos | Tipos | Ordem | Endianness | Serialização | Desserialização | Evidência | Confiança |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `CRosPktAttachOk` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI `?AVCRosPktAttachOk@RolClient@@` | Nome confirmado |
-| `CRosPktCancelRedirect` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktChatCommandReply` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktChatEvents` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktChatNodes` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktClosestMaster` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktCollectTcpNatInfo` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktConnectAck` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktConnectFailed` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktError` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktHeartbeat` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktInstallRadminShim` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktInvalid` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktIsAlive` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktJoinApproved` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktJoinNetwork` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktLicInfo` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktLicManagmentReply` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktLoginComplete` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktManageNetReply` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktMessage` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktNetworksChanges` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktNetworks` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktNewConnection` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktNodeRegionSupport` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktNoRServer` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktPostpone` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktPublicNetworks` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktPushDirectEnet` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktPushEnet` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktPushInfo` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktRedirect` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktRegistered` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktRosAddr` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktStartEnet` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktTRSData` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPktUnknown` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosConnectionPacket` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRosPacket` / `IRosPacket` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI (interface) | Nome confirmado |
-| `VCRosAddress` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `VCRosSessionId` | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
+- Attach and redirect: `CRosPktAttachOk`, `CRosPktCancelRedirect`, `CRosPktRedirect`, `CRosPktClosestMaster`, `CRosPktNoRServer`.
+- Chat: `CRosPktChatCommandReply`, `CRosPktChatEvents`, `CRosPktChatNodes`, `CRosPktMessage`.
+- Connection: `CRosPktConnectAck`, `CRosPktConnectFailed`, `CRosPktNewConnection`, `CRosPktPostpone`.
+- Errors and invalid: `CRosPktError`, `CRosPktInvalid`, `CRosPktUnknown`.
+- Liveness: `CRosPktHeartbeat`, `CRosPktIsAlive`.
+- Network membership: `CRosPktJoinApproved`, `CRosPktJoinNetwork`, `CRosPktManageNetReply`, `CRosPktNetworks`, `CRosPktNetworksChanges`, `CRosPktPublicNetworks`, `CRosPktRegistered`, `CRosPktLoginComplete`.
+- Licensing: `CRosPktLicInfo`, `CRosPktLicManagmentReply`.
+- Enet and push: `CRosPktPushDirectEnet`, `CRosPktPushEnet`, `CRosPktPushInfo`, `CRosPktStartEnet`.
+- Address and region: `CRosPktRosAddr`, `CRosPktNodeRegionSupport`.
+- NAT and tunnels: `CRosPktCollectTcpNatInfo`, `CRosPktTRSData`, `CRosPktInstallRadminShim`.
+- Base types: `CRosPacket`, `IRosPacket`, `CRosConnectionPacket`, `VCRosAddress`, `VCRosSessionId`.
 
-### 3.3 Pacotes de Sessão e Mensagem (CMsg_* / CSession_*@RolClient)
+### 3.3 Session and message packets (`CMsg_*` / `CSession_*@RolClient`)
 
-| Nome | Identificador | Tamanho | Campos | Evidência | Confiança |
-|---|---|---|---|---|---|
-| `CMsgAuthFailed` | desconhecido | desconhecido | desconhecido | RTTI `?AVCMsgAuthFailed@RolClient@@` | Nome confirmado |
-| `CMsgAuthFinished` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgConnectFailed` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgConnecting` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgConnectorClosed` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgConnectorFailed` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgDEnetAddresses` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgEnetAddress` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgIpAddresses` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgSessionStart` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgSessionStop` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CMsgShutdown` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CPrivateSessionMsg` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CSessionErrorMsg` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CSessionMsg` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CSessionSummaryPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
+Names only, confirmed by RTTI.
 
-### 3.4 Pacotes de Dados do Cliente (C*Packet@RolClient)
+- Authentication: `CMsgAuthFailed`, `CMsgAuthFinished`.
+- Connector: `CMsgConnectFailed`, `CMsgConnecting`, `CMsgConnectorClosed`, `CMsgConnectorFailed`.
+- Addresses: `CMsgDEnetAddresses`, `CMsgEnetAddress`, `CMsgIpAddresses`.
+- Session: `CMsgSessionStart`, `CMsgSessionStop`, `CMsgShutdown`, `CSessionMsg`, `CSessionErrorMsg`, `CSessionSummaryPacket`, `CPrivateSessionMsg`.
 
-| Nome | Identificador | Tamanho | Campos | Evidência | Confiança |
-|---|---|---|---|---|---|
-| `CAbstractClnPacket` / `VIClnPacket` | desconhecido | desconhecido | desconhecido | RTTI (interface `VIClnPacket`, classe `CAbstractClnPacket`) | Nome confirmado |
-| `CAbstractConnectionPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CCancelJoinPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CChatCommandPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CChatGetNodesPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CClientVersionInfo` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CConflictedIpAddressPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CConnectResultPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CDirectEnetInfoPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CEnetInfoPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CEnumPublicNetworksPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CGenericPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CGetNodeRegionSupportPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CGuiLanguagePacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CHeartbeatPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CIsAlivePacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CJoinNetworkPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CLoginPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CLogPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CManageNetworkPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CNatPenPackets` / `CNatPenStatusPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CPacketConnection` (FamRT) | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `CRequestTrsPacket` | desconhecido | desconhecido | desconhecido | RTTI | Nome confirmado |
-| `ReplyPacket` (ControlSvc) | desconhecido | desconhecido | desconhecido | RTTI `?AV?$TAutoPtr@VCReplyPacket@ControlSvc@@` | Nome confirmado |
+### 3.4 Client data packets (`C*Packet@RolClient`)
 
-### 3.5 Estruturas Internas (não necessariamente transmitidas na rede)
+Names only, confirmed by RTTI.
 
-| Nome | Papel inferido | Evidência | Confiança |
+- Base types: `CAbstractClnPacket` / `VIClnPacket`, `CAbstractConnectionPacket`, `CGenericPacket`.
+- Join and manage: `CCancelJoinPacket`, `CJoinNetworkPacket`, `CManageNetworkPacket`, `CEnumPublicNetworksPacket`.
+- Login and status: `CLoginPacket`, `CIsAlivePacket`, `CHeartbeatPacket`, `CLogPacket`, `CClientVersionInfo`, `CGuiLanguagePacket`.
+- Chat: `CChatCommandPacket`, `CChatGetNodesPacket`.
+- Enet and connection: `CConnectResultPacket`, `CDirectEnetInfoPacket`, `CEnetInfoPacket`, `CConflictedIpAddressPacket`, `CGetNodeRegionSupportPacket`.
+- NAT and TRS: `CNatPenPackets`, `CNatPenStatusPacket`, `CRequestTrsPacket`.
+- Service: `CPacketConnection` (FamRT), `ReplyPacket` (ControlSvc, RTTI `?AV?$TAutoPtr@VCReplyPacket@ControlSvc@@`).
+
+### 3.5 Internal structures (not necessarily sent over the network)
+
+| Name | Inferred role | Evidence | Status |
 |---|---|---|---|
-| `CCryptoChannel` | Canal criptografado | RTTI `?AVCCryptoChannel@RolClient@@` | Nome confirmado; algoritmo desconhecido |
-| `CCryptoChannelNotificator` | Notificador de canal crypto | RTTI | Nome confirmado |
-| `CPrivateSessionMsg` | Mensagem de sessão privada | RTTI | Nome confirmado |
-| `CAuthSessionId` | ID de sessão de autenticação | RTTI `VCAuthSessionId@rol@@` | Nome confirmado |
-| `VCUniqueConnectionId` | ID único de conexão | RTTI `VCUniqueConnectionId@2@` | Nome confirmado |
-| `VCRid` | ID de nó/recurso | RTTI `VCRid@rol@@` | Nome confirmado |
-| `VCNetWorker` | Trabalhador de rede | RTTI | Nome confirmado |
-| `VCConnector` | Conector | RTTI | Nome confirmado |
-| `VCConnection` | Conexão | RTTI | Nome confirmado |
-| `CConnectionPool` | Pool de conexões | RTTI | Nome confirmado |
-| `CEnetAbstractConnection` | Conexão abstrata Enet | RTTI `CEnetAbstractConnection@ENETConnect@@` | Nome confirmado |
-| `CEnetIocpConnection` | Conexão IOCP Enet | RTTI | Nome confirmado |
-| `CEnetScheduler` | Agendador Enet | RTTI | Nome confirmado |
-| `CEnetWrapper` | Wrapper Enet | RTTI | Nome confirmado |
-| `CENETConnector` | Conector Enet | RTTI `RolClient::CENETConnector` | Nome confirmado |
-| `CEnetChannelNotificator` | Notificador de canal Enet | RTTI | Nome confirmado |
-| `TMBufferQueueWithCode` (send/recv) | Filas de buffer com código | RTTI `TMBufferQueueWithCode@W4ESendCode@...` / `W4ERecvCode@...` | Nome confirmado |
-| `CProxyAddressPool` | Pool de endereços proxy | RTTI | Nome confirmado |
-| `CGenericAddressPool` | Pool genérico de endereços | RTTI | Nome confirmado |
-| `CProxyAddressChecker` | Verificador de endereço proxy | RTTI | Nome confirmado |
-| `CDEnetAddresses` | Endereços DEnet | RTTI | Nome confirmado |
-| `USPortPara` | Parâmetros de porta | RTTI | Nome confirmado |
-| `USNatPenPacket` | Pacote de penetração NAT | RTTI | Nome confirmado |
-| `USNatPenWave` | Onda de penetração NAT | RTTI | Nome confirmado |
-| `USPenGroup` | Grupo de penetração | RTTI | Nome confirmado |
-| `USOneAck` | ACK único | RTTI | Nome confirmado |
-| `CPenWaveSenderReceiver` | Enviador/recebedor de onda | RTTI | Nome confirmado |
+| `CCryptoChannel` | Encrypted channel | RTTI `?AVCCryptoChannel@RolClient@@` | Name confirmed; algorithm unknown here (see §4 and `CONTROL_PROTOCOL.md` §6) |
+| `CCryptoChannelNotificator` | Crypto channel notifier | RTTI | Name confirmed |
+| `CAuthSessionId` | Authentication session ID | RTTI `VCAuthSessionId@rol@@` | Name confirmed |
+| `VCUniqueConnectionId` | Unique connection ID | RTTI `VCUniqueConnectionId@2@` | Name confirmed |
+| `VCRid` | Node or resource ID | RTTI `VCRid@rol@@` | Name confirmed |
+| `VCNetWorker` | Network worker | RTTI | Name confirmed |
+| `VCConnector` | Connector | RTTI | Name confirmed |
+| `VCConnection` | Connection | RTTI | Name confirmed |
+| `CConnectionPool` | Connection pool | RTTI | Name confirmed |
+| `CEnetAbstractConnection` | Abstract Enet connection | RTTI `CEnetAbstractConnection@ENETConnect@@` | Name confirmed |
+| `CEnetIocpConnection` | IOCP Enet connection | RTTI | Name confirmed |
+| `CEnetScheduler` | Enet scheduler | RTTI | Name confirmed |
+| `CEnetWrapper` | Enet wrapper | RTTI | Name confirmed |
+| `CENETConnector` | Enet connector | RTTI `RolClient::CENETConnector` | Name confirmed |
+| `CEnetChannelNotificator` | Enet channel notifier | RTTI | Name confirmed |
+| `TMBufferQueueWithCode` (send and receive) | Coded buffer queues | RTTI `TMBufferQueueWithCode@W4ESendCode@...` / `W4ERecvCode@...` | Name confirmed |
+| `CProxyAddressPool` | Proxy address pool | RTTI | Name confirmed |
+| `CGenericAddressPool` | Generic address pool | RTTI | Name confirmed |
+| `CProxyAddressChecker` | Proxy address checker | RTTI | Name confirmed |
+| `CDEnetAddresses` | DEnet addresses | RTTI | Name confirmed |
+| `USPortPara` | Port parameters | RTTI | Name confirmed |
+| `USNatPenPacket` | NAT penetration packet | RTTI | Name confirmed |
+| `USNatPenWave` | NAT penetration wave | RTTI | Name confirmed |
+| `USPenGroup` | Penetration group | RTTI | Name confirmed |
+| `USOneAck` | Single ACK | RTTI | Name confirmed |
+| `CPenWaveSenderReceiver` | Wave sender and receiver | RTTI | Name confirmed |
 
 ---
 
-## 4. Camada Criptográfica — `CCryptoChannel`
+## 4. Cryptographic layer: `CCryptoChannel`
 
-### 4.1 O que foi confirmado
+### 4.1 Confirmed at this stage
 
-- Classe `CCryptoChannel@RolClient@@` existe (RTTI).
-- `ROLClient_SetCompression` (export, 0x10041fd0) e `ROLClient_DisableEncryption` (export, 0x10040830) existem — compressão e criptografia são configuráveis.
-- `FamCurl` com `?g_DefaultCaCertPem` (CA PEM embutida) — usado para HTTPS/DoH.
-- `CPrivateSessionMsg` — mensagens de sessão privada (possivelmente criptografadas).
+- Class `CCryptoChannel@RolClient@@` exists (RTTI).
+- `ROLClient_SetCompression` (export, 0x10041fd0) and `ROLClient_DisableEncryption` (export, 0x10040830) exist, so compression and encryption are configurable.
+- `FamCurl` with `?g_DefaultCaCertPem` (embedded CA PEM), used for HTTPS and DoH.
+- `CPrivateSessionMsg`: private session messages, possibly encrypted.
 
-### 4.2 O que é desconhecido
+### 4.2 Status of the algorithm
 
-| Item | Status |
+**To reconcile:** an earlier version of this section listed the algorithm as unknown. Later static analysis of `shelper.dll` (see `CONTROL_PROTOCOL.md` §6) identifies AES-256-CBC and RSA key exchange in the code. That evidence is static, from the code and RTTI, and has **not** been observed in traffic. Until the traffic is decrypted or the code paths are verified dynamically, treat the items below as unknown in this document.
+
+| Item | Status here |
 |---|---|
-| Algoritmo de criptografia (AES, ChaCha20, RSA, ECC, etc.) | Desconhecido |
-| Derivação de chaves | Desconhecido |
-| Troca de chaves | Desconhecido |
-| Modo de operação (CBC, GCM, etc.) | Desconhecido |
-| Tamanho de chave | Desconhecido |
-| IV/nonce | Desconhecido |
-| Autenticação de mensagem (HMAC, AEAD) | Desconhecido |
-| Proteção contra replay | Desconhecido |
-| Estrutura dos registros criptográficos | Desconhecido |
-| Função de serialização/desserialização criptográfica | Desconhecido |
+| Encryption algorithm | Unknown here. Static candidate in `CONTROL_PROTOCOL.md`. |
+| Key derivation | Unknown |
+| Key exchange | Unknown here. Static candidate in `CONTROL_PROTOCOL.md`. |
+| Mode of operation | Unknown here. Static candidate in `CONTROL_PROTOCOL.md`. |
+| Key size | Unknown here. Static candidate in `CONTROL_PROTOCOL.md`. |
+| IV or nonce | Unknown |
+| Message authentication (HMAC, AEAD) | Unknown |
+| Replay protection | Unknown |
+| Cryptographic record format | Unknown |
+| Cryptographic serialization functions | Unknown |
 
-**Evidência:** Strings RTTI e export table apenas. Nenhuma string de algoritmo (AES/RSA/SHA) identificável nos binários.
+**Evidence in this document:** RTTI strings and the export table. No identifiable algorithm string (AES, RSA, SHA) was found in these binaries at this stage.
 
 ---
 
-## 5. Driver de Rede — `NetMP60.sys`
+## 5. Network driver: `NetMP60.sys`
 
-### 5.1 O que foi confirmado
+### 5.1 Confirmed
 
-- Driver NDIS 6 miniport (PE32+, x86-64).
+- NDIS 6 miniport driver (PE32+, x86-64).
 - Device: `\Device\RVPNNETMP` / `\DosDevices\RVPNNETMP`.
-- PDB path: `S:\RadminVPN.driver.1.1\x64\RadminVPNRelease\RvNetMP60.pdb` (build path interno).
-- Strings: `Current Address`, `Permanent Address` (endereços MAC).
-- `IOCTL/start address` — interface de controle via IOCTL.
-- Assinado por `Microsoft Windows Hardware Compatibility Publisher`.
-- Usa NDIS APIs: `NdisAllocateNetBufferAndNetBufferList`, `NdisMIndicateReceiveNetBufferLists`, `NdisMRegisterMiniportDriver`, `NdisMSendNetBufferListsComplete`, `NdisOpenConfigurationEx`, `NdisReadNetworkAddress`, etc.
-- Driver versions: `NetMP60_1_0` e `NetMP60_1_1` (do `.inf`).
+- PDB path: `S:\RadminVPN.driver.1.1\x64\RadminVPNRelease\RvNetMP60.pdb` (internal build path).
+- Strings: `Current Address` and `Permanent Address` (MAC addresses).
+- `IOCTL/start address`: control interface through IOCTL.
+- Signed by `Microsoft Windows Hardware Compatibility Publisher`.
+- Uses NDIS APIs such as `NdisAllocateNetBufferAndNetBufferList`, `NdisMIndicateReceiveNetBufferLists`, `NdisMRegisterMiniportDriver`, `NdisMSendNetBufferListsComplete`, `NdisOpenConfigurationEx`, and `NdisReadNetworkAddress`.
+- Driver versions: `NetMP60_1_0` and `NetMP60_1_1` (from the `.inf`).
 
-### 5.2 O que é desconhecido
+### 5.2 Unknown
 
-| Item | Status |
-|---|---|
-| Formato do quadro Ethernet (EtherType, payload) | Desconhecido |
-| IOCTL codes específicos | Desconhecidos |
-| Estrutura de pacotes entre driver e serviço | Desconhecida |
-| MTU da interface virtual | Desconhecido |
-| Faixa de IP atribuída | Desconhecida |
-| Se é encapsulamento L2 puro ou IP dentro do driver | Desconhecido |
+- Ethernet frame format (EtherType, payload).
+- Specific IOCTL codes.
+- Packet structure between the driver and the service.
+- MTU of the virtual interface.
+- Assigned IP range.
+- Whether it is pure L2 encapsulation or IP inside the driver.
 
-**Evidência:** Strings do `.sys`, imports NDIS, `.inf` (NCF_VIRTUAL, IF_TYPE_ETHERNET_CSMACD).
+**Evidence:** `.sys` strings, NDIS imports, and the `.inf` (`NCF_VIRTUAL`, `IF_TYPE_ETHERNET_CSMACD`).
 
 ---
 
-## 6. NAT Traversal — `RvUESClient.dll` + `RvROLClient.dll`
+## 6. NAT traversal: `RvUESClient.dll` and `RvROLClient.dll`
 
 ### 6.1 Confirmed
 
-- `UESC_GetTcpNatType` (export, 0x10005a10) — detecção de tipo de NAT TCP.
-- `UESC_GetAddress` (export, 0x10005910) — obtenção de endereço.
-- `UESC_Init` / `UESC_Shutdown` — inicialização/encerro.
-- Strings de log: `TcpNatChecker[%1].Bind/Connect/Recv/Send/Delta/InvalidAddress/InvalidResponce/DirectAddress/GetTcpNatType`.
-- `CPenSocket`, `USNatPenPacket`, `USNatPenWave`, `USPenGroup`, `USOneAck`, `CPenWaveSenderReceiver` — estruturas de hole punching.
-- `USPortPara` — parâmetros de porta.
-- Tipos de conexão observados no serviço: UDP/direct, UDP/nat, UDP/nat/random, UDP/teredo, TCP/direct, TCP/nat, TCP/teredo, Connections Relay.
+- `UESC_GetTcpNatType` (export, 0x10005a10): TCP NAT type detection.
+- `UESC_GetAddress` (export, 0x10005910): address discovery.
+- `UESC_Init` and `UESC_Shutdown`: initialization and shutdown.
+- Log strings: `TcpNatChecker[%1].Bind/Connect/Recv/Send/Delta/InvalidAddress/InvalidResponce/DirectAddress/GetTcpNatType`.
+- Hole punching structures: `CPenSocket`, `USNatPenPacket`, `USNatPenWave`, `USPenGroup`, `USOneAck`, `CPenWaveSenderReceiver`.
+- `USPortPara`: port parameters.
+- Connection types seen in the service: UDP/direct, UDP/nat, UDP/nat/random, UDP/teredo, TCP/direct, TCP/nat, TCP/teredo, Connections Relay.
 
-### 6.2 Desconhecido
+### 6.2 Unknown
 
-| Item | Status |
-|---|---|
-| Algoritmo de detecção de NAT | Desconhecido |
-| Estrutura dos pacotes de penetração | Desconhecido |
-| Servidores STUN/TURN/relay | Desconhecidos |
-| Portas utilizadas | Desconhecidas |
-| Comportamento frente a NAT simétrico | Desconhecido |
+- NAT detection algorithm.
+- Hole punching packet structure.
+- STUN, TURN, or relay servers.
+- Ports used.
+- Behavior with symmetric NAT.
 
 ---
 
-## 7. DNS / Descoberta de Servidores
+## 7. DNS and server discovery
 
-### 7.1 Confirmado
+### 7.1 Confirmed
 
-- String `https://%hs/dns-query` — DNS-over-HTTPS.
-- Resolvers públicos hardcoded em `RvROLClient.dll`: 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 208.67.222.222, 208.67.220.220, 1.0.0.2, 1.0.0.3, 1.1.1.2, 1.1.1.3, 9.9.9.9–13, 130.59.31.248, 130.59.31.251, 223.5.5.5, 223.6.6.6.
-- Nenhum IP de servidor Radmin hardcoded encontrado.
-- `ROLClient_GetNodeRegionSupport` — suporte de região de nós.
+- String `https://%hs/dns-query`: DNS over HTTPS.
+- Public resolvers hardcoded in `RvROLClient.dll`: 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 208.67.222.222, 208.67.220.220, 1.0.0.2, 1.0.0.3, 1.1.1.2, 1.1.1.3, 9.9.9.9 through 9.9.9.13, 130.59.31.248, 130.59.31.251, 223.5.5.5, 223.6.6.6.
+- No Radmin server IP is hardcoded.
+- `ROLClient_GetNodeRegionSupport`: region support for nodes.
 
-### 7.2 Desconhecido
+### 7.2 Unknown
 
-| Item | Status |
-|---|---|
-| Hostname do servidor ROS | Desconhecido |
-| Endpoint DoH exato (além do padrão `https://%hs/dns-query`) | Desconhecido |
-| Formato da requisição DoH | Desconhecido |
-| Endereços de servidores relay | Desconhecidos |
+- ROS server hostname.
+- Exact DoH endpoint beyond the `https://%hs/dns-query` pattern.
+- DoH request format.
+- Relay server addresses.
 
 ---
 
-## 8. Identidade e Autenticação
+## 8. Identity and authentication
 
-### 8.1 Confirmado
+### 8.1 Confirmed
 
-- `ROLClient_Register` — registro de dispositivo.
-- `CAuthSessionId` — ID de sessão de autenticação (RTTI).
-- `ROLClient_ReportLanguage`, `ROLClient_ReportRServerInfo` — reportes pós-autenticação.
-- Registro Windows: `HKLM\SOFTWARE\Famatech\RadminVPN\1.0`.
-- `CLoginPacket`, `CMsgAuthFailed`, `CMsgAuthFinished` — pacotes de login/auth.
+- `ROLClient_Register`: device registration.
+- `CAuthSessionId`: authentication session ID (RTTI).
+- `ROLClient_ReportLanguage` and `ROLClient_ReportRServerInfo`: reports after authentication.
+- Windows registry key: `HKLM\SOFTWARE\Famatech\RadminVPN\1.0`.
+- `CLoginPacket`, `CMsgAuthFailed`, `CMsgAuthFinished`: login and authentication packets.
 
-### 8.2 Desconhecido
+### 8.2 Unknown
 
-| Item | Status |
-|---|---|
-| Formato do identificador de dispositivo | Desconhecido |
-| Fluxo de handshake de autenticação | Desconhecido |
-| Credenciais (senha, token, certificado) | Desconhecidas |
-| Validação de membros / autorização de rede | Desconhecida |
+- Device identifier format.
+- Authentication handshake flow.
+- Credentials (password, token, or certificate).
+- Member validation and network authorization.
 
 ---
 
-## 9. Descobertas da Captura de Tráfego (Fase 2 — Análise Dinâmica)
+## 9. Traffic capture findings (phase 2, dynamic analysis)
 
-### 9.1 Setup de captura
+### 9.1 Capture setup
 
-- Interface: `virbr0` (Libvirt Bridge)
-- VM IP: `192.168.122.77`
-- Filtro: `host 192.168.122.77`
-- Arquivo 1: `/tmp/radmin_vm.pcap` (~21 MB, ~6360 pacotes)
-- Arquivo 2: `/tmp/radmin_vm2.pcap` (~196 KB, ~69 frames TCP para porta 17301)
-- Sub-extração porta 17301: `/tmp/radmin_17301.pcap` (~30 KB, 3 fluxos TCP distintos)
+- Interface: `virbr0` (libvirt bridge).
+- VM IP: `192.168.122.77`.
+- Filter: `host 192.168.122.77`.
+- File 1: `/tmp/radmin_vm.pcap` (about 21 MB, about 6,360 packets).
+- File 2: `/tmp/radmin_vm2.pcap` (about 196 KB, about 69 TCP frames to port 17301).
+- Port 17301 extract: `/tmp/radmin_17301.pcap` (about 30 KB, 3 distinct TCP flows).
 
-### 9.2 Servidores e portas identificados
+### 9.2 Servers and ports observed
 
-| Servidor IP | Porta | Protocolo | Papel inferido |
+| Server IP | Port | Protocol | Inferred role |
 |---|---|---|---|
-| `148.113.190.78` | 17301 | TCP | Servidor de controle/sinalização Radmin |
-| `198.244.203.247` | 17301 | TCP | Servidor de controle/sinalização (fallback?) |
-| `45.162.230.182` | 17351 | TCP | Servidor alternativo |
-| Vários (Akamai) | 443 | TCP | CDN/HTTPS (possível DoH ou tráfego de fundo Windows) |
+| `148.113.190.78` | 17301 | TCP | Radmin control and signaling server |
+| `198.244.203.247` | 17301 | TCP | Control and signaling server (fallback?) |
+| `45.162.230.182` | 17351 | TCP | Alternate server. **To reconcile:** `CONTROL_PROTOCOL.md` lists 17351 as peer-to-peer. |
+| Several (Akamai) | 443 | TCP | CDN and HTTPS. Possibly DoH or background Windows traffic. Not confirmed as Radmin. |
 
-**Observação:** Toda a comunicação principal identificada como tráfego Radmin usa a porta **17301** (TCP). Outros servidores na porta 443 via Akamai podem ser DoH, atualizações ou tráfego de fundo do Windows — não confirmado como Radmin.
+**Note:** All main traffic identified as Radmin uses **TCP 17301**. Other servers on port 443 through Akamai may be DoH, updates, or background Windows traffic, which is not confirmed as Radmin.
 
-### 9.3 Formato do protocolo na porta 17301 (CONFIRMADO via captura)
+### 9.3 Protocol format on port 17301 (confirmed by capture)
 
-**Cabeçalho:** 4 bytes, big-endian, `uint32_t` = tamanho do payload (não inclui os 4 bytes do cabeçalho).
+**Header:** 4 bytes, big-endian `uint32_t` containing the payload size. The header is not included in the size.
 
-| Exemplo | Tamanho declarado | Payload | Total no TCP |
+| Example header | Declared size | Payload | Total on TCP |
 |---|---|---|---|
 | `00 00 00 20` | 32 | 32 bytes | 36 bytes |
 | `00 00 00 90` | 144 | 144 bytes | 148 bytes |
@@ -449,118 +372,120 @@ Identificados via RTTI. Comunicação com servidor ROS (Radmin Online Server).
 | `00 00 01 60` | 352 | 352 bytes | 356 bytes |
 | `00 00 00 c0` | 192 | 192 bytes | 196 bytes |
 | `00 00 02 c0` | 704 | 704 bytes | 708 bytes |
-| `00 00 0d 40` | 3392 | 3392 bytes | 3396 bytes |
+| `00 00 0d 40` | 3,392 | 3,392 bytes | 3,396 bytes |
 
-**Sequência observada no handshake inicial:**
-1. `00 00 00 20` + 32 bytes (cliente → servidor)
-2. `00 00 00 20` + 32 bytes (servidor → cliente)
-3. `00 00 00 90` + 144 bytes (servidor → cliente)
-4. `00 00 01 60` + 352 bytes (cliente → servidor)
-5. `00 00 01 00` + 256 bytes (servidor → cliente)
-6. `00 00 01 30` + 304 bytes (cliente → servidor)
-7. `00 00 00 60` + 96 bytes (servidor → cliente)
-8. `00 00 00 70` + 112 bytes (cliente → servidor)
-9. `00 00 00 04 03 00 00 00` — pacote de controle (8 bytes total)
-10. Pacotes maiores (192, 704, 1960, 3392 bytes) — dados de sessão
+**Initial handshake sequence observed:**
 
-**Campos dentro do payload:** **Desconhecidos** — requer decompilação para identificar estrutura interna.
+1. `00 00 00 20` + 32 bytes (client to server)
+2. `00 00 00 20` + 32 bytes (server to client)
+3. `00 00 00 90` + 144 bytes (server to client)
+4. `00 00 01 60` + 352 bytes (client to server)
+5. `00 00 01 00` + 256 bytes (server to client)
+6. `00 00 01 30` + 304 bytes (client to server)
+7. `00 00 00 60` + 96 bytes (server to client)
+8. `00 00 00 70` + 112 bytes (client to server)
+9. `00 00 00 04 03 00 00 00`: control packet (8 bytes total)
+10. Larger packets (192, 704, 1,960, 3,392 bytes): session data
 
-**Endianness:** Big-endian (confirmado via `00 00 00 20` = 32).
+**Fields inside the payload:** **Unknown.** Decompilation is required to identify the internal structure.
 
-### 9.4 Validação do parser com dados reais do PCAP
+**Endianness:** big-endian (confirmed by `00 00 00 20` = 32).
 
-**Método de extração:**
-1. Extraídos payloads TCP de cada fluxo separadamente usando `tshark -Y tcp.stream==N -T fields -e tcp.payload`
-2. Convertidos de hex para binário via `xxd -r -p`
-3. Cada fluxo foi validado individualmente com um script Python que replica a lógica do FrameParser
+### 9.4 Parser validation with real PCAP data
 
-**Resultados por fluxo:**
+**Method:**
 
-| Fluxo | Bytes totais | Frames | Bytes consumidos | Restantes | Truncado? |
+1. Extract TCP payloads from each flow with `tshark -Y tcp.stream==N -T fields -e tcp.payload`.
+2. Convert hex to binary with `xxd -r -p`.
+3. Validate each flow with a Python script that replicates the `FrameParser` logic.
+
+**Results per flow:**
+
+| Flow | Total bytes | Frames | Bytes consumed | Remaining | Truncated? |
 |---|---|---|---|---|---|
-| Stream 0 (56923→148.113.190.78) | 11260 | 19 | 11260 | 0 | Não |
-| Stream 1 (49493→198.244.203.247) | 5920 | 18 | 5920 | 0 | Não |
-| Stream 2 (49494→148.113.190.78) | 5644 | 17 | 5644 | 0 | Não |
-| **Total** | **22824** | **54** | **22824** | **0** | **Não** |
+| Stream 0 (56923 to 148.113.190.78) | 11,260 | 19 | 11,260 | 0 | No |
+| Stream 1 (49493 to 198.244.203.247) | 5,920 | 18 | 5,920 | 0 | No |
+| Stream 2 (49494 to 148.113.190.78) | 5,644 | 17 | 5,644 | 0 | No |
+| **Total** | **22,824** | **54** | **22,824** | **0** | **No** |
 
-**Tamanhos de payload observados nos 54 frames:**
+**Payload sizes observed across the 54 frames:**
 32, 32, 144, 352, 256, 304, 96, 112, 144, 352, 256, 304, 96, 128, 3968, 384, 3392, 704, 128, 4, 4, 192, 192, 4, 32, 256, 224, 4, 32, 224, 48, 256, 224, 48, 208, 2576, 160, 432, 224, 48, 384, 384, 48, 208, 160, 240, 2576, 160, 432, 224, 288, 384, 384, 160
 
-**Confirmação:** Todos os 54 frames foram extraídos com sucesso. Cada fluxo TCP foi separado e validado individualmente. Nenhum byte ficou sem consumir. Nenhum frame truncado foi encontrado. Os fluxos não foram misturados.
+**Result:** All 54 frames were extracted. Each TCP flow was separated and validated on its own. No bytes were left unconsumed, no truncated frame was found, and the flows were not mixed.
 
-### 9.5 O que é desconhecido
+### 9.5 Unknown
 
-| Item | Status |
-|---|---|
-| Estrutura interna do payload (campos, tipos, ordem) | Desconhecido |
-| Identificador de tipo de pacote | Desconhecido |
-| Algoritmo de criptografia do payload | Desconhecido |
-| Handshake de autenticação (campos específicos) | Desconhecido |
-| Faixa de IP virtual atribuída pelo servidor | Desconhecido |
-| Se há separação entre canal de controle e dados | Desconhecido |
+- Internal payload structure (fields, types, order).
+- Packet type identifier.
+- Payload encryption algorithm.
+- Authentication handshake fields.
+- Virtual IP range assigned by the server.
+- Whether control and data channels are separate.
 
-### 9.6 Descobertas da Captura 2 (ações: conectar, msg chat, desconectar, reconectar)
+### 9.6 Findings from capture 2 (actions: connect, chat message, disconnect, reconnect)
 
-Arquivo: `/tmp/radmin_vm2.pcap` (~196 KB)
+File: `/tmp/radmin_vm2.pcap` (about 196 KB).
 
-| Tempo | Origem → Destino | Porta | Tamanho | Inferência |
+| Time | Direction | Port | Size | Inference |
 |---|---|---|---|---|
-| ~25.9s | 192.168.122.77 → 148.113.190.78 | 17301 | 148 | Conexão inicial (porta 56923) |
-| ~26-39s | bidirecional | 17301 | 144, 1440, 36, 100, 180, 116, 68 | Handshake + dados de sessão |
-| ~39-67s | bidirecional | 17301 | 36-180 | Tráfego periódico (keepalive/mensagens) |
-| ~98-99s | 192.168.122.77 → 148.113.190.78 | 17301 | 0, 8, 196, 36, 260, 228 | **Reconexão** (nova porta 49526) |
-| ~99s | cliente → servidor | 17301 | 8 | `00 00 00 04 03 00 00 00` (pacote de controle/ACK) |
-| ~99s | servidor → cliente | 17301 | 8 | `00 00 00 04 03 00 00 00` (resposta de controle) |
+| ~25.9 s | 192.168.122.77 to 148.113.190.78 | 17301 | 148 | Initial connection (source port 56923) |
+| ~26 to 39 s | both | 17301 | 144, 1440, 36, 100, 180, 116, 68 | Handshake and session data |
+| ~39 to 67 s | both | 17301 | 36 to 180 | Periodic traffic (keep-alive or messages) |
+| ~98 to 99 s | 192.168.122.77 to 148.113.190.78 | 17301 | 0, 8, 196, 36, 260, 228 | **Reconnection** (new source port 49526) |
+| ~99 s | client to server | 17301 | 8 | `00 00 00 04 03 00 00 00` (control or ACK) |
+| ~99 s | server to client | 17301 | 8 | `00 00 00 04 03 00 00 00` (control response) |
 
-**Pacote de controle identificado:** `00 00 00 04 03 00 00 00` — cabeçalho (tamanho=4) + 4 bytes de payload (`03 00 00 00`). Pode ser keepalive ou ACK de confirmação.
+**Control packet:** `00 00 00 04 03 00 00 00`: header (size 4) plus 4 payload bytes (`03 00 00 00`). It may be a keep-alive or an acknowledgment.
 
-**Reconexão:** Nova conexão TCP na porta 49526 → 17301, sugerindo que o cliente reconecta após desconexão.
+**Reconnection:** A new TCP connection from port 49526 to 17301, which suggests the client reconnects after a disconnect.
 
----
-
-## 10. Limitações da Análise Estática
-
-1. **Nenhum descompilador disponível** (Ghidra/IDA/Hopper não configurados neste host).
-2. **Nenhuma captura de tráfego** (Wireshark não executado — requer VM Windows isolada).
-3. **Nenhuma execução observada** (não há depuração, emulação ou replay).
-4. **Offsets de campos, tamanhos, endianness, identificadores numéricos** não foram observados.
-5. **Funções de serialização/desserialização** não foram identificadas (não há strings como "serialize" nos binários — são funções C++ compiladas sem símbolos de depuração).
-6. **Algoritmos criptográficos** não identificados.
+**To verify:** `REVERSE_ENGINEERING.md` says reconnection happened about 30 seconds after the first connection. The times in this table (about 25.9 s and about 98 s) give about 72 seconds between the first connection and the reconnection. Check these against the raw capture.
 
 ---
 
-## 11. Próximos Passos Obrigatórios (em ordem)
+## 10. Limitations of static analysis
 
-1. Executar cliente Windows em VM isolada com Wireshark para capturar tráfego real.
-2. Decompilar `RvROLClient.dll` e `RvControlSvc.exe` (Ghidra/IDA/Kuna) para extrair:
-   - Estruturas binárias dos pacotes (offsets, tamanhos, tipos).
-   - Funções de serialização/desserialização.
-   - Algoritmos criptográficos.
-   - Endereços e portas dos servidores ROS/relay.
-3. Preencher todas as células marcadas `desconhecido` nesta especificação.
-4. Somente então substituir `_raw: Vec<u8>` pelas estruturas Rust reais em `src/protocol/packets.rs`.
+1. No decompiler (Ghidra, IDA, Hopper) was configured on this host.
+2. No traffic capture was performed on a Windows VM. Wireshark ran only on the Linux host.
+3. No execution was observed (no debugging, emulation, or replay).
+4. Field offsets, sizes, endianness, and numeric identifiers have not been observed.
+5. Serialization and deserialization functions were not identified. The binaries contain no strings such as "serialize", since these are compiled C++ functions without debug symbols.
+6. Cryptographic algorithms were not identified at this stage. See `CONTROL_PROTOCOL.md` for later findings.
 
 ---
 
-## 12. Critério de Conclusão da Fase 2
+## 11. Required next steps (in order)
 
-A fase estará concluída quando houver documentação suficiente para implementar o protocolo de controle e transporte de dados **sem depender de suposições**. Até lá, nenhum campo de pacote pode ser considerado confirmado.
+1. Run the Windows client in an isolated VM with Wireshark to capture real traffic.
+2. Decompile `RvROLClient.dll` and `RvControlSvc.exe` (Ghidra, IDA, or Kuna) to extract:
+   - Binary packet structures (offsets, sizes, types).
+   - Serialization and deserialization functions.
+   - Cryptographic algorithms.
+   - Addresses and ports of the ROS and relay servers.
+3. Fill in every cell marked "unknown" in this specification.
+4. Only then replace `_raw: Vec<u8>` with real Rust structures in `src/protocol/packets.rs`.
 
-**Não declarar compatibilidade até conseguir demonstrá-la com testes reais contra o cliente oficial Windows.**
+---
+
+## 12. Completion criteria for phase 2
+
+Phase 2 is complete when there is enough documentation to implement the control and data transport protocols **without relying on assumptions**. Until then, no packet field may be considered confirmed.
+
+**Do not declare compatibility until it has been demonstrated with real tests against the official Windows client.**
 
 ---
 
 ## Evidence IDs (REA)
 
-| Operação | Alvo | Evidence ID |
+| Operation | Target | Evidence ID |
 |---|---|---|
 | `inspect_pe_imports` | `RvControlSvc.exe` | `ev_f0e6dd1ce5b574f86d6d41fcda0677f6e5f591a7386caeb0bd8aa8a9029c0af2` |
 | `inspect_pe_imports` | `RvRvpnGui.exe` | `ev_f2d0dc1c21103795e69dcf1948227d529a1a9eff6a236323a5dd8be5c628b01c` |
 | `inspect_pe_imports` | `RvROLClient.dll` | `ev_c45aa4d9309c7ee6a62cde6b1c11275995903eb391c46594f58b0b1940cfe4a0` |
 | `inspect_pe_imports` | `RvUESClient.dll` | `ev_8fa3bd5ac9b1c89d529e7c83dcb3532ceb7a3d401f25e053a54877e178cdb03` |
 | `inspect_pe_imports` | `imrsdk.dll` | `ev_f2aa613865e78903cb5c2f31840e9cda57b8c07954454c03263c90f51200547a` |
-| `inspect_native_exports` | `RvROLClient.dll` | 47 exports capturados |
-| `inspect_native_exports` | `RvUESClient.dll` | 6 exports capturados |
-| `inspect_native_exports` | `imrsdk.dll` | 22 exports capturados |
-| `inspect_pe_certificates` | `RvControlSvc.exe` | Cadeia DigiCert → Famatech Corp. |
-| `open_binary` | Instalador `Radmin_VPN_2.1.4951.1.exe` | SHA-256 `e16711e2e3e59f6603f51f437197215b1914a3d8316e1f633260178b959921f7` |
+| `inspect_native_exports` | `RvROLClient.dll` | 47 exports captured |
+| `inspect_native_exports` | `RvUESClient.dll` | 6 exports captured |
+| `inspect_native_exports` | `imrsdk.dll` | 22 exports captured |
+| `inspect_pe_certificates` | `RvControlSvc.exe` | Certificate chain DigiCert to Famatech Corp. |
+| `open_binary` | Installer `Radmin_VPN_2.1.4951.1.exe` | SHA-256 `e16711e2e3e59f6603f51f437197215b1914a3d8316e1f633260178b959921f7` |

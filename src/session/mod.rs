@@ -1,25 +1,6 @@
-//! # Módulo `session` — Gerenciamento de sessões ROS e canais de peer
-//
-//! ## Evidências da engenharia reversa (REA)
-//
-//! **Confirmado:**
-//! - `CRosSessionId` gerencia sessões no servidor ROS.
-//! - `ROLClient_WaitROLEvent`, `ROLClient_WaitModuleEvent` — espera por eventos.
-//! - `ROLClient_WaitThreads` — sincronização de threads.
-//! - `ROLClient_GetUnsendDataSize` — controle de fluxo.
-//! - Classes `VCConnection`, `VCConnector`, `CConnectionPool`, `CConnector` —
-//!   gerenciamento de conexões e conectores.
-//! - `CEnetScheduler`, `CPacket_RadminPort`, `CRetryEnet` — agendamento e retry de envio.
-//!
-//! **Desconhecido:**
-//! - Tempo de timeout de sessão.
-//! - Mecanismo de reconexão.
-//! - Estado completo da máquina de sessão ( estados de handshake, join, leave ).
-
 use crate::protocol::{AuthSessionId, RosConnectionState, RosNodeAddress};
 use crate::Result;
 
-/// Estado de uma sessão de rede Radmin VPN
 #[derive(Debug, Clone)]
 pub struct Session {
     pub session_id: Option<AuthSessionId>,
@@ -39,7 +20,6 @@ impl Default for Session {
     }
 }
 
-/// Gerenciador de sessão (placeholder)
 pub struct SessionManager {
     session: Session,
 }

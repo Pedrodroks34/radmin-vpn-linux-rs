@@ -1,74 +1,101 @@
-# AGENTS.md — Radmin VPN reverse-engineering repo
+# AGENTS.md
 
-## Repo layout
+Guidance for AI agents and contributors working on this repository.
 
-- `Radmin_VPN_2.1.4951.1.exe` — original Windows installer (Inno Setup + nested MSI, 54 MB). Do not modify.
-- `src/` — Rust Linux client (early scaffold, compiles, no network logic yet).
-- `docs/` — REA findings and protocol spec.
-  - `docs/REFERENCE_PROJECT_ANALYSIS.md` — analysis of external project `baptisterajaut/radmin-vpn-linux` (Wine-based, cloned to `references/radmin-vpn-linux/`).
-- `references/radmin-vpn-linux/` — cloned external project (Wine-based Radmin VPN for Linux). GPL-3.0. Do NOT copy code into our Rust project; use only as conceptual reference.
-- `/tmp/opencode/radmin_ext/` — extracted installer contents (outside repo, not version-controlled). Source of truth for static binary analysis.
-- `/tmp/radmin_vm.pcap`, `/tmp/radmin_vm2.pcap` — Wireshark/tshark captures from VM (192.168.122.77).
-- `/tmp/radmin_17301.pcap` — filtered capture of port 17301 traffic.
-- `/tmp/opencode/ghidra_12.2/` — Ghidra 12.2 extracted (for decompilation). Database already built at `/tmp/opencode/ghidra_project/radmin_project.rep`.
+## Purpose
 
-## Build / verify
+Independent Linux client for Radmin VPN, written in Rust, based on reverse engineering of the official Windows client (`Radmin_VPN_2.1.4951.1.exe`). The project is in early development: the module structure exists, but there is no functional networking yet.
 
-From repo root (`/home/pedrodroks/Downloads/radmin`):
+## Repository layout
+
+- `src/`: Rust crate (`radmin-vpn`). Library in `src/lib.rs`, binary in `src/main.rs`.
+- `docs/`: reverse engineering findings and protocol specification.
+  - `docs/REVERSE_ENGINEERING.md`: phase 1 findings (components, imports, exports, certificates, driver).
+  - `docs/PROTOCOL_SPEC.md`: phase 2 protocol specification, including traffic capture findings (section 9).
+  - `docs/CONTROL_PROTOCOL.md`: control channel notes.
+  - `docs/REFERENCE_PROJECT_ANALYSIS.md`: analysis of an external reference project.
+- `references/`: local clones of external projects, git-ignored. Conceptual reference only.
+- `Radmin_VPN_2.1.4951.1.exe`, `*.dll`, `*.sys`, `*.pcap`: proprietary binaries and captures. Git-ignored. Never commit them and never modify them.
+
+Local analysis artifacts (extracted installer, Ghidra project, pcap captures) live outside the repository, under `/tmp`. They are not persistent and must not be assumed to exist. Paths to them in `docs/` are working references, not guarantees.
+
+## Build and verification
 
 ```
-cargo build        # builds OK (1 warning: unused import in src/main.rs)
+cargo build
 cargo run -- --help
 ```
 
-No test suite, no CI, no lint/format config. `cargo build` is the only verified command.
+Known state: the build is not yet verified in every environment. Before claiming it compiles, run `cargo build` and report the actual result.
 
-## Architecture (what is real vs. placeholder)
+There is no CI, no test suite beyond unit tests in `src/protocol/framing.rs`, and no lint or format config. When changing code, run at least:
 
-The Rust project is a module skeleton mirroring the Windows components found in the installer:
+```
+cargo build
+cargo test
+cargo clippy
+```
 
-| Module | Maps to Windows binary | Status |
+Report any failure in the final message. Do not hide it.
+
+## Module status
+
+| Module | Maps to Windows component | Status |
 |---|---|---|
-| `src/protocol/packets.rs` | `RvROLClient.dll` packet types (~40 RTTI names) | All fields are `_raw: Vec<u8>` placeholders |
-| `src/discovery/mod.rs` | DNS/DoH (`https://%hs/dns-query`) | Config only, no live resolution |
-| `src/nat/mod.rs` | `RvUESClient.dll` NAT detection | Types only, no detection logic |
-| `src/crypto/mod.rs` | `CCryptoChannel` | Algorithms unknown; placeholder only |
-| `src/transport/mod.rs` | `ROLClient_Send/Receive` | Format unknown; placeholder only |
-| `src/session/mod.rs` | `CRosSessionId` | State machine not implemented |
-| `src/tunnel/mod.rs` | `NetMP60.sys` NDIS virtual adapter | TUN/TAP abstraction, not wired up |
-| `src/daemon/mod.rs` | `RvControlSvc.exe` Windows service | Not implemented |
-| `src/cli/mod.rs` | `RvRvpnGui.exe` Qt GUI | Stub commands only |
+| `protocol` | `RvROLClient.dll` packet types | Packet fields are `_raw: Vec<u8>` placeholders. Framing (`framing.rs`) is implemented and tested. |
+| `discovery` | DNS over HTTPS (`https://%hs/dns-query`) | Config only, no live resolution |
+| `nat` | `RvUESClient.dll` NAT detection | Types only |
+| `crypto` | `CCryptoChannel` | Placeholder. Algorithm unknown. |
+| `transport` | `ROLClient_Send` / `ROLClient_Receive` | Placeholder. Wire format unknown. |
+| `session` | `CRosSessionId` | State machine not implemented |
+| `tunnel` | `NetMP60.sys` NDIS virtual adapter | Abstraction only, not connected to a real TUN/TAP device |
+| `daemon` | `RvControlSvc.exe` | Not implemented |
+| `cli` | `RvRvpnGui.exe` | Stub commands only |
+| `authentication`, `identity`, `peer`, `network`, `routing`, `relay`, `config` | various | Skeleton |
 
-## Critical constraints (do not violate)
+## Hard constraints
 
-- **Do not invent packet fields, ports, algorithms, or server addresses.** Every `desconhecido`/`unknown` in `docs/PROTOCOL_SPEC.md` is genuinely unknown from static analysis.
-- **Do not implement crypto from scratch.** `CCryptoChannel` exists but its algorithm is undetermined.
-- **No Wine, no Windows VM drivers, no third-party VPN (ZeroTier/Tailscale/Hamachi) as base.**
-- **Do not declare compatibility.** Not demonstrated against the official Windows client.
+- Do not invent packet fields, ports, algorithms, key sizes, server addresses, or IP ranges. Anything not confirmed by static or dynamic analysis is marked as unknown in the docs and in code.
+- Do not implement cryptography from scratch. Use `ring` or `rustls`. Map algorithms to them only after they are confirmed by analysis.
+- Do not use Wine, Windows VM drivers, or third-party VPNs (ZeroTier, Tailscale, Hamachi) as a base or a dependency.
+- Do not copy code from reference projects, especially GPL-licensed ones. Reference them conceptually and write original code.
+- Do not claim compatibility with the official client unless it has been demonstrated against it, and say how it was demonstrated.
+- Do not commit proprietary binaries, captures, or dumps.
 
-## Where findings live
+## Code style
 
-- `docs/REVERSE_ENGINEERING.md` — phase 1 findings (components, imports, exports, certificates, driver).
-- `docs/PROTOCOL_SPEC.md` — phase 2 protocol spec. Includes traffic capture findings (section 9).
-- REA evidence IDs are cited in those docs; extracted binaries remain in `/tmp/opencode/radmin_ext/`.
+- No comments in code. Do not add `//`, `///`, `//!`, or block comments. Make names and types carry the meaning. Put explanations of reverse engineering findings in `docs/`, not in source files.
+- When editing a file that already has comments, remove the comments in the lines you touch. Do not add new ones.
+- Follow `rustfmt` defaults and resolve `clippy` warnings in code you touch.
+- Keep placeholders explicit: use `todo!()` or a typed error such as `anyhow::anyhow!("not implemented: ...")`, not silent `Ok(())` returns.
+- Avoid `unwrap()` and `expect()` outside tests and constant initialization.
+- Keep the module boundaries from the table above. Add a module only with a clear mapping to a confirmed component.
 
-## Traffic capture findings (confirmed via tshark)
+## Documentation rules
 
-- **Radmin control port:** `17301` (TCP)
-- **Main server IP:** `148.113.190.78` (also `198.244.203.247`, `45.162.230.182` as alternates)
-- **Frame format:** 4-byte big-endian `uint32_t` = payload size (excludes header), followed by payload bytes
-- **Control packet:** `00 00 00 04 03 00 00 00` (size=4 + payload `03 00 00 00`) — likely keepalive/ACK
-- **Reconnection:** new TCP connection (different source port) to same 17301 after disconnect
-- Captures in `/tmp/radmin_vm2.pcap` and `/tmp/radmin_17301.pcap`
+- Separate three categories in every finding: confirmed, probable, unknown.
+- Cite the evidence (binary, export name, capture frame) for each confirmed claim.
+- Update `docs/PROTOCOL_SPEC.md` when a finding changes. Do not leave the spec contradicting the code.
+- Write documentation in the language already used by the file you are editing. The README is in English.
+
+## Known traffic findings
+
+These come from tshark captures (not versioned, see above):
+
+- Control port: TCP `17301`.
+- Observed server IPs: `148.113.190.78` (main), `198.244.203.247` and `45.162.230.182` (alternates).
+- Frame format: 4-byte big-endian `uint32` with the payload size (header excluded), followed by the payload.
+- Observed control packet: `00 00 00 04 03 00 00 00` (size 4, payload `03 00 00 00`). Probably keepalive or ACK. Not confirmed.
+- After a disconnect, the client opens a new TCP connection (new source port) to the same port 17301.
 
 ## Tooling
 
-- **Ghidra 12.2:** extracted at `/tmp/opencode/ghidra_12.2/ghidra_12.2_PUBLIC/` — use `analyzeHeadless` or GUI to decompile `RvROLClient.dll` and `RvControlSvc.exe`
-- **tshark/wireshark:** available at `/usr/bin/tshark`, `/usr/bin/wireshark` (use `doas` for root)
-- Java 27 available (`/usr/bin/java`)
+- Ghidra 12.2 for decompiling `RvROLClient.dll` and `RvControlSvc.exe`. Use `analyzeHeadless` or the GUI. The two binaries are the highest-value analysis targets.
+- `tshark` / Wireshark for captures. Use `doas` for root operations where needed.
+- Java is required for Ghidra.
 
-## Entry points
+## Working agreements for agents
 
-- Rust lib: `src/lib.rs` (re-exports all modules)
-- Rust binary: `src/main.rs` (CLI via clap, stub commands)
-- Analysis target: `/tmp/opencode/radmin_ext/RvROLClient.dll` and `RvControlSvc.exe` are the highest-value binaries.
+- Read the relevant doc in `docs/` before changing a module that maps to a Windows component.
+- Prefer small, verifiable changes. State what was built, tested, and not tested.
+- If a task needs an unknown protocol detail, stop and report the gap instead of guessing.

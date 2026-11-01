@@ -7,42 +7,29 @@ authors = ["radmin-vpn-linux project"]
 license = "MIT"
 
 [dependencies]
-# Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# TUN/TAP interface virtual (placeholder — abrir /dev/net/tun manualmente;
-# crate `tun` tem problemas de compatibilidade com toolchain atual)
-# tun = "0.2"
-
-# Netlink para rotas/endereços (equivale IPHLPAPI do Windows)
 rtnetlink = "0.7"
 
-# Sockets UDP/TCP
 socket2 = "0.5"
 
-# DNS-over-HTTPS (equivalente ao https://%hs/dns-query do RvROLClient)
 reqwest = { version = "0.11", features = ["json"] }
 
-# Criptografia (NUNCA implementar própria — usar libs consolidadas)
 ring = "0.16"
 rustls = { version = "0.23", features = ["ring"] }
 
-# CLI
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 bytes = "1"
 serde_json = "1"
 toml = "0.8"
 
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Erro
 thiserror = "1"
 anyhow = "1"
 
-# UUID / identificadores de dispositivo (equivalente CAuthSessionId)
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
