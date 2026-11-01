@@ -394,3 +394,41 @@ mod tests {
         assert_eq!(pt, payload);
     }
 }
+
+#[cfg(test)]
+mod state_regression {
+    use super::*;
+
+    #[test]
+    fn corrupted_middle_block_keeps_receive_chain_in_sync() {
+        let key = [0x42u8; 32];
+        let mut sender = FamatechCipherState::new(key);
+        let mut receiver = FamatechCipherState::new(key);
+
+        let first = sender.encrypt(&[0xa0u8; 60]).unwrap();
+        let second = sender.encrypt(&[0xb0u8; 60]).unwrap();
+
+        let mut damaged = first.clone();
+        damaged[BLOCK_SIZE] ^= 0xff;
+        assert!(receiver.decrypt(&damaged).is_err());
+
+        assert_eq!(receiver.decrypt(&second).unwrap(), vec![0xb0u8; 60]);
+    }
+
+    #[test]
+    fn corrupted_last_block_desynchronizes_next_packet() {
+        let key = [0x42u8; 32];
+        let mut sender = FamatechCipherState::new(key);
+        let mut receiver = FamatechCipherState::new(key);
+
+        let first = sender.encrypt(&[0xa0u8; 60]).unwrap();
+        let second = sender.encrypt(&[0xb0u8; 60]).unwrap();
+
+        let mut damaged = first.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 0xff;
+        assert!(receiver.decrypt(&damaged).is_err());
+
+        assert!(receiver.decrypt(&second).is_err());
+    }
+}

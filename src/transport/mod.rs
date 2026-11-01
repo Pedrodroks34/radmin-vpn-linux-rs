@@ -177,7 +177,6 @@ impl TcpChannel {
     ) {
         let mut buffer = [0u8; 65536];
         let mut parser = FrameParser::new();
-        let mut read_buffer = Vec::new();
 
         loop {
             match stream.read(&mut buffer).await {
@@ -187,30 +186,19 @@ impl TcpChannel {
                     }
                     break;
                 }
-                Ok(n) => {
-                    read_buffer.extend_from_slice(&buffer[..n]);
-
-                    match parser.feed(&read_buffer) {
-                        Ok(frames) => {
-                            for frame in frames {
-                                if tx.send(frame).await.is_err() {
-                                    return;
-                                }
+                Ok(n) => match parser.feed(&buffer[..n]) {
+                    Ok(frames) => {
+                        for frame in frames {
+                            if tx.send(frame).await.is_err() {
+                                return;
                             }
-
-                            let remaining = parser.buffered_len();
-                            if remaining > 0 {
-                                read_buffer.drain(..read_buffer.len() - remaining);
-                            } else {
-                                read_buffer.clear();
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Erro de framing: {}", e);
-                            break;
                         }
                     }
-                }
+                    Err(e) => {
+                        warn!("Erro de framing: {}", e);
+                        break;
+                    }
+                },
                 Err(e) => {
                     debug!("Erro de leitura no socket: {}", e);
                     break;
@@ -481,5 +469,72 @@ mod tests {
             result.unwrap_err(),
             FramingError::PayloadTooLarge { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    async fn channel_pair() -> (TcpChannel, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (
+            TcpChannel::from_stream(client, ChannelConfig::default()),
+            server,
+        )
+    }
+
+    fn wire(payload: &[u8]) -> Vec<u8> {
+        FramedPacket::new(payload.to_vec()).unwrap().to_bytes()
+    }
+
+    #[tokio::test]
+    async fn partial_frame_is_not_duplicated_across_reads() {
+        let (mut ch, mut server) = channel_pair().await;
+        let a = vec![0x11; 10];
+        let b = vec![0x22; 300];
+        let c = vec![0x33; 7];
+        let wb = wire(&b);
+
+        let mut first = wire(&a);
+        first.extend_from_slice(&wb[..100]);
+        server.write_all(&first).await.unwrap();
+        server.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut second = wb[100..].to_vec();
+        second.extend_from_slice(&wire(&c));
+        server.write_all(&second).await.unwrap();
+        server.flush().await.unwrap();
+
+        assert_eq!(ch.receive().await.unwrap().payload, a);
+        assert_eq!(ch.receive().await.unwrap().payload, b);
+        assert_eq!(ch.receive().await.unwrap().payload, c);
+    }
+
+    #[tokio::test]
+    async fn byte_by_byte_delivery_preserves_every_frame() {
+        let (mut ch, mut server) = channel_pair().await;
+        let payloads: Vec<Vec<u8>> = (1..=4u8).map(|i| vec![i; 20 * i as usize]).collect();
+        let stream: Vec<u8> = payloads.iter().flat_map(|p| wire(p)).collect();
+
+        let writer = tokio::spawn(async move {
+            for byte in stream {
+                server.write_all(&[byte]).await.unwrap();
+                server.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            server
+        });
+
+        for expected in &payloads {
+            assert_eq!(&ch.receive().await.unwrap().payload, expected);
+        }
+        let _server = writer.await.unwrap();
     }
 }

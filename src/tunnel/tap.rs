@@ -10,11 +10,7 @@ use tracing::info;
 
 const TUNSETIFF: u64 = 0x400454ca;
 
-#[repr(C)]
-struct IfReq {
-    ifr_name: [libc::c_char; libc::IFNAMSIZ],
-    ifr_flags: libc::c_short,
-}
+type IfReq = libc::ifreq;
 
 #[derive(Debug, Error)]
 pub enum TapError {
@@ -51,7 +47,7 @@ impl LinuxTap {
         let fd = file.as_raw_fd();
 
         let mut ifr: IfReq = unsafe { std::mem::zeroed() };
-        ifr.ifr_flags = (libc::IFF_TAP | libc::IFF_NO_PI) as libc::c_short;
+        ifr.ifr_ifru.ifru_flags = (libc::IFF_TAP | libc::IFF_NO_PI) as libc::c_short;
 
         let name_bytes = dev_name.as_bytes();
         let max_len = ifr.ifr_name.len() - 1;
@@ -251,5 +247,25 @@ mod tests {
         tap.write_frame(&reply).await.unwrap();
         let outbound = tap.recv_outbound().await.unwrap();
         assert_eq!(outbound, reply);
+    }
+}
+
+#[cfg(test)]
+mod abi_tests {
+    use super::*;
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    fn ifreq_has_kernel_size_and_flags_offset() {
+        assert_eq!(std::mem::size_of::<IfReq>(), 40);
+        assert_eq!(std::mem::offset_of!(IfReq, ifr_name), 0);
+        assert_eq!(std::mem::offset_of!(IfReq, ifr_ifru), 16);
+    }
+
+    #[tokio::test]
+    #[ignore = "requer /dev/net/tun e CAP_NET_ADMIN"]
+    async fn open_tap_device_with_privileges() {
+        let tap = LinuxTap::open("radtst0").expect("TAP deve abrir com privilégios");
+        assert_eq!(tap.name(), "radtst0");
     }
 }

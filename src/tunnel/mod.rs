@@ -204,6 +204,7 @@ impl ForwardingPump {
         let running_pump = self.running.clone();
         let tap_writer = tap.clone();
         let crypto_out = crypto.clone();
+        let mut crypto_failure: Option<String> = None;
 
         loop {
             tokio::select! {
@@ -231,7 +232,9 @@ impl ForwardingPump {
                                 Err(e) => {
                                     metrics_rx.crypto_errors.fetch_add(1, Ordering::Relaxed);
                                     metrics_rx.dropped_frames.fetch_add(1, Ordering::Relaxed);
-                                    debug!("Quadro corrompido descartado: {}", e);
+                                    error!("Falha de integridade no quadro recebido, encerrando o canal: {}", e);
+                                    crypto_failure = Some(e.to_string());
+                                    break;
                                 }
                             }
                         }
@@ -246,7 +249,10 @@ impl ForwardingPump {
 
         running_pump.store(false, Ordering::SeqCst);
         let _ = tap_reader_handle.abort();
-        Ok(())
+        match crypto_failure {
+            Some(reason) => Err(anyhow::anyhow!("falha criptográfica no canal: {}", reason)),
+            None => Ok(()),
+        }
     }
 
     pub fn stop(&self) {
@@ -259,6 +265,41 @@ mod tests {
     use super::*;
     use crate::crypto::CryptoChannelConfig;
     use crate::transport::{ChannelConfig, TcpChannelListener};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn pump_stops_on_crypto_failure_instead_of_forwarding() {
+        let (mock_tap, _endpoint) = MockTap::new();
+        let tap = Arc::new(AnyTap::Mock(mock_tap));
+
+        let mut crypto_cfg = CryptoChannelConfig::default();
+        crypto_cfg.enabled = true;
+        let crypto = Arc::new(CryptoChannel::with_key(crypto_cfg, [0x33u8; 32]));
+
+        let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_transport = TcpChannel::connect(&addr.to_string(), ChannelConfig::default())
+            .await
+            .unwrap();
+        let mut server_transport = listener.accept().await.unwrap();
+
+        let pump = Arc::new(ForwardingPump::new());
+        let handle = tokio::spawn({
+            let pump = pump.clone();
+            let tap = tap.clone();
+            let crypto = crypto.clone();
+            async move { pump.run(tap, client_transport, crypto).await }
+        });
+
+        server_transport.send(vec![0u8; 32]).await.unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("o pump deve encerrar após falha criptográfica");
+        assert!(outcome.unwrap().is_err());
+    }
 
     #[tokio::test]
     async fn test_forwarding_pump_pipeline() {
