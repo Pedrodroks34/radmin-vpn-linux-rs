@@ -1,3 +1,7 @@
+pub mod handshake;
+
+pub use handshake::{HandshakeNegotiator, HandshakeStage, HANDSHAKE_MAGIC};
+
 use crate::protocol::tlv::{TlvMessage, TlvTag};
 use crate::protocol::{AuthSessionId, RosNodeAddress};
 use crate::transport::{ChannelConfig, TcpChannel};
@@ -9,7 +13,7 @@ use tracing::{debug, info, warn};
 pub const RADMIN_DEFAULT_PORT: u16 = 17301;
 pub const RADMIN_RELAY_PORT: u16 = 17351;
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-pub const INITIAL_MAGIC: [u8; 4] = [0x00, 0x00, 0x00, 0x03];
+pub const INITIAL_MAGIC: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
