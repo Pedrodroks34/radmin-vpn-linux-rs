@@ -29,3 +29,5 @@
 # Temporary files
 *.tmp
 *.log
+
+/references/
