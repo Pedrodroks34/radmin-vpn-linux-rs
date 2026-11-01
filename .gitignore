@@ -1,0 +1,31 @@
+/target
+**/*.rs.bak
+*.toml.bak
+.env
+**/*.log
+/run/radmin-vpn/
+# Swarm runtime
+.swarm/swarm.db*
+.swarm/locks/
+.swarm/runs/
+.swarm/session/
+.swarm/telemetry.jsonl
+.swarm/knowledge-events.jsonl
+.swarm/knowledge-receipts-v2*
+.swarm/learning-health.json
+.swarm/evidence/
+
+# Proprietary binaries and captures
+*.exe
+*.dll
+*.sys
+*.pcap
+*.pcapng
+*.dmp
+
+# Build artifacts
+/target/
+
+# Temporary files
+*.tmp
+*.log
