@@ -18,7 +18,7 @@
 /backup/
 
 # OpenCode Swarm runtime and planning state
-.swarm/
+.swarm/*
 
 # Proprietary binaries and captures
 *.exe
