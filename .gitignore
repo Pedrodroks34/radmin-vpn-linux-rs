@@ -36,3 +36,6 @@
 *.log
 
 /references/
+
+# Local Claude handoff artifacts
+/claude-handoff/
