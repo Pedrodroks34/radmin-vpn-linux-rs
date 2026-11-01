@@ -1,5 +1,7 @@
+pub mod netlink;
 pub mod tap;
 
+pub use netlink::{InterfaceConfigurator, NetlinkError};
 pub use tap::{AnyTap, LinuxTap, MockTap, MockTapEndpoint, TapError};
 
 use crate::crypto::CryptoChannel;
@@ -85,7 +87,40 @@ impl Tunnel {
 
         match LinuxTap::open(&self.config.interface_name) {
             Ok(tap) => {
-                info!("Interface TAP Linux aberta: {}", tap.name());
+                let name = tap.name().to_string();
+                info!("Interface TAP Linux aberta: {}", name);
+
+                // Configurar MTU
+                if let Err(e) = InterfaceConfigurator::set_mtu(&name, self.config.mtu) {
+                    warn!("Não foi possível configurar MTU via Netlink/ioctl: {}", e);
+                }
+
+                // Configurar IP se fornecido
+                if let Some(ip_str) = &self.config.local_ip {
+                    if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                        let netmask = self
+                            .config
+                            .subnet
+                            .as_deref()
+                            .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok())
+                            .unwrap_or(std::net::Ipv4Addr::new(255, 0, 0, 0)); // /8 padrão Radmin 26.0.0.0/8
+
+                        if let Err(e) =
+                            InterfaceConfigurator::set_ip_and_netmask(&name, ip, netmask)
+                        {
+                            warn!(
+                                "Não foi possível atribuir IP virtual via Netlink/ioctl: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Ativar interface (IFF_UP)
+                if let Err(e) = InterfaceConfigurator::set_up(&name) {
+                    warn!("Não foi possível ativar interface (IFF_UP): {}", e);
+                }
+
                 self.device = Some(AnyTap::Linux(tap));
                 Ok(())
             }
