@@ -14,6 +14,11 @@
 .swarm/knowledge-receipts-v2*
 .swarm/learning-health.json
 .swarm/evidence/
+# Local reverse engineering backups
+/backup/
+
+# OpenCode Swarm runtime and planning state
+.swarm/
 
 # Proprietary binaries and captures
 *.exe
