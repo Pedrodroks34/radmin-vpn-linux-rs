@@ -16,7 +16,6 @@ pub struct DiscoveredServer {
 }
 
 pub async fn discover_ros_server(config: &DiscoveryConfig) -> Result<Vec<DiscoveredServer>> {
-
     let _ = config;
     Err(anyhow::anyhow!(
         "Descoberta de servidor ROS não implementada: \

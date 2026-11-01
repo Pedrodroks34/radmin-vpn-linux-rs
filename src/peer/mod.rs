@@ -34,6 +34,8 @@ impl PeerManager {
     }
 
     pub fn find_by_address(&self, addr: &std::net::SocketAddr) -> Option<&Peer> {
-        self.peers.iter().find(|p| p.node_address.ip == addr.ip() && p.node_address.port == addr.port())
+        self.peers
+            .iter()
+            .find(|p| p.node_address.ip == addr.ip() && p.node_address.port == addr.port())
     }
 }

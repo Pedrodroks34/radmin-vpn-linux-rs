@@ -1034,6 +1034,8 @@ dependencies = [
  "anyhow",
  "bytes 1.12.1",
  "clap",
+ "libc",
+ "openssl",
  "reqwest",
  "ring 0.16.20",
  "rtnetlink",

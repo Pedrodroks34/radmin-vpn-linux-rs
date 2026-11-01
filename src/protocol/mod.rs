@@ -1,5 +1,9 @@
-pub mod packets;
 pub mod framing;
+pub mod packets;
+pub mod tlv;
+
+pub use framing::{FrameParser, FramedPacket, FramingError, FRAME_HEADER_SIZE, MAX_PAYLOAD_SIZE};
+pub use tlv::{TlvError, TlvMessage, TlvRecord, TlvTag, TlvType, TlvValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RosMessageType {

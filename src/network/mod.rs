@@ -14,7 +14,9 @@ pub struct NetworkManager {
 
 impl NetworkManager {
     pub fn new() -> Self {
-        Self { networks: Vec::new() }
+        Self {
+            networks: Vec::new(),
+        }
     }
 
     pub async fn join_network(&mut self, _network_id: &str) -> Result<()> {
@@ -28,6 +30,8 @@ impl NetworkManager {
     }
 
     pub async fn add_route(&self, _dest: &str, _gateway: std::net::Ipv4Addr) -> Result<()> {
-        Err(anyhow::anyhow!("Manipulação de rotas não implementada (netlink)"))
+        Err(anyhow::anyhow!(
+            "Manipulação de rotas não implementada (netlink)"
+        ))
     }
 }

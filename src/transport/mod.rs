@@ -1,9 +1,11 @@
-use crate::protocol::framing::{FrameParser, FramedPacket, FramingError, FRAME_HEADER_SIZE};
+use crate::crypto::FamatechCipherState;
+use crate::protocol::framing::{FrameParser, FramedPacket, FRAME_HEADER_SIZE};
 use crate::Result;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelType {
@@ -22,16 +24,20 @@ pub struct ChannelConfig {
     pub priority: u32,
     pub compression: bool,
     pub encryption: bool,
+    pub connect_timeout: Duration,
+    pub keepalive_interval: Duration,
 }
 
 impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
-            channel_type: ChannelType::UdpDirect,
+            channel_type: ChannelType::TcpDirect,
             max_packet_size: 1400,
             priority: 0,
             compression: false,
             encryption: true,
+            connect_timeout: Duration::from_secs(5),
+            keepalive_interval: Duration::from_secs(10),
         }
     }
 }
@@ -57,12 +63,18 @@ impl TransportPacket {
 pub enum TransportError {
     #[error("erro de framing: {0}")]
     Framing(#[from] crate::protocol::framing::FramingError),
+    #[error("erro de criptografia: {0}")]
+    Crypto(#[from] crate::crypto::CryptoError),
     #[error("erro de I/O: {0}")]
     Io(#[from] std::io::Error),
     #[error("conexão fechada")]
     ConnectionClosed,
     #[error("buffer overflow: tamanho excede o limite")]
     BufferOverflow,
+    #[error("timeout ao aguardar operação")]
+    Timeout,
+    #[error("criptografia não habilitada neste canal")]
+    EncryptionNotEnabled,
 }
 
 pub struct TcpChannel {
@@ -70,17 +82,19 @@ pub struct TcpChannel {
     rx: mpsc::Receiver<FramedPacket>,
     max_packet_size: usize,
     config: ChannelConfig,
+    cipher: Option<FamatechCipherState>,
 }
 
 impl TcpChannel {
-
     pub async fn connect(addr: &str, config: ChannelConfig) -> Result<Self> {
-        let stream = tokio::net::TcpStream::connect(addr).await?;
+        let stream =
+            tokio::time::timeout(config.connect_timeout, tokio::net::TcpStream::connect(addr))
+                .await
+                .map_err(|_| TransportError::Timeout)??;
 
         let max_packet_size = config.max_packet_size.max(FRAME_HEADER_SIZE);
-
-        let (mut read_half, write_half) = stream.into_split();
-        let (tx, rx) = mpsc::channel(32);
+        let (read_half, write_half) = stream.into_split();
+        let (tx, rx) = mpsc::channel(64);
 
         tokio::spawn(async move {
             Self::read_loop(read_half, tx, max_packet_size).await;
@@ -91,14 +105,49 @@ impl TcpChannel {
             rx,
             max_packet_size,
             config,
+            cipher: None,
         })
+    }
+
+    pub async fn connect_with_retry(
+        addr: &str,
+        config: ChannelConfig,
+        max_retries: u32,
+        initial_backoff: Duration,
+    ) -> Result<Self> {
+        let mut backoff = initial_backoff;
+        let mut attempts = 0;
+
+        loop {
+            attempts += 1;
+            match Self::connect(addr, config.clone()).await {
+                Ok(channel) => {
+                    info!("Conectado a {} após {} tentativa(s)", addr, attempts);
+                    return Ok(channel);
+                }
+                Err(e) => {
+                    if attempts >= max_retries {
+                        error!(
+                            "Falha ao conectar a {} após {} tentativas: {}",
+                            addr, attempts, e
+                        );
+                        return Err(e);
+                    }
+                    warn!(
+                        "Tentativa {}/{} de conexão a {} falhou ({}); aguardando {:?}",
+                        attempts, max_retries, addr, e, backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                }
+            }
+        }
     }
 
     pub fn from_stream(stream: tokio::net::TcpStream, config: ChannelConfig) -> Self {
         let max_packet_size = config.max_packet_size.max(FRAME_HEADER_SIZE);
-
-        let (mut read_half, write_half) = stream.into_split();
-        let (tx, rx) = mpsc::channel(32);
+        let (read_half, write_half) = stream.into_split();
+        let (tx, rx) = mpsc::channel(64);
 
         tokio::spawn(async move {
             Self::read_loop(read_half, tx, max_packet_size).await;
@@ -109,10 +158,23 @@ impl TcpChannel {
             rx,
             max_packet_size,
             config,
+            cipher: None,
         }
     }
 
-    async fn read_loop(mut stream: tokio::net::tcp::OwnedReadHalf, tx: mpsc::Sender<FramedPacket>, max_packet_size: usize) {
+    pub fn enable_encryption(&mut self, key: [u8; 32]) {
+        self.cipher = Some(FamatechCipherState::new(key));
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher.is_some()
+    }
+
+    async fn read_loop(
+        mut stream: tokio::net::tcp::OwnedReadHalf,
+        tx: mpsc::Sender<FramedPacket>,
+        _max_packet_size: usize,
+    ) {
         let mut buffer = [0u8; 65536];
         let mut parser = FrameParser::new();
         let mut read_buffer = Vec::new();
@@ -120,9 +182,8 @@ impl TcpChannel {
         loop {
             match stream.read(&mut buffer).await {
                 Ok(0) => {
-
                     if let Err(e) = parser.finish() {
-                        eprintln!("Frame truncado ao finalizar: {}", e);
+                        debug!("Frame truncado ao finalizar: {}", e);
                     }
                     break;
                 }
@@ -132,7 +193,9 @@ impl TcpChannel {
                     match parser.feed(&read_buffer) {
                         Ok(frames) => {
                             for frame in frames {
-                                let _ = tx.send(frame).await;
+                                if tx.send(frame).await.is_err() {
+                                    return;
+                                }
                             }
 
                             let remaining = parser.buffered_len();
@@ -143,13 +206,13 @@ impl TcpChannel {
                             }
                         }
                         Err(e) => {
-                            eprintln!("Erro de framing: {}", e);
+                            warn!("Erro de framing: {}", e);
                             break;
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Erro de leitura: {}", e);
+                    debug!("Erro de leitura no socket: {}", e);
                     break;
                 }
             }
@@ -172,13 +235,39 @@ impl TcpChannel {
         self.send_frame(packet).await
     }
 
+    /// Cifra o payload com o estado criptográfico Famatech e envia dentro de um frame TCP.
+    pub async fn send_secure(&mut self, plaintext: &[u8]) -> Result<()> {
+        let ciphertext = match &mut self.cipher {
+            Some(cipher) => cipher.encrypt(plaintext)?,
+            None => return Err(TransportError::EncryptionNotEnabled.into()),
+        };
+
+        let packet = FramedPacket::new(ciphertext)?;
+        self.send_frame(packet).await
+    }
+
     pub async fn receive(&mut self) -> Result<FramedPacket> {
-        self.rx.recv().await
+        self.rx
+            .recv()
+            .await
             .ok_or_else(|| anyhow::Error::from(TransportError::ConnectionClosed))
     }
 
+    /// Recebe o próximo frame TCP, decifra o ciphertext e valida integridade/trailer.
+    pub async fn receive_secure(&mut self) -> Result<Vec<u8>> {
+        let frame = self.receive().await?;
+        match &mut self.cipher {
+            Some(cipher) => {
+                let plaintext = cipher.decrypt(&frame.payload)?;
+                Ok(plaintext)
+            }
+            None => Err(TransportError::EncryptionNotEnabled.into()),
+        }
+    }
+
     pub fn try_receive(&mut self) -> Result<FramedPacket> {
-        self.rx.try_recv()
+        self.rx
+            .try_recv()
             .map_err(|_| anyhow::Error::from(TransportError::ConnectionClosed))
     }
 
@@ -198,10 +287,13 @@ pub struct TcpChannelListener {
 }
 
 impl TcpChannelListener {
-
     pub async fn bind(addr: &str, config: ChannelConfig) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         Ok(Self { listener, config })
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
     }
 
     pub async fn accept(&self) -> Result<TcpChannel> {
@@ -213,18 +305,16 @@ impl TcpChannelListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::framing::{FramedPacket, FrameParser, MAX_PAYLOAD_SIZE, FRAME_HEADER_SIZE};
+    use crate::protocol::framing::{FrameParser, FramedPacket, FramingError};
 
     #[tokio::test]
     async fn test_tcp_channel_send_receive_frame() {
-
-        let config = ChannelConfig::default();
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let mut client = tokio::net::TcpStream::connect(&addr.to_string()).await.unwrap();
-
+        let mut client = tokio::net::TcpStream::connect(&addr.to_string())
+            .await
+            .unwrap();
         let (mut server, _) = listener.accept().await.unwrap();
 
         let test_payload = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03];
@@ -245,14 +335,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tcp_channel_secure_exchange() {
+        let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+            .await
+            .unwrap();
+        let addr = listener.listener.local_addr().unwrap();
+
+        let mut client_channel = TcpChannel::connect(&addr.to_string(), ChannelConfig::default())
+            .await
+            .unwrap();
+        let mut server_channel = listener.accept().await.unwrap();
+
+        let shared_key = [0x42u8; 32];
+        client_channel.enable_encryption(shared_key);
+        server_channel.enable_encryption(shared_key);
+
+        // Cliente envia pacote cifrado
+        let secret_msg = b"Ethernet Frame Data 0123456789".to_vec();
+        client_channel.send_secure(&secret_msg).await.unwrap();
+
+        // Servidor recebe e decifra
+        let received = server_channel.receive_secure().await.unwrap();
+        assert_eq!(received, secret_msg);
+
+        // Servidor responde cifrado
+        let response = b"ACK Ethernet Frame".to_vec();
+        server_channel.send_secure(&response).await.unwrap();
+
+        // Cliente recebe e decifra
+        let client_received = client_channel.receive_secure().await.unwrap();
+        assert_eq!(client_received, response);
+    }
+
+    #[tokio::test]
     async fn test_tcp_channel_fragmented_receive() {
-
-        let config = ChannelConfig::default();
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let mut client = tokio::net::TcpStream::connect(&addr.to_string()).await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(&addr.to_string())
+            .await
+            .unwrap();
         let (mut server, _) = listener.accept().await.unwrap();
 
         let payload = vec![0xaa; 1000];
@@ -293,12 +415,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_frames_in_one_read() {
-        let config = ChannelConfig::default();
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let mut client = tokio::net::TcpStream::connect(&addr.to_string()).await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(&addr.to_string())
+            .await
+            .unwrap();
         let (mut server, _) = listener.accept().await.unwrap();
 
         let pkt1 = FramedPacket::new(vec![1, 2, 3]).unwrap();
@@ -324,12 +446,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_tcp_channel_disconnect_with_partial_frame() {
-        let config = ChannelConfig::default();
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let mut client = tokio::net::TcpStream::connect(&addr.to_string()).await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(&addr.to_string())
+            .await
+            .unwrap();
         let (mut server, _) = listener.accept().await.unwrap();
 
         client.write_all(&[0x00, 0x00, 0x00, 0x20]).await.unwrap();
@@ -352,9 +474,7 @@ mod tests {
     async fn test_tcp_channel_oversized_payload_rejection() {
         let mut parser = FrameParser::new();
 
-        let result = parser.feed(&[
-            0x00, 0x01, 0x00, 0x01,
-        ]);
+        let result = parser.feed(&[0x00, 0x01, 0x00, 0x01]);
 
         assert!(result.is_err());
         assert!(matches!(
