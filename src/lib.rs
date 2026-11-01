@@ -16,7 +16,7 @@ pub mod transport;
 pub mod tunnel;
 
 pub use anyhow::Result;
-pub use tracing::{error, info, warn, debug};
+pub use tracing::{debug, error, info, warn};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

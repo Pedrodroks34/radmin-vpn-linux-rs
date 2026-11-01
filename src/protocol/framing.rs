@@ -10,7 +10,6 @@ pub struct FramedPacket {
 }
 
 impl FramedPacket {
-
     pub fn new(payload: Vec<u8>) -> Result<Self, FramingError> {
         if payload.is_empty() {
             return Err(FramingError::ZeroPayload);
@@ -51,11 +50,8 @@ pub struct FrameParser {
 }
 
 impl FrameParser {
-
     pub fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
     pub fn feed(&mut self, data: &[u8]) -> Result<Vec<FramedPacket>, FramingError> {
@@ -67,7 +63,6 @@ impl FrameParser {
         let mut frames = Vec::new();
 
         loop {
-
             if self.buffer.len() < FRAME_HEADER_SIZE {
                 break;
             }
@@ -152,7 +147,6 @@ impl FrameParser {
             self.buffer[3],
         ]) as usize;
         if payload_size == 0 || payload_size > MAX_PAYLOAD_SIZE {
-
             return Err(FramingError::TruncatedPayload {
                 needed: FRAME_HEADER_SIZE + payload_size,
                 available: self.buffer.len(),
@@ -176,11 +170,9 @@ mod tests {
     use super::*;
 
     const FRAME_36: &[u8] = &[
-        0x00, 0x00, 0x00, 0x20,
-        0xd9, 0x39, 0x6b, 0x38, 0xe6, 0x5a, 0x30, 0xb6,
-        0x65, 0xa8, 0xd9, 0x03, 0x43, 0xce, 0x5d, 0x02,
-        0x42, 0x7b, 0x90, 0xf8, 0x0b, 0x21, 0xe2, 0x7b,
-        0xff, 0x06, 0xe3, 0xe7, 0x83, 0xaf, 0xe6, 0x7f,
+        0x00, 0x00, 0x00, 0x20, 0xd9, 0x39, 0x6b, 0x38, 0xe6, 0x5a, 0x30, 0xb6, 0x65, 0xa8, 0xd9,
+        0x03, 0x43, 0xce, 0x5d, 0x02, 0x42, 0x7b, 0x90, 0xf8, 0x0b, 0x21, 0xe2, 0x7b, 0xff, 0x06,
+        0xe3, 0xe7, 0x83, 0xaf, 0xe6, 0x7f,
     ];
 
     #[test]
@@ -253,19 +245,14 @@ mod tests {
         let mut parser = FrameParser::new();
         let result = parser.feed(&[0x00, 0x00, 0x00, 0x00]);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            FramingError::ZeroPayload
-        ));
+        assert!(matches!(result.unwrap_err(), FramingError::ZeroPayload));
     }
 
     #[test]
     fn reject_oversized_payload() {
         let mut parser = FrameParser::new();
 
-        let result = parser.feed(&[
-            0x00, 0x01, 0x11, 0x70,
-        ]);
+        let result = parser.feed(&[0x00, 0x01, 0x11, 0x70]);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

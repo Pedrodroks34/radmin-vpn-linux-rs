@@ -31,13 +31,14 @@ pub struct IdentityStore;
 
 impl IdentityStore {
     pub fn load() -> Result<LocalIdentity> {
-
         Err(anyhow::anyhow!(
             "Identidade não encontrada: registre o dispositivo primeiro (ROLClient_Register)"
         ))
     }
 
     pub fn save(_identity: &LocalIdentity) -> Result<()> {
-        Err(anyhow::anyhow!("Persistência de identidade não implementada"))
+        Err(anyhow::anyhow!(
+            "Persistência de identidade não implementada"
+        ))
     }
 }

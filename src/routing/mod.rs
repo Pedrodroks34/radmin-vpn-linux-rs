@@ -22,6 +22,8 @@ impl RouteTable {
     }
 
     pub async fn apply_to_system(&self) -> Result<()> {
-        Err(anyhow::anyhow!("Aplicação de rotas via netlink não implementada"))
+        Err(anyhow::anyhow!(
+            "Aplicação de rotas via netlink não implementada"
+        ))
     }
 }

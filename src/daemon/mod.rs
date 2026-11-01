@@ -38,4 +38,8 @@ impl Daemon {
     pub fn state(&self) -> DaemonState {
         self.state
     }
+
+    pub fn config(&self) -> &crate::config::Config {
+        &self.config
+    }
 }
