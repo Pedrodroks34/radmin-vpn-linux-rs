@@ -2,7 +2,8 @@ pub mod famatech;
 
 pub use famatech::{
     famatech_checksum_64, famatech_fold_md5, famatech_pad_and_sign, famatech_verify_and_unpad,
-    CryptoError, FamatechCipherState, BLOCK_SIZE, MAX_PAD_LEN, MIN_PAD_LEN, PAD_BYTE, TRAILER_SIZE,
+    CryptoError, FamatechCipherState, AES_256_KEY_SIZE, BLOCK_SIZE, MAX_PAD_LEN, MIN_PAD_LEN,
+    PAD_BYTE, RSESSION_KEY_BUFFER_SIZE, TRAILER_SIZE,
 };
 
 use crate::Result;
@@ -44,8 +45,27 @@ impl CryptoChannel {
         }
     }
 
+    pub fn with_cipher_state(config: CryptoChannelConfig, cipher: FamatechCipherState) -> Self {
+        Self {
+            config,
+            state: Some(Mutex::new(cipher)),
+        }
+    }
+
     pub fn set_key(&mut self, key: [u8; 32]) {
         self.state = Some(Mutex::new(FamatechCipherState::new(key)));
+    }
+
+    pub fn set_cipher_state(&mut self, cipher: FamatechCipherState) {
+        self.state = Some(Mutex::new(cipher));
+    }
+
+    pub fn clear(&mut self) {
+        if let Some(state) = self.state.take() {
+            if let Ok(mut guard) = state.lock() {
+                guard.clear();
+            }
+        }
     }
 
     pub fn is_encrypted(&self) -> bool {

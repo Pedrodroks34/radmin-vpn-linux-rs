@@ -1,20 +1,43 @@
 pub mod handshake;
 
-pub use handshake::{HandshakeNegotiator, HandshakeStage, HANDSHAKE_MAGIC};
+pub use handshake::{
+    HandshakeError, HandshakeNegotiator, HandshakeStage, HandshakeStepOutput, RSessionServer,
+    DEFAULT_RSA_PUBLIC_EXPONENT, HANDSHAKE_MAGIC, RSESSION_AES256_KEY_SIZE,
+    RSESSION_CLIENT_HEADER_SIZE, RSESSION_KEY_MATERIAL_SIZE, RSESSION_PLAINTEXT_SIZE,
+    RSESSION_RSA_BLOCK_SIZE, RSESSION_SERVER_TOKEN_SIZE, SHELPER_NETWORK_PROTOCOL_VERSION,
+};
 
-use crate::protocol::tlv::{TlvMessage, TlvTag};
 use crate::protocol::{AuthSessionId, RosNodeAddress};
 use crate::transport::{ChannelConfig, TcpChannel};
 use crate::Result;
+use openssl::bn::BigNum;
+use openssl::pkey::Public;
 use openssl::rsa::Rsa;
 use std::time::{Duration, Instant, SystemTime};
-use tracing::{debug, info, warn};
+use thiserror::Error;
+use tracing::{info, warn};
 
 pub const RADMIN_DEFAULT_PORT: u16 = 17301;
 pub const RADMIN_RELAY_PORT: u16 = 17351;
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-pub const INITIAL_MAGIC: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const INITIAL_MAGIC: [u8; 4] = HANDSHAKE_MAGIC;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SessionError {
+    #[error("sessão encerrada permanentemente (Closed); não pode ser reutilizada")]
+    SessionClosed,
+    #[error("operação inválida no estado atual da sessão: {state:?}")]
+    InvalidState { state: SessionState },
+    #[error("sessão não está ativa e autenticada (estado atual: {state:?})")]
+    SessionNotActive { state: SessionState },
+    #[error("canal criptográfico não está instalado na sessão")]
+    EncryptionNotInstalled,
+    #[error("chave pública RSA-2048 do servidor não configurada para o handshake RSession")]
+    MissingServerPublicKey,
+    #[error("timeout aguardando resposta de handshake do servidor")]
+    HandshakeTimeout,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
@@ -26,6 +49,7 @@ pub enum SessionState {
     SessionActive,
     Reconnecting,
     Failed(String),
+    Closed,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,12 +83,27 @@ impl Default for Session {
     }
 }
 
+/// Gerenciador do ciclo de vida da sessão Radmin VPN (`SHelper_RSession` + `SHelper_CChannel`).
+///
+/// Invariantes garantidos (Fase 1):
+/// 1. Uma conexão TCP estabelecida (`ConnectedUnencrypted`) NÃO é uma sessão ativa nem permite
+///    envio/recepção de dados de sessão.
+/// 2. O recebimento do token de 4 bytes sem material de chave válido de 64 bytes (`is_established == true`)
+///    e instalação efetiva do `FamatechCipherState` nunca ativa a sessão.
+/// 3. Qualquer falha, desconexão, timeout ou pacote de tamanho inesperado durante o handshake
+///    transiciona para `SessionState::Failed`, zera o material criptográfico e encerra o canal TCP.
+/// 4. Uma sessão encerrada via `close()` transiciona para `SessionState::Closed`, descarta o estado
+///    criptográfico e rejeita tentativas de reutilização.
 pub struct SessionManager {
     session: Session,
     channel: Option<TcpChannel>,
-    rsa_key: Option<Rsa<openssl::pkey::Private>>,
-    server_addr: Option<String>,
     negotiator: Option<HandshakeNegotiator>,
+    server_public_key: Option<Rsa<Public>>,
+    client_params: [u32; 3],
+    server_token: Option<u32>,
+    server_addr: Option<String>,
+    handshake_timeout: Duration,
+    connect_retries: u32,
 }
 
 impl Default for SessionManager {
@@ -78,10 +117,76 @@ impl SessionManager {
         Self {
             session: Session::default(),
             channel: None,
-            rsa_key: None,
-            server_addr: None,
             negotiator: None,
+            server_public_key: None,
+            client_params: [0, 0, 0],
+            server_token: None,
+            server_addr: None,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            connect_retries: 3,
         }
+    }
+
+    /// Cria um [`SessionManager`] configurado com a chave pública RSA-2048 do servidor e os
+    /// 3 DWORDs de parâmetros do cliente (`SHelper_RSession_CreateClient`, `shelper.dll!0x1006b860`).
+    pub fn with_server_public_key(
+        client_params: [u32; 3],
+        server_public_key: Rsa<Public>,
+    ) -> Result<Self> {
+        let mut mgr = Self::new();
+        mgr.set_client_params(client_params);
+        mgr.set_server_public_key(server_public_key)?;
+        Ok(mgr)
+    }
+
+    /// Configura a chave pública RSA-2048 do servidor a partir dos componentes big-endian
+    /// (`modulus`, `exponent`), conforme `SHelper_RSAHelper_CreatePublic` (`shelper.dll!0x100660a7`).
+    pub fn set_server_public_key_components(
+        &mut self,
+        modulus: &[u8],
+        exponent: &[u8],
+    ) -> Result<()> {
+        if modulus.is_empty() || exponent.is_empty() {
+            return Err(
+                HandshakeError::InvalidRsaKey("módulo ou expoente RSA vazio".to_string()).into(),
+            );
+        }
+        let n = BigNum::from_slice(modulus).map_err(|e| {
+            HandshakeError::InvalidRsaKey(format!("BN_bin2bn(modulus) falhou: {e}"))
+        })?;
+        let e = BigNum::from_slice(exponent).map_err(|e| {
+            HandshakeError::InvalidRsaKey(format!("BN_bin2bn(exponent) falhou: {e}"))
+        })?;
+        let pub_key = Rsa::from_public_components(n, e).map_err(|err| {
+            HandshakeError::InvalidRsaKey(format!("Rsa::from_public_components falhou: {err}"))
+        })?;
+        self.set_server_public_key(pub_key)
+    }
+
+    /// Configura a chave pública RSA-2048 do servidor (deve ter 256 bytes / 2048 bits).
+    pub fn set_server_public_key(&mut self, pub_key: Rsa<Public>) -> Result<()> {
+        if pub_key.size() as usize != RSESSION_RSA_BLOCK_SIZE {
+            return Err(HandshakeError::InvalidRsaKey(format!(
+                "tamanho de chave RSA inválido: {} bytes (esperado {} bytes)",
+                pub_key.size(),
+                RSESSION_RSA_BLOCK_SIZE
+            ))
+            .into());
+        }
+        self.server_public_key = Some(pub_key);
+        Ok(())
+    }
+
+    pub fn set_client_params(&mut self, client_params: [u32; 3]) {
+        self.client_params = client_params;
+    }
+
+    pub fn set_handshake_timeout(&mut self, timeout: Duration) {
+        self.handshake_timeout = timeout;
+    }
+
+    pub fn set_connect_retries(&mut self, retries: u32) {
+        self.connect_retries = retries.max(1);
     }
 
     pub fn state(&self) -> SessionState {
@@ -96,182 +201,335 @@ impl SessionManager {
         &self.session.stats
     }
 
-    pub fn negotiator(&self) -> Option<&HandshakeNegotiator> {
-        self.negotiator.as_ref()
+    pub fn server_token(&self) -> Option<u32> {
+        self.server_token
     }
 
-    /// Gera ou carrega a chave RSA de 2048 bits para o handshake de autenticação.
-    pub fn ensure_rsa_key(&mut self) -> Result<()> {
-        if self.rsa_key.is_none() {
-            let rsa = Rsa::generate(2048)?;
-            self.rsa_key = Some(rsa);
+    pub fn is_active(&self) -> bool {
+        self.session.state == SessionState::SessionActive && self.is_encrypted()
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.channel.as_ref().is_some_and(|ch| ch.is_encrypted())
+    }
+
+    /// Estabelece apenas a conexão TCP subjacente e transiciona para [`SessionState::ConnectedUnencrypted`].
+    ///
+    /// A sessão permanece não autenticada e não ativa até que [`Self::perform_handshake`] conclua
+    /// todas as etapas do protocolo `SHelper_RSession` e instale o canal criptográfico.
+    pub async fn connect_tcp(&mut self, addr: &str) -> Result<()> {
+        if self.session.state == SessionState::Closed {
+            return Err(SessionError::SessionClosed.into());
         }
-        Ok(())
-    }
 
-    /// Conecta ao servidor e executa a máquina de estados do handshake.
-    pub async fn connect(&mut self, addr: &str) -> Result<()> {
+        // Descarta qualquer estado anterior antes de iniciar nova tentativa
+        self.cleanup_resources().await;
+
         self.server_addr = Some(addr.to_string());
         self.session.state = SessionState::Connecting;
-        info!("Iniciando conexão de sessão com {}", addr);
+        info!("Iniciando conexão TCP de sessão com {}", addr);
 
         let config = ChannelConfig {
-            connect_timeout: Duration::from_secs(5),
+            connect_timeout: self.handshake_timeout,
             keepalive_interval: KEEPALIVE_INTERVAL,
-            ..Default::default()
+            ..ChannelConfig::default()
         };
 
-        let channel =
-            match TcpChannel::connect_with_retry(addr, config, 3, Duration::from_millis(500)).await
-            {
-                Ok(ch) => ch,
-                Err(e) => {
-                    let err_msg = format!("Falha de conexão com {}: {}", addr, e);
-                    self.session.state = SessionState::Failed(err_msg.clone());
-                    return Err(anyhow::anyhow!(err_msg));
-                }
-            };
+        let channel = match TcpChannel::connect_with_retry(
+            addr,
+            config,
+            self.connect_retries,
+            Duration::from_millis(200),
+        )
+        .await
+        {
+            Ok(ch) => ch,
+            Err(e) => {
+                let err_msg = format!("Falha de conexão TCP com {addr}: {e}");
+                return Err(self.fail_session(err_msg).await);
+            }
+        };
 
         self.channel = Some(channel);
         self.session.state = SessionState::ConnectedUnencrypted;
-
-        // Executa a sequência de handshake real aguardando confirmação do servidor
-        if let Err(e) = self.perform_handshake().await {
-            let err_msg = format!("Handshake falhou: {}", e);
-            self.session.state = SessionState::Failed(err_msg.clone());
-            return Err(anyhow::anyhow!(err_msg));
-        }
-
         Ok(())
     }
 
-    /// Executa o fluxo de handshake observado nos PCAPs:
-    /// 1. Envia magic frame unencrypted (0x03000000)
-    /// 2. Aguarda e valida a resposta de confirmação de magic do servidor
-    /// 3. Envia TLV com RSA public key (0x090001ca) e session token (0x010001df)
-    /// 4. Aguarda e valida a resposta de chave/token do servidor
-    /// 5. Ativa criptografia AES-256-CBC negociada e transiciona para SessionActive
-    async fn perform_handshake(&mut self) -> Result<()> {
-        self.ensure_rsa_key()?;
-        let rsa = self.rsa_key.as_ref().unwrap();
+    /// Conecta ao servidor via TCP e executa integralmente a máquina de estados do handshake `SHelper_RSession`.
+    pub async fn connect(&mut self, addr: &str) -> Result<()> {
+        self.connect_tcp(addr).await?;
+        self.perform_handshake().await
+    }
 
-        let mut negotiator = HandshakeNegotiator::new();
-        negotiator.set_rsa_key(rsa.clone());
-
-        let channel = self
-            .channel
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Canal TCP ausente"))?;
-
-        // 1. Enviar magic header inicial (0x03000000 em frame de 4 bytes)
-        self.session.state = SessionState::Handshaking;
-        let magic_bytes = negotiator.build_magic_packet();
-        channel.send(magic_bytes.clone()).await?;
-        self.session.stats.tx_bytes += 4 + magic_bytes.len() as u64;
-        self.session.stats.tx_packets += 1;
-
-        // 2. Aguardar resposta de magic do servidor com timeout
-        let magic_resp = tokio::time::timeout(HANDSHAKE_TIMEOUT, channel.receive())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("Timeout aguardando confirmação de magic do servidor")
-            })??;
-        self.session.stats.rx_bytes += 4 + magic_resp.payload.len() as u64;
-        self.session.stats.rx_packets += 1;
-        negotiator.verify_magic_response(&magic_resp.payload)?;
-
-        // 3. Transicionar para KeyExchange e enviar TLV com chave pública RSA
-        self.session.state = SessionState::KeyExchange;
-        let hello_bytes = negotiator.build_client_hello()?;
-        channel.send(hello_bytes.clone()).await?;
-        self.session.stats.tx_bytes += 4 + hello_bytes.len() as u64;
-        self.session.stats.tx_packets += 1;
-
-        // 4. Aguardar resposta real de chave/token do servidor com timeout
-        let server_resp = tokio::time::timeout(HANDSHAKE_TIMEOUT, channel.receive())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("Timeout aguardando resposta de chave/token do servidor")
-            })??;
-        self.session.stats.rx_bytes += 4 + server_resp.payload.len() as u64;
-        self.session.stats.rx_packets += 1;
-
-        let key_opt = negotiator.process_server_response(&server_resp.payload)?;
-        if let Some(key) = key_opt {
-            channel.enable_encryption(key);
-            info!("Criptografia AES-256-CBC ativada no canal da sessão");
+    /// Executa o fluxo de handshake comprovado em `shelper.dll!0x1006b860` / `0x1006a2b0`
+    /// e `RvROLClient.dll!0x10096660..0x10096b28` / `0x100df250`:
+    ///
+    /// 1. Exige estado inicial [`SessionState::ConnectedUnencrypted`] e chave pública RSA-2048 do servidor.
+    /// 2. Transiciona para [`SessionState::Handshaking`].
+    /// 3. Executa Estado 0 (`0x1006a512`): gera 76 bytes (`12B` header + `64B` CSPRNG), cifra com
+    ///    RSA-2048 PKCS#1 v1.5 em um bloco de 256 bytes (`0x100`) e envia no canal TCP.
+    /// 4. Transiciona para [`SessionState::KeyExchange`] e aguarda a resposta real do servidor.
+    /// 5. Executa Estado 2 (`0x1006a4cc`): valida estritamente o token de 4 bytes (`0x04`) do servidor,
+    ///    marcando `is_established = true`.
+    /// 6. Obtém o material de chave de 64 bytes (`0x1006ba80`), extrai os primeiros 32 bytes (`0x20`)
+    ///    como chave AES-256 (`RvROLClient.dll!0x100df250`) e instala o [`crate::crypto::FamatechCipherState`]
+    ///    com IVs zerados (`0x10062ca9`) no canal TCP.
+    /// 7. Somente após a instalação confirmada da chave transiciona para [`SessionState::SessionActive`].
+    pub async fn perform_handshake(&mut self) -> Result<()> {
+        if self.session.state == SessionState::Closed {
+            return Err(SessionError::SessionClosed.into());
         }
 
-        // 5. Só ativa a sessão após a confirmação exigida
+        if self.session.state != SessionState::ConnectedUnencrypted {
+            let current = self.session.state.clone();
+            let err_msg = format!(
+                "perform_handshake exige estado ConnectedUnencrypted, encontrado {current:?}"
+            );
+            return Err(self.fail_session(err_msg).await);
+        }
+
+        let server_pub_key = match self.server_public_key.as_ref() {
+            Some(pk) => {
+                let n = pk.n().to_owned().map_err(|e| anyhow::anyhow!(e))?;
+                let e = pk.e().to_owned().map_err(|e| anyhow::anyhow!(e))?;
+                Rsa::from_public_components(n, e).map_err(|e| anyhow::anyhow!(e))?
+            }
+            None => {
+                return Err(self
+                    .fail_session(SessionError::MissingServerPublicKey.to_string())
+                    .await);
+            }
+        };
+
+        // Cria um negociador novo para esta sessão (nunca reutiliza estado criptográfico anterior)
+        let mut negotiator =
+            match HandshakeNegotiator::with_server_public_key(self.client_params, server_pub_key) {
+                Ok(neg) => neg,
+                Err(e) => {
+                    return Err(self
+                        .fail_session(format!("Falha ao inicializar RSession: {e}"))
+                        .await);
+                }
+            };
+
+        // Etapa 1: Estado 0 -> gera pacote RSA de 256 bytes e envia
+        self.session.state = SessionState::Handshaking;
+        let step1 = match negotiator.get_next_buffer(None) {
+            Ok(step) => step,
+            Err(e) => {
+                return Err(self
+                    .fail_session(format!("Falha no Estado 0 do handshake: {e}"))
+                    .await);
+            }
+        };
+
+        let rsa_block = match step1.output {
+            Some(pkt) if pkt.len() == RSESSION_RSA_BLOCK_SIZE && !step1.is_complete => pkt,
+            _ => {
+                return Err(self
+                    .fail_session("Estado 0 não produziu bloco RSA de 256 bytes".to_string())
+                    .await);
+            }
+        };
+
+        {
+            let channel = match self.channel.as_mut() {
+                Some(ch) => ch,
+                None => {
+                    return Err(self.fail_session("Canal TCP ausente no handshake").await);
+                }
+            };
+
+            if let Err(e) = channel.send(rsa_block.clone()).await {
+                return Err(self
+                    .fail_session(format!("Falha ao enviar bloco RSA de 256 bytes: {e}"))
+                    .await);
+            }
+        }
+        self.session.stats.tx_bytes += (4 + rsa_block.len()) as u64;
+        self.session.stats.tx_packets += 1;
+
+        // Etapa 2: Aguarda o token de 4 bytes do servidor (Estado 2)
+        self.session.state = SessionState::KeyExchange;
+        let timeout_duration = self.handshake_timeout;
+
+        let response_frame = {
+            let channel = match self.channel.as_mut() {
+                Some(ch) => ch,
+                None => {
+                    return Err(self
+                        .fail_session("Canal TCP ausente na troca de chaves")
+                        .await);
+                }
+            };
+
+            match tokio::time::timeout(timeout_duration, channel.receive()).await {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(e)) => {
+                    return Err(self
+                        .fail_session(format!(
+                            "Conexão encerrada ou inválida aguardando token do servidor: {e}"
+                        ))
+                        .await);
+                }
+                Err(_) => {
+                    return Err(self
+                        .fail_session(SessionError::HandshakeTimeout.to_string())
+                        .await);
+                }
+            }
+        };
+
+        self.session.stats.rx_bytes += (4 + response_frame.payload.len()) as u64;
+        self.session.stats.rx_packets += 1;
+
+        // Processa o token de 4 bytes no Estado 2 (0x1006a4cc)
+        let step2 = match negotiator.get_next_buffer(Some(&response_frame.payload)) {
+            Ok(step) => step,
+            Err(e) => {
+                return Err(self
+                    .fail_session(format!("Resposta de servidor inválida no Estado 2: {e}"))
+                    .await);
+            }
+        };
+
+        if !step2.is_complete || !negotiator.is_established() {
+            return Err(self
+                .fail_session("Handshake RSession incompleto após Estado 2".to_string())
+                .await);
+        }
+
+        // Etapa 3: Obtém o token de 4 bytes e instala o FamatechCipherState (32B de 64B CSPRNG)
+        let server_token = match negotiator.get_server_token() {
+            Ok(tok) => tok,
+            Err(e) => {
+                return Err(self
+                    .fail_session(format!("Token do servidor indisponível: {e}"))
+                    .await);
+            }
+        };
+
+        let cipher = match negotiator.create_cipher() {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(self
+                    .fail_session(format!("Material de chave de sessão indisponível: {e}"))
+                    .await);
+            }
+        };
+
+        {
+            let channel = match self.channel.as_mut() {
+                Some(ch) => ch,
+                None => {
+                    return Err(self
+                        .fail_session("Canal TCP ausente ao instalar chave AES-256")
+                        .await);
+                }
+            };
+            channel.enable_cipher(cipher);
+            if !channel.is_encrypted() {
+                return Err(self
+                    .fail_session(SessionError::EncryptionNotInstalled.to_string())
+                    .await);
+            }
+        }
+
+        self.server_token = Some(server_token);
+        self.negotiator = Some(negotiator);
         self.session.state = SessionState::SessionActive;
         self.session.connected_since = Some(SystemTime::now());
         self.session.stats.last_activity = Some(Instant::now());
-        self.negotiator = Some(negotiator);
 
-        info!("Sessão estabelecida e confirmada pelo servidor com sucesso!");
+        info!(
+            "Sessão RSession estabelecida e canal AES-256-CBC ativado (token: 0x{:08x})",
+            server_token
+        );
         Ok(())
     }
 
-    /// Habilita criptografia AES no canal subjacente usando a chave de 256 bits negociada.
-    pub fn enable_session_cipher(&mut self, session_key: [u8; 32]) {
-        if let Some(channel) = self.channel.as_mut() {
-            channel.enable_encryption(session_key);
-            info!("Criptografia AES-256-CBC ativada na sessão");
+    /// Tenta ativar a sessão diretamente a partir de um [`HandshakeNegotiator`] externo.
+    /// Garante que um token isolado sem chave (`!negotiator.is_established()`) jamais ative a sessão.
+    pub async fn activate_from_negotiator(
+        &mut self,
+        negotiator: HandshakeNegotiator,
+    ) -> Result<()> {
+        if self.session.state == SessionState::Closed {
+            return Err(SessionError::SessionClosed.into());
         }
-    }
 
-    /// Envia pacote de keepalive periódico.
-    pub async fn send_keepalive(&mut self) -> Result<()> {
-        if self.session.state != SessionState::SessionActive {
-            return Ok(());
+        if !negotiator.is_established() {
+            return Err(self
+                .fail_session(
+                    "Tentativa de ativar sessão sem handshake RSession concluído e sem material de chave"
+                        .to_string(),
+                )
+                .await);
         }
+
+        let token = match negotiator.get_server_token() {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(self
+                    .fail_session(format!("Token ausente no negociador: {e}"))
+                    .await);
+            }
+        };
+
+        let cipher = match negotiator.create_cipher() {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(self
+                    .fail_session(format!("Chave ausente no negociador: {e}"))
+                    .await);
+            }
+        };
 
         let channel = match self.channel.as_mut() {
             Some(ch) => ch,
-            None => return Ok(()),
+            None => {
+                return Err(self
+                    .fail_session("Canal TCP ausente ao ativar sessão".to_string())
+                    .await);
+            }
         };
 
-        let now_millis = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
-        let mut tlv = TlvMessage::new();
-        tlv.add_u64(TlvTag::TAG_TIMESTAMP, now_millis);
-        let bytes = tlv.to_bytes();
-
-        let res = if channel.is_encrypted() {
-            channel.send_secure(&bytes).await
-        } else {
-            channel.send(bytes).await
-        };
-
-        match res {
-            Ok(_) => {
-                self.session.stats.keepalives_sent += 1;
-                self.session.stats.last_activity = Some(Instant::now());
-                debug!("Keepalive de sessão enviado com sucesso");
-                Ok(())
-            }
-            Err(e) => {
-                warn!("Falha ao enviar keepalive: {}", e);
-                self.session.state = SessionState::Reconnecting;
-                Err(e)
-            }
-        }
+        channel.enable_cipher(cipher);
+        self.server_token = Some(token);
+        self.negotiator = Some(negotiator);
+        self.session.state = SessionState::SessionActive;
+        self.session.connected_since = Some(SystemTime::now());
+        self.session.stats.last_activity = Some(Instant::now());
+        Ok(())
     }
 
-    /// Envia dados (quadros de túnel ou comandos) através do canal seguro da sessão.
+    /// Envia dados através do canal criptográfico da sessão.
+    /// Exige estritamente [`SessionState::SessionActive`] e criptografia instalada no canal.
     pub async fn send_data(&mut self, data: &[u8]) -> Result<()> {
+        if self.session.state == SessionState::Closed {
+            return Err(SessionError::SessionClosed.into());
+        }
+        if self.session.state != SessionState::SessionActive {
+            return Err(SessionError::SessionNotActive {
+                state: self.session.state.clone(),
+            }
+            .into());
+        }
+
         let channel = self
             .channel
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Sessão desconectada"))?;
 
-        if channel.is_encrypted() {
-            channel.send_secure(data).await?;
-        } else {
-            channel.send(data.to_vec()).await?;
+        if !channel.is_encrypted() {
+            return Err(SessionError::EncryptionNotInstalled.into());
+        }
+
+        if let Err(e) = channel.send_secure(data).await {
+            warn!("Erro ao enviar dados cifrados na sessão: {}", e);
+            return Err(self
+                .fail_session(format!("Falha de envio no canal seguro: {e}"))
+                .await);
         }
 
         self.session.stats.tx_bytes += data.len() as u64;
@@ -280,18 +538,36 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Recebe dados do canal seguro da sessão.
+    /// Recebe e decifra dados do canal seguro da sessão.
+    /// Exige estritamente [`SessionState::SessionActive`] e criptografia instalada no canal.
     pub async fn receive_data(&mut self) -> Result<Vec<u8>> {
+        if self.session.state == SessionState::Closed {
+            return Err(SessionError::SessionClosed.into());
+        }
+        if self.session.state != SessionState::SessionActive {
+            return Err(SessionError::SessionNotActive {
+                state: self.session.state.clone(),
+            }
+            .into());
+        }
+
         let channel = self
             .channel
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Sessão desconectada"))?;
 
-        let data = if channel.is_encrypted() {
-            channel.receive_secure().await?
-        } else {
-            let frame = channel.receive().await?;
-            frame.payload
+        if !channel.is_encrypted() {
+            return Err(SessionError::EncryptionNotInstalled.into());
+        }
+
+        let data = match channel.receive_secure().await {
+            Ok(pt) => pt,
+            Err(e) => {
+                warn!("Erro ao receber/decifrar dados na sessão: {}", e);
+                return Err(self
+                    .fail_session(format!("Falha de recepção/decifragem no canal seguro: {e}"))
+                    .await);
+            }
         };
 
         self.session.stats.rx_bytes += data.len() as u64;
@@ -300,15 +576,43 @@ impl SessionManager {
         Ok(data)
     }
 
-    /// Encerra a sessão e libera o canal TCP.
+    /// Encerra a sessão, limpa todo o material criptográfico e transiciona para [`SessionState::Disconnected`].
     pub async fn disconnect(&mut self) -> Result<()> {
+        if self.session.state == SessionState::Closed {
+            return Err(SessionError::SessionClosed.into());
+        }
+        self.cleanup_resources().await;
+        self.session.state = SessionState::Disconnected;
+        info!("Sessão desconectada e estado criptográfico limpo");
+        Ok(())
+    }
+
+    /// Encerra permanentemente a sessão (`SessionState::Closed`), descartando o canal TCP e
+    /// zerando as chaves de sessão para impedir qualquer reutilização.
+    pub async fn close(&mut self) -> Result<()> {
+        self.cleanup_resources().await;
+        self.session.state = SessionState::Closed;
+        info!("Sessão encerrada permanentemente (Closed)");
+        Ok(())
+    }
+
+    async fn cleanup_resources(&mut self) {
+        if let Some(mut negotiator) = self.negotiator.take() {
+            negotiator.clear();
+        }
         if let Some(mut channel) = self.channel.take() {
+            channel.clear_cipher();
             let _ = channel.close().await;
         }
-        self.session.state = SessionState::Disconnected;
+        self.server_token = None;
         self.session.connected_since = None;
-        info!("Sessão desconectada");
-        Ok(())
+    }
+
+    async fn fail_session(&mut self, reason: impl Into<String>) -> anyhow::Error {
+        let reason = reason.into();
+        self.cleanup_resources().await;
+        self.session.state = SessionState::Failed(reason.clone());
+        anyhow::anyhow!(reason)
     }
 }
 
@@ -316,129 +620,269 @@ impl SessionManager {
 mod tests {
     use super::*;
     use crate::transport::TcpChannelListener;
-    use openssl::rsa::Padding;
 
-    #[tokio::test]
-    async fn test_session_state_transitions() {
-        let mut session = SessionManager::new();
-        assert_eq!(session.state(), SessionState::Disconnected);
-
-        // Inicia um listener simulando o servidor Radmin oficial
-        let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let handle = tokio::spawn(async move {
-            let mut server_ch = listener.accept().await.unwrap();
-
-            // 1. Receber magic inicial [03 00 00 00]
-            let magic_frame = server_ch.receive().await.unwrap();
-            assert_eq!(magic_frame.payload, INITIAL_MAGIC);
-
-            // Servidor confirma com magic de volta
-            server_ch.send(INITIAL_MAGIC.to_vec()).await.unwrap();
-
-            // 2. Receber frame com TLVs de handshake (Client Hello)
-            let tlv_frame = server_ch.receive().await.unwrap();
-            let msg = TlvMessage::parse(&tlv_frame.payload).unwrap();
-            assert_eq!(msg.get_u32(TlvTag::TAG_SESSION_TOKEN), Some(1));
-            assert_eq!(msg.get_u32(TlvTag::TAG_PEER_STATUS), Some(2));
-            assert!(msg.get_buffer(TlvTag::TAG_RSA_PUBLIC_KEY).is_some());
-
-            // 3. Servidor envia confirmação de sessão (Pacote #687)
-            let pkt_687_payload = vec![
-                0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x01, 0xdf, 0x00, 0x00, 0x00, 0x02,
-            ];
-            server_ch.send(pkt_687_payload).await.unwrap();
-        });
-
-        session.connect(&addr.to_string()).await.unwrap();
-        assert_eq!(session.state(), SessionState::SessionActive);
-        assert!(session.session().connected_since.is_some());
-        assert!(session.negotiator().is_some());
-
-        handle.await.unwrap();
-
-        session.disconnect().await.unwrap();
-        assert_eq!(session.state(), SessionState::Disconnected);
+    fn generate_server_keypair() -> (Rsa<openssl::pkey::Private>, Rsa<Public>) {
+        let priv_key = Rsa::generate(2048).unwrap();
+        let n = priv_key.n().to_owned().unwrap();
+        let e = priv_key.e().to_owned().unwrap();
+        let pub_key = Rsa::from_public_components(n, e).unwrap();
+        (priv_key, pub_key)
     }
 
     #[tokio::test]
-    async fn test_session_handshake_with_rsa_key_exchange() {
-        let mut session = SessionManager::new();
+    async fn test_session_full_handshake_and_encrypted_data_exchange() {
+        let (server_priv, server_pub) = generate_server_keypair();
+        let expected_params = [0x01020304, 0x05060708, 0x090a0b0c];
+        let expected_token = 0xCAFEBABE_u32;
+
+        let mut session =
+            SessionManager::with_server_public_key(expected_params, server_pub).unwrap();
+        assert_eq!(session.state(), SessionState::Disconnected);
+        assert!(!session.is_active());
 
         let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let expected_key = [0x55u8; 32];
-
-        let handle = tokio::spawn(async move {
+        let server_task = tokio::spawn(async move {
             let mut server_ch = listener.accept().await.unwrap();
+            let mut rsession_srv =
+                RSessionServer::create_server(expected_token, server_priv).unwrap();
 
-            // 1. Magic
-            let _ = server_ch.receive().await.unwrap();
-            server_ch.send(INITIAL_MAGIC.to_vec()).await.unwrap();
+            // 1. Recebe o bloco RSA de 256 bytes do Estado 0 do cliente
+            let frame1 = server_ch.receive().await.unwrap();
+            assert_eq!(frame1.payload.len(), RSESSION_RSA_BLOCK_SIZE);
 
-            // 2. Client Hello
-            let tlv_frame = server_ch.receive().await.unwrap();
-            let msg = TlvMessage::parse(&tlv_frame.payload).unwrap();
-            let pub_key_raw = msg.get_buffer(TlvTag::TAG_RSA_PUBLIC_KEY).unwrap();
-            assert_eq!(pub_key_raw.len(), 256);
+            // 2. Processa no Estado 1 do servidor e envia o token de 4 bytes
+            let srv_step = rsession_srv.get_next_buffer(Some(&frame1.payload)).unwrap();
+            assert!(srv_step.is_complete);
+            assert_eq!(rsession_srv.get_client_params().unwrap(), expected_params);
 
-            // Reconstitui RSA público do cliente para cifrar a chave AES de sessão
-            let n = openssl::bn::BigNum::from_slice(pub_key_raw).unwrap();
-            let e = openssl::bn::BigNum::from_u32(65537).unwrap();
-            let client_rsa = Rsa::from_public_components(n, e).unwrap();
+            let token_bytes = srv_step.output.unwrap();
+            assert_eq!(token_bytes.len(), RSESSION_SERVER_TOKEN_SIZE);
+            server_ch.send(token_bytes).await.unwrap();
 
-            let mut encrypted_session_block = vec![0u8; 256];
-            client_rsa
-                .public_encrypt(&expected_key, &mut encrypted_session_block, Padding::PKCS1)
+            // 3. Instala o FamatechCipherState no canal do servidor
+            let srv_cipher = rsession_srv.create_cipher().unwrap();
+            server_ch.enable_cipher(srv_cipher);
+
+            // 4. Recebe pacotes cifrados do cliente e responde cifrado (testando continuidade de IV)
+            let msg1 = server_ch.receive_secure().await.unwrap();
+            assert_eq!(msg1, b"Pacote seguro #1 C->S");
+
+            let msg2 = server_ch.receive_secure().await.unwrap();
+            assert_eq!(msg2, b"Pacote seguro #2 C->S");
+
+            server_ch
+                .send_secure(b"Resposta segura #1 S->C")
+                .await
                 .unwrap();
-
-            // 3. Servidor responde com o bloco RSA de 256 bytes
-            server_ch.send(encrypted_session_block).await.unwrap();
-
-            // 4. Receber dados cifrados subsequentes
-            let enc_data = server_ch.receive().await.unwrap();
-            assert_eq!(enc_data.payload.len() % 16, 0);
+            server_ch
+                .send_secure(b"Resposta segura #2 S->C")
+                .await
+                .unwrap();
         });
 
         session.connect(&addr.to_string()).await.unwrap();
         assert_eq!(session.state(), SessionState::SessionActive);
+        assert!(session.is_active());
+        assert!(session.is_encrypted());
+        assert_eq!(session.server_token(), Some(expected_token));
+        assert!(session.session().connected_since.is_some());
 
-        // Enviar dados cifrados
-        session.send_data(b"ping").await.unwrap();
+        session.send_data(b"Pacote seguro #1 C->S").await.unwrap();
+        session.send_data(b"Pacote seguro #2 C->S").await.unwrap();
 
-        handle.await.unwrap();
-        session.disconnect().await.unwrap();
+        let reply1 = session.receive_data().await.unwrap();
+        assert_eq!(reply1, b"Resposta segura #1 S->C");
+
+        let reply2 = session.receive_data().await.unwrap();
+        assert_eq!(reply2, b"Resposta segura #2 S->C");
+
+        server_task.await.unwrap();
+
+        session.close().await.unwrap();
+        assert_eq!(session.state(), SessionState::Closed);
+        assert!(!session.is_active());
+        assert!(!session.is_encrypted());
     }
 
     #[tokio::test]
-    async fn test_session_handshake_bad_magic_rejected() {
-        let mut session = SessionManager::new();
+    async fn test_tcp_connected_unencrypted_is_not_active_session() {
+        let (_server_priv, server_pub) = generate_server_keypair();
+        let mut session = SessionManager::with_server_public_key([1, 2, 3], server_pub).unwrap();
 
         let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let handle = tokio::spawn(async move {
-            let mut server_ch = listener.accept().await.unwrap();
-            let _ = server_ch.receive().await.unwrap();
-            // Servidor envia magic incorreto
-            server_ch.send(vec![0xde, 0xad, 0xbe, 0xef]).await.unwrap();
+        let _accept_task = tokio::spawn(async move {
+            let _srv = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
         });
 
-        let res = session.connect(&addr.to_string()).await;
-        assert!(res.is_err());
-        match session.state() {
-            SessionState::Failed(err) => assert!(err.contains("magic de handshake inválido")),
-            other => panic!("Esperado Failed, obtido {:?}", other),
-        }
+        // Apenas abre a conexão TCP sem executar o handshake
+        session.connect_tcp(&addr.to_string()).await.unwrap();
+        assert_eq!(session.state(), SessionState::ConnectedUnencrypted);
+        assert!(!session.is_active());
+        assert!(!session.is_encrypted());
 
-        handle.await.unwrap();
+        // Tentar enviar ou receber dados em ConnectedUnencrypted deve falhar
+        let send_err = session
+            .send_data(b"dados nao autorizados")
+            .await
+            .unwrap_err();
+        assert!(send_err.to_string().contains("ConnectedUnencrypted"));
+
+        let recv_err = session.receive_data().await.unwrap_err();
+        assert!(recv_err.to_string().contains("ConnectedUnencrypted"));
+    }
+
+    #[tokio::test]
+    async fn test_token_without_key_cannot_activate_session() {
+        let (_server_priv, server_pub) = generate_server_keypair();
+        let mut session = SessionManager::with_server_public_key([1, 2, 3], server_pub).unwrap();
+
+        let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let _accept_task = tokio::spawn(async move {
+            let _srv = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        session.connect_tcp(&addr.to_string()).await.unwrap();
+        assert_eq!(session.state(), SessionState::ConnectedUnencrypted);
+
+        // Negociador não estabelecido (sem chave validada) não pode ativar a sessão
+        let unestablished = HandshakeNegotiator::new();
+        let err = session
+            .activate_from_negotiator(unestablished)
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("sem handshake RSession concluído e sem material de chave"));
+        assert!(matches!(session.state(), SessionState::Failed(_)));
+        assert!(!session.is_active());
+    }
+
+    #[tokio::test]
+    async fn test_handshake_rejects_invalid_server_token_size_and_closes_channel() {
+        let (_server_priv, server_pub) = generate_server_keypair();
+        let mut session = SessionManager::with_server_public_key([1, 2, 3], server_pub).unwrap();
+
+        let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let mut server_ch = listener.accept().await.unwrap();
+            let frame1 = server_ch.receive().await.unwrap();
+            assert_eq!(frame1.payload.len(), RSESSION_RSA_BLOCK_SIZE);
+
+            // Servidor envia resposta de tamanho inválido (12 bytes em vez de 4 bytes)
+            server_ch.send(vec![0xAA; 12]).await.unwrap();
+        });
+
+        let err = session.connect(&addr.to_string()).await.unwrap_err();
+        assert!(err.to_string().contains("esperado 4 bytes, recebido 12"));
+        assert!(matches!(session.state(), SessionState::Failed(_)));
+        assert!(!session.is_active());
+        assert!(!session.is_encrypted());
+        assert!(session.server_token().is_none());
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handshake_fails_on_server_disconnect_or_timeout() {
+        let (_server_priv, server_pub) = generate_server_keypair();
+        let mut session = SessionManager::with_server_public_key([1, 2, 3], server_pub).unwrap();
+        session.set_handshake_timeout(Duration::from_millis(150));
+
+        let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Caso 1: servidor fecha a conexão sem enviar o token de 4 bytes
+        let server_task = tokio::spawn(async move {
+            let mut server_ch = listener.accept().await.unwrap();
+            let _ = server_ch.receive().await.unwrap();
+            server_ch.close().await.unwrap();
+        });
+
+        let err = session.connect(&addr.to_string()).await.unwrap_err();
+        assert!(matches!(session.state(), SessionState::Failed(_)));
+        assert!(!session.is_active());
+        assert!(err.to_string().contains("aguardando token do servidor"));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_closed_session_cannot_be_reused() {
+        let (server_priv, server_pub) = generate_server_keypair();
+        let mut session = SessionManager::with_server_public_key([1, 2, 3], server_pub).unwrap();
+
+        let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let mut server_ch = listener.accept().await.unwrap();
+            let mut rsession_srv = RSessionServer::create_server(777, server_priv).unwrap();
+            let frame1 = server_ch.receive().await.unwrap();
+            let srv_step = rsession_srv.get_next_buffer(Some(&frame1.payload)).unwrap();
+            server_ch.send(srv_step.output.unwrap()).await.unwrap();
+        });
+
+        session.connect(&addr.to_string()).await.unwrap();
+        assert_eq!(session.state(), SessionState::SessionActive);
+        server_task.await.unwrap();
+
+        // Encerra a sessão com close()
+        session.close().await.unwrap();
+        assert_eq!(session.state(), SessionState::Closed);
+
+        // Qualquer tentativa de reutilizar a sessão encerrada deve falhar com SessionClosed
+        assert_eq!(
+            session
+                .send_data(b"teste")
+                .await
+                .unwrap_err()
+                .downcast_ref::<SessionError>(),
+            Some(&SessionError::SessionClosed)
+        );
+        assert_eq!(
+            session
+                .receive_data()
+                .await
+                .unwrap_err()
+                .downcast_ref::<SessionError>(),
+            Some(&SessionError::SessionClosed)
+        );
+        assert_eq!(
+            session
+                .connect(&addr.to_string())
+                .await
+                .unwrap_err()
+                .downcast_ref::<SessionError>(),
+            Some(&SessionError::SessionClosed)
+        );
+        assert_eq!(
+            session
+                .perform_handshake()
+                .await
+                .unwrap_err()
+                .downcast_ref::<SessionError>(),
+            Some(&SessionError::SessionClosed)
+        );
     }
 }
