@@ -1,5 +1,19 @@
+pub mod control;
+pub mod control_handshake;
 pub mod handshake;
 
+pub use control::{
+    ControlConnection, ControlConnectionState, ControlSessionError, ControlStats,
+    DEFAULT_CONTROL_TIMEOUT, RADMIN_CONTROL_PORT,
+};
+pub use control_handshake::{
+    decode_identity, decode_items, encode_identity, encode_item, find_item, get_srp_prime_n,
+    ControlClientNegotiator, ControlClientState, ControlHandshakeError, ControlItem,
+    ControlServerSession, ControlServerState, ControlStepOutput, CONTROL_SESSION_KEY_SIZE,
+    RADMIN_SRP1536_MODULUS_LEN, RADMIN_SRP1536_PRIME_HEX, RADMIN_SRP_DIGEST_LEN,
+    RADMIN_SRP_GENERATOR, RADMIN_SRP_K, RADMIN_SRP_KDF_KEY_LEN, SHELPER_PROTOCOL_VERSION,
+    TAG_GENERATOR, TAG_IDENTITY, TAG_MODULUS, TAG_PROOF, TAG_PUBLIC_EPHEMERAL, TAG_SALT, TAG_STEP,
+};
 pub use handshake::{
     HandshakeError, HandshakeNegotiator, HandshakeStage, HandshakeStepOutput, RSessionServer,
     DEFAULT_RSA_PUBLIC_EXPONENT, HANDSHAKE_MAGIC, RSESSION_AES256_KEY_SIZE,
