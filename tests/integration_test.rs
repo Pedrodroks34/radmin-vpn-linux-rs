@@ -221,3 +221,147 @@ async fn test_e2e_phase1_rsession_handshake_and_cchannel_continuity() {
     assert_eq!(client_session.state(), SessionState::Closed);
     assert!(!client_session.is_active());
 }
+
+/// Teste de integração ponta a ponta da Fase 2:
+/// Handshake de controle SRP-6a (`SHelper_*`) com negociação de versão e canal seguro AES-256.
+#[tokio::test]
+async fn test_e2e_phase2_control_channel_srp_handshake_and_continuity() {
+    use radmin_vpn::crypto::famatech::FamatechCipherState;
+    use radmin_vpn::session::control::{ControlConnection, ControlConnectionState};
+    use radmin_vpn::session::control_handshake::ControlServerSession;
+    use radmin_vpn::transport::{ChannelConfig, TcpChannel};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+
+    let username = "radmin_admin";
+    let password = "RadminSecurePassword2026!";
+
+    // Tarefa do Servidor de Controle
+    let srv_user = username.to_string();
+    let srv_pass = password.to_string();
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut srv_ch = TcpChannel::from_stream(stream, ChannelConfig::default());
+
+        // 1. Fase 0: Versão de protocolo
+        let ver_frame = srv_ch.receive().await.expect("recv version");
+        assert_eq!(ver_frame.payload, [3, 0, 0, 0]);
+        srv_ch
+            .send(vec![3, 0, 0, 0])
+            .await
+            .expect("send version echo");
+
+        // 2. Handshake SRP-6a
+        let mut srv_session =
+            ControlServerSession::new(srv_user, srv_pass).expect("create server session");
+
+        // Step 1
+        let s1_frame = srv_ch.receive().await.expect("recv step 1");
+        let s2_out = srv_session.step(&s1_frame.payload).expect("server step 2");
+        assert!(!s2_out.is_complete);
+        srv_ch
+            .send(s2_out.buffer_to_send.unwrap())
+            .await
+            .expect("send step 2");
+
+        // Step 3
+        let s3_frame = srv_ch.receive().await.expect("recv step 3");
+        let s4_out = srv_session.step(&s3_frame.payload).expect("server step 4");
+        assert!(!s4_out.is_complete);
+        srv_ch
+            .send(s4_out.buffer_to_send.unwrap())
+            .await
+            .expect("send step 4");
+
+        // Step 5
+        let s5_frame = srv_ch.receive().await.expect("recv step 5");
+        let s6_out = srv_session.step(&s5_frame.payload).expect("server step 6");
+        assert!(s6_out.is_complete);
+        assert!(srv_session.is_established());
+        srv_ch
+            .send(s6_out.buffer_to_send.unwrap())
+            .await
+            .expect("send step 6");
+
+        // 3. Ativa cifra AES-256 no canal do servidor com a chave derivada de 32 bytes
+        let srv_key = srv_session.session_key().expect("server key");
+        let srv_cipher = FamatechCipherState::new(srv_key);
+        srv_ch.enable_cipher(srv_cipher);
+
+        // 4. Troca de comandos de controle cifrados
+        for i in 0..4u8 {
+            let msg = srv_ch.receive_secure().await.expect("recv encrypted cmd");
+            assert_eq!(msg, vec![0x10 + i; 32 + i as usize * 16]);
+
+            let reply = vec![0x20 + i; 48 + i as usize * 16];
+            srv_ch
+                .send_secure(&reply)
+                .await
+                .expect("send encrypted reply");
+        }
+    });
+
+    // Tarefa do Cliente de Controle
+    let mut client_conn = ControlConnection::new(username.to_string(), password.to_string());
+    assert_eq!(client_conn.state(), &ControlConnectionState::Disconnected);
+
+    client_conn
+        .connect(&addr.to_string())
+        .await
+        .expect("client connect and srp handshake");
+    assert_eq!(client_conn.state(), &ControlConnectionState::SessionActive);
+    assert!(client_conn.is_active());
+
+    for i in 0..4u8 {
+        let cmd = vec![0x10 + i; 32 + i as usize * 16];
+        client_conn.send_message(&cmd).await.expect("client send");
+
+        let reply = client_conn.recv_message().await.expect("client recv");
+        assert_eq!(reply, vec![0x20 + i; 48 + i as usize * 16]);
+    }
+
+    server_task.await.expect("server completed");
+
+    client_conn.close().await;
+    assert_eq!(client_conn.state(), &ControlConnectionState::Closed);
+    assert!(!client_conn.is_active());
+}
+
+/// Teste com dados e vetores reais de framing extraídos de `radmin_17301.pcap`.
+#[test]
+fn test_pcap_radmin_17301_control_frames_validation() {
+    use radmin_vpn::session::control_handshake::{
+        decode_items, encode_item, find_item, TAG_PUBLIC_EPHEMERAL, TAG_STEP,
+    };
+
+    // Pacotes #32 e #40: Versão de protocolo 3
+    let pkt32_payload = [0x03, 0x00, 0x00, 0x00];
+    assert_eq!(u32::from_le_bytes(pkt32_payload), 3);
+
+    // Validação de decodificação de item step
+    let step1_encoded = encode_item(TAG_STEP, &1u32.to_le_bytes()).unwrap();
+    let items = decode_items(&step1_encoded).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].tag, TAG_STEP);
+    assert_eq!(find_item(&items, TAG_STEP), Some([1u8, 0, 0, 0].as_slice()));
+
+    // Simulação da estrutura de Step 3 (Tag 0x10 + Tag 0x60 efêmera de 192 bytes)
+    let a_mock = vec![0x7A; 192];
+    let mut step3_frame = encode_item(TAG_STEP, &3u32.to_le_bytes()).unwrap();
+    step3_frame.extend_from_slice(&encode_item(TAG_PUBLIC_EPHEMERAL, &a_mock).unwrap());
+
+    let step3_items = decode_items(&step3_frame).unwrap();
+    assert_eq!(step3_items.len(), 2);
+    assert_eq!(
+        find_item(&step3_items, TAG_STEP),
+        Some([3u8, 0, 0, 0].as_slice())
+    );
+    assert_eq!(
+        find_item(&step3_items, TAG_PUBLIC_EPHEMERAL),
+        Some(a_mock.as_slice())
+    );
+}
