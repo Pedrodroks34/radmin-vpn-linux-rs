@@ -1,8 +1,47 @@
+//! Canal criptográfico proprietário Famatech (`SHelper_CChannel_*` em `shelper.dll`).
+//!
+//! Evidências binárias verificadas por desmontagem estática de `shelper.dll` e `RvROLClient.dll`:
+//! - `shelper.dll!0x10062ca9` (`CChannel_Init`): inicializa a estrutura de `0x20c` bytes,
+//!   zerando `enc_iv` (`+0x1ec`, 16 bytes) e `dec_iv` (`+0x1fc`, 16 bytes) com `[0u8; 16]`.
+//! - `shelper.dll!0x10062c80` (`CChannel_Clear`): limpa integralmente os `0x20c` bytes (`memset 0`).
+//! - `shelper.dll!0x10062e00` (`CChannel_SetKeyEnc`): exige `key_len == 0x20` (32 bytes) e
+//!   configura chave de cifragem AES-256 (`0x100` bits) via `AES_set_encrypt_key`.
+//! - `shelper.dll!0x10062d60` (`CChannel_SetKeyDec`): exige `key_len == 0x20` (32 bytes) e
+//!   configura chave de decifragem AES-256 (`0x100` bits) via `AES_set_decrypt_key`.
+//! - `RvROLClient.dll!0x100df250` (`CChannelWrapper::Create`), `0x100df470` (`SetKey`),
+//!   `0x1003de29..0x1003de50` e `0x10096f0d..0x10096f21`: recebe o buffer de chave da sessão
+//!   (64 bytes em `SHelper_RSession_GetKey`), valida `len >= 0x20` e passa os primeiros 32 bytes
+//!   (`&key_buf[0..32]`) tanto para `key_enc` quanto para `key_dec`.
+//! - `shelper.dll!0x10069c20` (`pad_and_sign`):
+//!   - `total_len = (payload_len + 24) & !15` (`pad_len = total_len - payload_len` em `9..=24`).
+//!   - Preenche `buf[payload_len .. total_len - 9]` com `0xCC` (`0x10069c77`).
+//!   - Grava `pad_len as u8` em `buf[total_len - 1]` (`0x10069c84`).
+//!   - Zera os 8 bytes `buf[total_len - 9 .. total_len - 1]` (`0x10069c88..0x10069c8f`).
+//!   - Chama `shelper.dll!0x1006a0c0` sobre `buf[0 .. total_len - 9]` (soma aditiva de palavras
+//!     64-bit little-endian com zero-fill na cauda `< 8` bytes) e grava a soma temporariamente em
+//!     `buf[total_len - 9 .. total_len - 1]` (`0x10069ca2..0x10069ca6`).
+//!   - Em seguida (`0x10069cb2`), chama `shelper.dll!0x100638f0` passando esses 8 bytes da soma,
+//!     calcula o MD5 de 16 bytes e dobra-o em 8 bytes (`digest[i].wrapping_add(digest[i + 8])`),
+//!     sobrescrevendo `buf[total_len - 9 .. total_len - 1]` (`0x10069cbd..0x10069cc5`).
+//!   - Nota forense: o relatório `reverse-engineering/round-02/02-cryptography.md` interrompeu a
+//!     leitura em `0x10069ca6` e afirmou incorretamente que o trailer seria a soma bruta de 64 bits;
+//!     a desmontagem completa de `0x10069ca2..0x10069cc5` e do verificador `0x10069f90`
+//!     (`0x1006a026..0x1006a06c`) comprova que o trailer no fio é o MD5 dobrado de 8 bytes.
+//! - `shelper.dll!0x10069f90` (`verify_and_unpad`):
+//!   - Exige `pad_len >= 9` (`0x1006a007: cmp ebx, 0x9; jb`) e `pad_len < total_len`
+//!     (`0x1006a00e: cmp ebx, esi; jae`, garantindo pelo menos 1 byte de payload).
+//!   - Verifica o trailer via `0x1006a0c0` + `0x100638f0` e valida todos os bytes `0xCC`.
+//! - `shelper.dll!0x10063000` (`CChannel_Encrypt`) e `0x100630f0` (`CChannel_Decrypt`):
+//!   - Opera AES-256-CBC contínuo por direção: `AES_cbc_encrypt` atualiza `enc_iv` (`+0x1ec`) e
+//!     `dec_iv` (`+0x1fc`) in-place com os últimos 16 bytes do ciphertext processado.
+
 use openssl::hash::{hash, MessageDigest};
 use openssl::symm::{Cipher, Crypter, Mode};
 use thiserror::Error;
 
 pub const BLOCK_SIZE: usize = 16;
+pub const AES_256_KEY_SIZE: usize = 32;
+pub const RSESSION_KEY_BUFFER_SIZE: usize = 64;
 pub const TRAILER_SIZE: usize = 9;
 pub const MIN_PAD_LEN: usize = 9;
 pub const MAX_PAD_LEN: usize = 24;
@@ -12,9 +51,11 @@ pub const PAD_BYTE: u8 = 0xCC;
 pub enum CryptoError {
     #[error("payload vazio não permitido")]
     EmptyPayload,
+    #[error("tamanho de chave inválido: {size} bytes (esperado {expected} bytes)")]
+    InvalidKeyLength { expected: usize, size: usize },
     #[error("tamanho de ciphertext inválido: {size} (deve ser múltiplo de 16 e >= 16)")]
     InvalidCiphertextSize { size: usize },
-    #[error("tamanho de padding inválido: {pad_len} (deve estar entre 9 e 24)")]
+    #[error("tamanho de padding inválido: {pad_len} (deve estar entre 9 e 24 e ser menor que o bloco total)")]
     InvalidPaddingLength { pad_len: usize },
     #[error(
         "byte de padding corrompido na posição {offset}: esperado 0xCC, encontrado 0x{found:02x}"
@@ -26,10 +67,9 @@ pub enum CryptoError {
     OpenSslError(String),
 }
 
-/// Calcula o checksum aditivo little-endian de 64 bits (FUN_1006a0c0).
-/// Percorre palavras de 64 bits em little-endian. Se restar cauda (< 8 bytes),
-/// preenche com zeros à direita até 8 bytes e soma.
-#[allow(clippy::chunks_exact_to_as_chunks)]
+/// Calcula o checksum aditivo little-endian de 64 bits (`shelper.dll!0x1006a0c0`).
+/// Percorre palavras de 64 bits em little-endian. Se restar cauda (`< 8` bytes),
+/// copia para um buffer temporário de 8 bytes preenchido com zeros à direita e soma.
 pub fn famatech_checksum_64(data: &[u8]) -> u64 {
     let mut sum: u64 = 0;
     let chunks = data.chunks_exact(8);
@@ -50,8 +90,8 @@ pub fn famatech_checksum_64(data: &[u8]) -> u64 {
     sum
 }
 
-/// Calcula o MD5 do checksum de 64 bits (8 bytes LE) e dobra os 16 bytes em 8 bytes (FUN_100638f0):
-/// digest[i] += digest[i + 8] para i in 0..8.
+/// Calcula o MD5 do checksum de 64 bits (8 bytes LE) e dobra os 16 bytes em 8 bytes
+/// (`shelper.dll!0x100638f0`): `digest[i] = digest[i].wrapping_add(digest[i + 8])` para `i in 0..8`.
 pub fn famatech_fold_md5(sum_64: u64) -> [u8; 8] {
     let sum_bytes = sum_64.to_le_bytes();
     let digest = hash(MessageDigest::md5(), &sum_bytes).expect("cálculo de MD5 falhou");
@@ -63,15 +103,15 @@ pub fn famatech_fold_md5(sum_64: u64) -> [u8; 8] {
     folded
 }
 
-/// Aplica o padding proprietário Famatech e anexa o trailer de integridade (FUN_10069c20).
+/// Aplica o padding proprietário Famatech e anexa o trailer de integridade (`shelper.dll!0x10069c20`).
 ///
 /// Layout:
-/// - total_len = ((payload_len + 24) / 16) * 16
-/// - pad_len = total_len - payload_len (9 <= pad_len <= 24)
-/// - payload copiado em 0..payload_len
-/// - bytes 0xCC em payload_len..(total_len - 9)
-/// - 8 bytes MD5 dobrado em (total_len - 9)..(total_len - 1)
-/// - 1 byte pad_len em (total_len - 1)
+/// - `total_len = ((payload_len + 24) / 16) * 16`
+/// - `pad_len = total_len - payload_len` (`9 <= pad_len <= 24`)
+/// - `payload` copiado em `0..payload_len`
+/// - bytes `0xCC` em `payload_len..(total_len - 9)`
+/// - 8 bytes MD5 dobrado em `(total_len - 9)..(total_len - 1)`
+/// - 1 byte `pad_len` em `total_len - 1`
 pub fn famatech_pad_and_sign(payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if payload.is_empty() {
         return Err(CryptoError::EmptyPayload);
@@ -92,7 +132,7 @@ pub fn famatech_pad_and_sign(payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
         *b = PAD_BYTE;
     }
 
-    // Calcula checksum sobre os primeiros total_len - 9 bytes
+    // Calcula checksum sobre os primeiros total_len - 9 bytes (0x1006a0c0 + 0x100638f0)
     let sum_64 = famatech_checksum_64(&buf[..cc_end]);
     let folded_mac = famatech_fold_md5(sum_64);
 
@@ -103,23 +143,26 @@ pub fn famatech_pad_and_sign(payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
     Ok(buf)
 }
 
-/// Verifica a integridade, remove o trailer e descarta o padding (FUN_10069f90).
+/// Verifica a integridade, remove o trailer e descarta o padding (`shelper.dll!0x10069f90`).
 pub fn famatech_verify_and_unpad(buf: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    if buf.len() < BLOCK_SIZE || !buf.len().is_multiple_of(BLOCK_SIZE) {
+    if buf.len() < BLOCK_SIZE || buf.len() % BLOCK_SIZE != 0 {
         return Err(CryptoError::InvalidCiphertextSize { size: buf.len() });
     }
 
     let total_len = buf.len();
     let pad_len = buf[total_len - 1] as usize;
 
-    if !(MIN_PAD_LEN..=MAX_PAD_LEN).contains(&pad_len) || pad_len > total_len {
+    // Em shelper.dll!0x1006a007..0x1006a010:
+    // cmp ebx, 0x9; jb 0x1006a0aa
+    // cmp ebx, esi; jae 0x1006a0aa (rejeita pad_len >= total_len, exigindo >= 1 byte de payload)
+    if !(MIN_PAD_LEN..=MAX_PAD_LEN).contains(&pad_len) || pad_len >= total_len {
         return Err(CryptoError::InvalidPaddingLength { pad_len });
     }
 
     let payload_len = total_len - pad_len;
     let cc_end = total_len - TRAILER_SIZE;
 
-    // Valida bytes 0xCC
+    // Verifica trailer de integridade (0x1006a026..0x1006a06c) e bytes 0xCC (0x1006a076..0x1006a080)
     for (i, &b) in buf[payload_len..cc_end].iter().enumerate() {
         if b != PAD_BYTE {
             return Err(CryptoError::CorruptedPaddingByte {
@@ -129,7 +172,6 @@ pub fn famatech_verify_and_unpad(buf: &[u8]) -> Result<Vec<u8>, CryptoError> {
         }
     }
 
-    // Verifica trailer de integridade
     let sum_64 = famatech_checksum_64(&buf[..cc_end]);
     let expected_mac = famatech_fold_md5(sum_64);
     let received_mac = &buf[cc_end..total_len - 1];
@@ -141,43 +183,130 @@ pub fn famatech_verify_and_unpad(buf: &[u8]) -> Result<Vec<u8>, CryptoError> {
     Ok(buf[..payload_len].to_vec())
 }
 
-/// Estado do canal criptográfico AES-256-CBC contínuo da Famatech.
+/// Estado do canal criptográfico AES-256-CBC contínuo da Famatech (`SHelper_CChannel`).
 ///
-/// Mantém a chave de 256 bits e o vetor de inicialização (IV) de 128 bits.
-/// O IV inicial é 16 bytes zero. Cada pacote cifrado/decifrado atualiza o IV
-/// com os últimos 16 bytes do ciphertext.
+/// Reproduz a estrutura inicializada em `shelper.dll!0x10062ca9`:
+/// - `enc_key`: chave de cifragem AES-256 (32 bytes, configurada via `0x10062e00`)
+/// - `dec_key`: chave de decifragem AES-256 (32 bytes, configurada via `0x10062d60`)
+/// - `enc_iv`: IV de envio de 16 bytes (`+0x1ec`, inicializado com zeros)
+/// - `dec_iv`: IV de recepção de 16 bytes (`+0x1fc`, inicializado com zeros)
 #[derive(Debug, Clone)]
 pub struct FamatechCipherState {
-    key: [u8; 32],
-    enc_iv: [u8; 16],
-    dec_iv: [u8; 16],
+    enc_key: [u8; AES_256_KEY_SIZE],
+    dec_key: [u8; AES_256_KEY_SIZE],
+    enc_iv: [u8; BLOCK_SIZE],
+    dec_iv: [u8; BLOCK_SIZE],
 }
 
 impl FamatechCipherState {
-    pub fn new(key: [u8; 32]) -> Self {
+    /// Inicializa o canal com a mesma chave de 32 bytes para cifragem e decifragem e IVs zerados
+    /// (`RvROLClient.dll!0x100df250` / `shelper.dll!0x10062ca9`).
+    pub fn new(key: [u8; AES_256_KEY_SIZE]) -> Self {
         Self {
-            key,
-            enc_iv: [0u8; 16],
-            dec_iv: [0u8; 16],
+            enc_key: key,
+            dec_key: key,
+            enc_iv: [0u8; BLOCK_SIZE],
+            dec_iv: [0u8; BLOCK_SIZE],
         }
     }
 
-    pub fn key(&self) -> &[u8; 32] {
-        &self.key
+    /// Inicializa o canal com chaves de 32 bytes explícitas para envio e recepção
+    /// (`shelper.dll!0x1006a8b0` `SHelper_CChannel_CreateClient` / `0x1006a990` `CreateServer`).
+    pub fn with_separate_keys(
+        enc_key: [u8; AES_256_KEY_SIZE],
+        dec_key: [u8; AES_256_KEY_SIZE],
+    ) -> Self {
+        Self {
+            enc_key,
+            dec_key,
+            enc_iv: [0u8; BLOCK_SIZE],
+            dec_iv: [0u8; BLOCK_SIZE],
+        }
     }
 
-    pub fn enc_iv(&self) -> &[u8; 16] {
+    /// Inicializa o canal a partir do buffer de 64 bytes retornado por `SHelper_RSession_GetKey`
+    /// (`shelper.dll!0x1006ba80` -> `0x1006a270`), conforme comprovado em
+    /// `RvROLClient.dll!0x10096f0d..0x10096f21`, `0x100df250` e `0x100df470`:
+    /// os primeiros 32 bytes (`0..32`) são instalados como `key_enc` e `key_dec`.
+    pub fn from_rsession_key(key_material: &[u8; RSESSION_KEY_BUFFER_SIZE]) -> Self {
+        let mut key = [0u8; AES_256_KEY_SIZE];
+        key.copy_from_slice(&key_material[..AES_256_KEY_SIZE]);
+        Self::new(key)
+    }
+
+    /// Atualiza a chave de cifragem (`shelper.dll!0x10062e00` `CChannel_SetKeyEnc`),
+    /// exigindo exatamente 32 bytes (`0x20`).
+    pub fn set_key_enc(&mut self, key: &[u8]) -> Result<(), CryptoError> {
+        if key.len() != AES_256_KEY_SIZE {
+            return Err(CryptoError::InvalidKeyLength {
+                expected: AES_256_KEY_SIZE,
+                size: key.len(),
+            });
+        }
+        self.enc_key.copy_from_slice(key);
+        Ok(())
+    }
+
+    /// Atualiza a chave de decifragem (`shelper.dll!0x10062d60` `CChannel_SetKeyDec`),
+    /// exigindo exatamente 32 bytes (`0x20`).
+    pub fn set_key_dec(&mut self, key: &[u8]) -> Result<(), CryptoError> {
+        if key.len() != AES_256_KEY_SIZE {
+            return Err(CryptoError::InvalidKeyLength {
+                expected: AES_256_KEY_SIZE,
+                size: key.len(),
+            });
+        }
+        self.dec_key.copy_from_slice(key);
+        Ok(())
+    }
+
+    /// Atualiza ambas as chaves a partir de um buffer de sessão (`RvROLClient.dll!0x100df470`),
+    /// exigindo pelo menos 32 bytes (`cmp len, 0x20; jb`) e utilizando `&key_buf[0..32]`.
+    pub fn set_key_from_session_buffer(&mut self, key_buf: &[u8]) -> Result<(), CryptoError> {
+        if key_buf.len() < AES_256_KEY_SIZE {
+            return Err(CryptoError::InvalidKeyLength {
+                expected: AES_256_KEY_SIZE,
+                size: key_buf.len(),
+            });
+        }
+        let slice = &key_buf[..AES_256_KEY_SIZE];
+        self.set_key_enc(slice)?;
+        self.set_key_dec(slice)?;
+        Ok(())
+    }
+
+    /// Limpa chaves e IVs em memória (`shelper.dll!0x10062c80` `CChannel_Clear`).
+    pub fn clear(&mut self) {
+        self.enc_key.fill(0);
+        self.dec_key.fill(0);
+        self.enc_iv.fill(0);
+        self.dec_iv.fill(0);
+    }
+
+    pub fn key(&self) -> &[u8; AES_256_KEY_SIZE] {
+        &self.enc_key
+    }
+
+    pub fn enc_key(&self) -> &[u8; AES_256_KEY_SIZE] {
+        &self.enc_key
+    }
+
+    pub fn dec_key(&self) -> &[u8; AES_256_KEY_SIZE] {
+        &self.dec_key
+    }
+
+    pub fn enc_iv(&self) -> &[u8; BLOCK_SIZE] {
         &self.enc_iv
     }
 
-    pub fn dec_iv(&self) -> &[u8; 16] {
+    pub fn dec_iv(&self) -> &[u8; BLOCK_SIZE] {
         &self.dec_iv
     }
 
-    /// Cifra um payload usando o protocolo Famatech:
-    /// 1. Adiciona padding 0xCC e trailer de integridade
-    /// 2. Cifra o bloco resultante usando AES-256-CBC com o enc_iv atual
-    /// 3. Atualiza enc_iv com o último bloco de 16 bytes do ciphertext gerado
+    /// Cifra um payload usando o protocolo Famatech (`shelper.dll!0x10063000`):
+    /// 1. Adiciona padding `0xCC` e trailer de integridade (`0x10069c20`)
+    /// 2. Cifra o bloco resultante usando AES-256-CBC com o `enc_iv` atual
+    /// 3. Atualiza `enc_iv` com o último bloco de 16 bytes do ciphertext gerado
     pub fn encrypt(&mut self, payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let padded = famatech_pad_and_sign(payload)?;
         debug_assert_eq!(padded.len() % BLOCK_SIZE, 0);
@@ -185,7 +314,7 @@ impl FamatechCipherState {
         let mut crypter = Crypter::new(
             Cipher::aes_256_cbc(),
             Mode::Encrypt,
-            &self.key,
+            &self.enc_key,
             Some(&self.enc_iv),
         )
         .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
@@ -207,20 +336,20 @@ impl FamatechCipherState {
             });
         }
 
-        // Atualiza IV de envio com o último bloco de ciphertext
+        // Atualiza IV de envio com o último bloco de ciphertext (AES_cbc_encrypt in-place ivec)
         let last_block_start = ciphertext.len() - BLOCK_SIZE;
         self.enc_iv.copy_from_slice(&ciphertext[last_block_start..]);
 
         Ok(ciphertext)
     }
 
-    /// Decifra um pacote usando o protocolo Famatech:
-    /// 1. Valida tamanho múltiplo de 16
-    /// 2. Decifra usando AES-256-CBC com o dec_iv atual
-    /// 3. Atualiza dec_iv com o último bloco de 16 bytes do ciphertext recebido
-    /// 4. Valida padding 0xCC, verifica integridade do trailer e retorna payload original
+    /// Decifra um pacote usando o protocolo Famatech (`shelper.dll!0x100630f0`):
+    /// 1. Valida tamanho múltiplo de 16 e `>= 16` (`0x10063110..0x1006311f`)
+    /// 2. Decifra usando AES-256-CBC com o `dec_iv` atual
+    /// 3. Atualiza `dec_iv` com o último bloco de 16 bytes do ciphertext recebido
+    /// 4. Valida padding `0xCC`, verifica integridade do trailer e retorna payload original (`0x10069f90`)
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.len() < BLOCK_SIZE || !ciphertext.len().is_multiple_of(BLOCK_SIZE) {
+        if ciphertext.len() < BLOCK_SIZE || ciphertext.len() % BLOCK_SIZE != 0 {
             return Err(CryptoError::InvalidCiphertextSize {
                 size: ciphertext.len(),
             });
@@ -229,7 +358,7 @@ impl FamatechCipherState {
         let mut crypter = Crypter::new(
             Cipher::aes_256_cbc(),
             Mode::Decrypt,
-            &self.key,
+            &self.dec_key,
             Some(&self.dec_iv),
         )
         .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
@@ -245,12 +374,18 @@ impl FamatechCipherState {
             .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
         plaintext.truncate(count);
 
-        // Atualiza IV de recepção com o último bloco do ciphertext
+        // Atualiza IV de recepção com o último bloco do ciphertext antes de 0x10069f90
         let last_block_start = ciphertext.len() - BLOCK_SIZE;
         self.dec_iv.copy_from_slice(&ciphertext[last_block_start..]);
 
-        // Valida e desempacota
+        // Valida e desempacota (0x10069f90)
         famatech_verify_and_unpad(&plaintext)
+    }
+}
+
+impl Drop for FamatechCipherState {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
@@ -393,6 +528,104 @@ mod tests {
         let ct = enc.encrypt(&payload).unwrap();
         let pt = dec.decrypt(&ct).unwrap();
         assert_eq!(pt, payload);
+    }
+
+    #[test]
+    fn test_reject_pad_len_equal_to_total_len_0x1006a00e() {
+        // Em shelper.dll!0x1006a00e: cmp ebx, esi; jae 0x1006a0aa
+        // Se total_len == 16 e pad_len == 16 (0 bytes de payload), deve ser rejeitado.
+        let mut fake_block = [PAD_BYTE; 16];
+        let sum = famatech_checksum_64(&fake_block[..7]);
+        let mac = famatech_fold_md5(sum);
+        fake_block[7..15].copy_from_slice(&mac);
+        fake_block[15] = 16;
+
+        assert_eq!(
+            famatech_verify_and_unpad(&fake_block),
+            Err(CryptoError::InvalidPaddingLength { pad_len: 16 })
+        );
+    }
+
+    #[test]
+    fn test_reject_invalid_ciphertext_sizes() {
+        let mut dec = FamatechCipherState::new([0x11u8; 32]);
+        for bad_size in [0usize, 1, 4, 8, 15, 17, 24, 31, 33, 47] {
+            let buf = vec![0u8; bad_size];
+            assert_eq!(
+                dec.decrypt(&buf),
+                Err(CryptoError::InvalidCiphertextSize { size: bad_size })
+            );
+            assert_eq!(
+                famatech_verify_and_unpad(&buf),
+                Err(CryptoError::InvalidCiphertextSize { size: bad_size })
+            );
+        }
+    }
+
+    #[test]
+    fn test_rsession_64_byte_key_installation_and_clear() {
+        // RvROLClient.dll!0x100df250 / 0x10096f0d: usa os primeiros 32 bytes do buffer de 64 bytes
+        let mut rsession_key = [0u8; 64];
+        for (i, b) in rsession_key.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(3).wrapping_add(7);
+        }
+
+        let mut client_cipher = FamatechCipherState::from_rsession_key(&rsession_key);
+        let expected_key: [u8; 32] = rsession_key[..32].try_into().unwrap();
+        assert_eq!(client_cipher.enc_key(), &expected_key);
+        assert_eq!(client_cipher.dec_key(), &expected_key);
+        assert_eq!(client_cipher.enc_iv(), &[0u8; 16]);
+        assert_eq!(client_cipher.dec_iv(), &[0u8; 16]);
+
+        let mut server_cipher = FamatechCipherState::new([0u8; 32]);
+        assert_eq!(
+            server_cipher.set_key_from_session_buffer(&rsession_key[..4]),
+            Err(CryptoError::InvalidKeyLength {
+                expected: 32,
+                size: 4
+            })
+        );
+        server_cipher
+            .set_key_from_session_buffer(&rsession_key)
+            .unwrap();
+
+        let ct = client_cipher.encrypt(b"RSession CChannel payload").unwrap();
+        let pt = server_cipher.decrypt(&ct).unwrap();
+        assert_eq!(pt, b"RSession CChannel payload");
+
+        client_cipher.clear();
+        assert_eq!(client_cipher.enc_key(), &[0u8; 32]);
+        assert_eq!(client_cipher.dec_key(), &[0u8; 32]);
+        assert_eq!(client_cipher.enc_iv(), &[0u8; 16]);
+        assert_eq!(client_cipher.dec_iv(), &[0u8; 16]);
+    }
+
+    #[test]
+    fn test_bidirectional_independent_iv_continuity() {
+        let key = [0x99u8; 32];
+        let mut peer_a = FamatechCipherState::new(key);
+        let mut peer_b = FamatechCipherState::new(key);
+
+        // A envia 2 pacotes seguidos antes de B responder
+        let ct_a1 = peer_a.encrypt(b"A -> B packet 1").unwrap();
+        let ct_a2 = peer_a.encrypt(b"A -> B packet 2").unwrap();
+
+        // O envio de A não deve alterar o dec_iv de A
+        assert_eq!(peer_a.dec_iv(), &[0u8; 16]);
+        assert_ne!(peer_a.enc_iv(), &[0u8; 16]);
+
+        // B envia 1 pacote antes de decifrar os pacotes de A
+        let ct_b1 = peer_b.encrypt(b"B -> A packet 1").unwrap();
+        assert_eq!(peer_b.dec_iv(), &[0u8; 16]);
+
+        // Agora B decifra ct_a1 e ct_a2 em ordem
+        assert_eq!(peer_b.decrypt(&ct_a1).unwrap(), b"A -> B packet 1");
+        assert_eq!(peer_b.decrypt(&ct_a2).unwrap(), b"A -> B packet 2");
+        assert_eq!(peer_b.dec_iv(), peer_a.enc_iv());
+
+        // E A decifra ct_b1
+        assert_eq!(peer_a.decrypt(&ct_b1).unwrap(), b"B -> A packet 1");
+        assert_eq!(peer_a.dec_iv(), peer_b.enc_iv());
     }
 }
 

@@ -124,3 +124,100 @@ async fn test_e2e_real_captured_packet_686_validation() {
     let reserialized = tlv.to_bytes();
     assert_eq!(reserialized, frames[0].payload);
 }
+
+#[tokio::test]
+async fn test_e2e_phase1_rsession_handshake_and_cchannel_continuity() {
+    use openssl::rsa::Rsa;
+    use radmin_vpn::session::{
+        RSessionServer, SessionManager, SessionState, RSESSION_RSA_BLOCK_SIZE,
+        RSESSION_SERVER_TOKEN_SIZE,
+    };
+
+    let server_priv = Rsa::generate(2048).expect("RSA-2048 generation");
+    let server_pub = Rsa::from_public_components(
+        server_priv.n().to_owned().unwrap(),
+        server_priv.e().to_owned().unwrap(),
+    )
+    .unwrap();
+
+    let client_params = [0x0000_0001, 0x0000_0002, 0x0000_0003];
+    let server_token = 0x1357_2468_u32;
+
+    let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("local addr");
+
+    let server_handle = tokio::spawn(async move {
+        let mut srv_ch = listener.accept().await.expect("accept");
+        let mut rsession_srv =
+            RSessionServer::create_server(server_token, server_priv).expect("create_server");
+
+        // 1. Recebe o pacote de 256 bytes do Estado 0 do cliente (76B plaintext sob RSA PKCS#1 v1.5)
+        let pkt1 = srv_ch.receive().await.expect("receive 256B RSA block");
+        assert_eq!(pkt1.payload.len(), RSESSION_RSA_BLOCK_SIZE);
+
+        // 2. Decifra, valida os 76 bytes (0x4c) e retorna o token de 4 bytes
+        let step = rsession_srv
+            .get_next_buffer(Some(&pkt1.payload))
+            .expect("server state 1");
+        assert!(step.is_complete);
+        assert_eq!(rsession_srv.get_client_params().unwrap(), client_params);
+
+        let token_buf = step.output.expect("4-byte server token");
+        assert_eq!(token_buf.len(), RSESSION_SERVER_TOKEN_SIZE);
+        srv_ch.send(token_buf).await.expect("send 4B token");
+
+        // 3. Instala a chave AES-256 (primeiros 32 bytes dos 64B CSPRNG) no canal do servidor
+        let srv_cipher = rsession_srv.create_cipher().expect("server cipher");
+        srv_ch.enable_cipher(srv_cipher);
+
+        // 4. Troca múltiplos quadros cifrados verificando continuidade de IV em ambas as direções
+        for i in 0..5u8 {
+            let received = srv_ch
+                .receive_secure()
+                .await
+                .expect("server receive_secure");
+            assert_eq!(received, vec![0xA0 + i; 48 + i as usize]);
+
+            let reply = vec![0xB0 + i; 64 + i as usize];
+            srv_ch
+                .send_secure(&reply)
+                .await
+                .expect("server send_secure");
+        }
+    });
+
+    let mut client_session =
+        SessionManager::with_server_public_key(client_params, server_pub).expect("client session");
+    assert_eq!(client_session.state(), SessionState::Disconnected);
+
+    client_session
+        .connect(&addr.to_string())
+        .await
+        .expect("full RSession handshake");
+    assert_eq!(client_session.state(), SessionState::SessionActive);
+    assert!(client_session.is_active());
+    assert!(client_session.is_encrypted());
+    assert_eq!(client_session.server_token(), Some(server_token));
+
+    for i in 0..5u8 {
+        let payload = vec![0xA0 + i; 48 + i as usize];
+        client_session
+            .send_data(&payload)
+            .await
+            .expect("client send_data");
+
+        let reply = client_session
+            .receive_data()
+            .await
+            .expect("client receive_data");
+        assert_eq!(reply, vec![0xB0 + i; 64 + i as usize]);
+    }
+
+    server_handle.await.expect("server task completed");
+
+    client_session.close().await.expect("close session");
+    assert_eq!(client_session.state(), SessionState::Closed);
+    assert!(!client_session.is_active());
+}

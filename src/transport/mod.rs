@@ -166,6 +166,21 @@ impl TcpChannel {
         self.cipher = Some(FamatechCipherState::new(key));
     }
 
+    pub fn enable_cipher(&mut self, cipher: FamatechCipherState) {
+        self.cipher = Some(cipher);
+    }
+
+    pub fn clear_cipher(&mut self) {
+        if let Some(ref mut cipher) = self.cipher {
+            cipher.clear();
+        }
+        self.cipher = None;
+    }
+
+    pub fn cipher(&self) -> Option<&FamatechCipherState> {
+        self.cipher.as_ref()
+    }
+
     pub fn is_encrypted(&self) -> bool {
         self.cipher.is_some()
     }
