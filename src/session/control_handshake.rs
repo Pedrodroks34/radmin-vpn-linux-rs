@@ -260,14 +260,22 @@ impl DerefMut for SecretBigNum {
 }
 
 #[cfg(test)]
-pub(crate) static SECRET_BIGNUM_DROP_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static THREAD_SECRET_BIGNUM_DROP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 impl Drop for SecretBigNum {
     fn drop(&mut self) {
         self.0.clear();
         #[cfg(test)]
-        SECRET_BIGNUM_DROP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        THREAD_SECRET_BIGNUM_DROP_COUNT.with(|c| c.set(c.get() + 1));
+    }
+}
+
+#[cfg(test)]
+impl SecretBigNum {
+    pub(crate) fn test_drop_count() -> usize {
+        THREAD_SECRET_BIGNUM_DROP_COUNT.with(|c| c.get())
     }
 }
 
@@ -2311,9 +2319,9 @@ mod tests {
     }
 
     #[test]
-    fn test_secret_bignum_raii_clearing() {
+    fn test_secret_bignum_drop_executes_clear() {
         let raw = [0x5Au8; 32];
-        let initial_drops = SECRET_BIGNUM_DROP_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+        let initial_drops = SecretBigNum::test_drop_count();
 
         // Verificação de RAII puro: criação de SecretBigNum em escopo interno e descarte automático por Drop.
         // O teste NÃO chama clear() manualmente antes do descarte, assegurando que o Drop do compilador
@@ -2321,9 +2329,14 @@ mod tests {
         {
             let secret_bn = SecretBigNum::from_slice(&raw).unwrap();
             assert_eq!(secret_bn.num_bits(), 255);
-            // Ao sair deste bloco, Drop::drop(&mut self) é invocado pelo compilador.
-            // O Drop executa self.0.clear() (BN_clear) e incrementa SECRET_BIGNUM_DROP_COUNT,
+            // Ao sair deste bloco, Drop::drop(&mut self) é invocado pelo compilador na thread atual.
+            // O Drop executa self.0.clear() (BN_clear) e incrementa THREAD_SECRET_BIGNUM_DROP_COUNT,
             // antes que o destrutor de openssl::bn::BigNum chame BN_free().
+            //
+            // NOTA SOBRE ISOLAMENTO E DETERMINISMO:
+            // O contador é estritamente thread-local (Cell<usize> em thread_local!), eliminando
+            // qualquer possibilidade de interferência ou condição de corrida decorrente da execução
+            // concorrente de outros testes em threads paralelas do cargo test.
             //
             // NOTA SOBRE LIMITES TÉCNICOS E SEGURANÇA DE MEMÓRIA:
             // Por design da biblioteca OpenSSL e do subsistema de memória Rust/C, após a execução
@@ -2333,7 +2346,7 @@ mod tests {
             // decorre da invocação síncrona de BN_clear() no Drop, demonstrada em test_secret_bignum_explicit_clear.
         }
 
-        let final_drops = SECRET_BIGNUM_DROP_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+        let final_drops = SecretBigNum::test_drop_count();
         assert_eq!(final_drops, initial_drops + 1);
     }
 

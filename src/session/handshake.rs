@@ -51,7 +51,7 @@ use openssl::rand::rand_bytes;
 use openssl::rsa::{Padding, Rsa};
 use thiserror::Error;
 use tracing::{debug, info};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Tamanho do bloco RSA-2048 gerado no Estado 0 do `SHelper_RSession` (`0x100` = 256 bytes).
 pub const RSESSION_RSA_BLOCK_SIZE: usize = 256;
@@ -448,7 +448,7 @@ impl HandshakeNegotiator {
     /// Zera o material de chave e invalida o estado (`shelper.dll!0x1006a730` `RSession_Destroy`).
     pub fn clear(&mut self) {
         if let Some(ref mut key) = self.key_material {
-            key.fill(0);
+            key.zeroize();
         }
         self.key_material = None;
         self.server_token = None;
@@ -471,6 +471,16 @@ impl Drop for HandshakeNegotiator {
 ///
 /// Utilizada para verificação de ponta a ponta da máquina de estados RSA-2048 PKCS#1 v1.5
 /// (`76B` plaintext -> `256B` RSA block -> `4B` server token -> `64B` key material -> `32B` AES-256 key).
+///
+/// # Ciclo de Vida e Segurança de Dados
+/// - `key_material`: Segredo simétrico efêmero de 64 bytes gerado pelo cliente via CSPRNG e decifrado
+///   pelo servidor. É zerado deterministicamente via `Zeroize::zeroize()` tanto na chamada a `clear()`
+///   quanto automaticamente via `Drop`.
+/// - `private_key`: Chave privada RSA-2048 de longo prazo da infraestrutura do servidor, gerenciada pela
+///   estrutura `openssl::rsa::Rsa<Private>`. A liberação de seus limbs e estruturas internas em C é governada pelo
+///   destrutor de `Rsa` que chama `RSA_free()`. Trata-se de credencial estática de serviço, não de segredo efêmero de sessão.
+/// - `client_params`: Metadados públicos de negociação (3 DWORDs little-endian: flags de protocolo e versão).
+/// - `server_token`: Nonce de 4 bytes público transmitido em texto plano no Step 2.
 #[derive(Debug)]
 pub struct RSessionServer {
     stage: HandshakeStage,
@@ -644,13 +654,20 @@ impl RSessionServer {
         }
     }
 
+    /// Zera o material de chave simétrica da sessão e invalida o estado da sessão
+    /// (`shelper.dll!0x1006a730` `RSession_Destroy`).
+    ///
+    /// Esta operação é estritamente idempotente: invocações repetidas (incluindo uma chamada explícita
+    /// seguida do `Drop` automático) são seguras e não causam pânicos ou comportamentos indefinidos.
     pub fn clear(&mut self) {
         if let Some(ref mut key) = self.key_material {
-            key.fill(0);
+            key.zeroize();
         }
         self.key_material = None;
         self.client_params = None;
         self.is_established = false;
+        #[cfg(test)]
+        THREAD_RSESSION_SERVER_CLEANUP_COUNT.with(|c| c.set(c.get() + 1));
     }
 
     fn fail_and_clear(&mut self) {
@@ -662,6 +679,18 @@ impl RSessionServer {
 impl Drop for RSessionServer {
     fn drop(&mut self) {
         self.clear();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static THREAD_RSESSION_SERVER_CLEANUP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+impl RSessionServer {
+    pub(crate) fn test_cleanup_count() -> usize {
+        THREAD_RSESSION_SERVER_CLEANUP_COUNT.with(|c| c.get())
     }
 }
 
@@ -860,5 +889,136 @@ mod tests {
             }
         );
         assert_eq!(server2.stage(), HandshakeStage::Failed);
+    }
+
+    #[test]
+    fn test_rsession_server_drop_initial_state() {
+        let (rsa, _, _) = generate_test_server_rsa();
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let server = RSessionServer::create_server(0x1234, rsa).unwrap();
+            assert_eq!(
+                server.stage(),
+                HandshakeStage::ServerState1WaitingClientBlock
+            );
+            assert!(!server.is_established());
+            assert!(server.get_key().is_err());
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        assert_eq!(final_count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_rsession_server_drop_after_processing_valid_block() {
+        let (rsa, modulus, exponent) = generate_test_server_rsa();
+        let mut client = HandshakeNegotiator::new();
+        client
+            .set_server_public_key_components(&modulus, &exponent)
+            .unwrap();
+        let step1_out = client.get_next_buffer(None).unwrap();
+        let rsa_block = step1_out.output.unwrap();
+
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let mut server = RSessionServer::create_server(0x4321, rsa).unwrap();
+            let step2_out = server.get_next_buffer(Some(&rsa_block)).unwrap();
+            assert!(step2_out.is_complete);
+            assert!(server.is_established());
+            assert!(server.get_key().is_ok());
+            assert_ne!(server.get_key().unwrap(), &[0u8; 64]);
+            // Ao sair do escopo, Drop é invocado automaticamente, limpando key_material
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        assert_eq!(final_count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_rsession_server_drop_after_full_session_established() {
+        let (rsa, modulus, exponent) = generate_test_server_rsa();
+        let mut client = HandshakeNegotiator::new();
+        client
+            .set_server_public_key_components(&modulus, &exponent)
+            .unwrap();
+        let step1_out = client.get_next_buffer(None).unwrap();
+
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let mut server = RSessionServer::create_server(0x5678, rsa).unwrap();
+            let step2_out = server
+                .get_next_buffer(Some(&step1_out.output.unwrap()))
+                .unwrap();
+            let _ = client
+                .get_next_buffer(Some(&step2_out.output.unwrap()))
+                .unwrap();
+
+            assert!(client.is_established());
+            assert!(server.is_established());
+            assert_eq!(client.get_key().unwrap(), server.get_key().unwrap());
+            // Drop de server com sessão estabelecida
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        assert_eq!(final_count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_rsession_server_explicit_clear_followed_by_drop() {
+        let (rsa, modulus, exponent) = generate_test_server_rsa();
+        let mut client = HandshakeNegotiator::new();
+        client
+            .set_server_public_key_components(&modulus, &exponent)
+            .unwrap();
+        let step1_out = client.get_next_buffer(None).unwrap();
+
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let mut server = RSessionServer::create_server(0x9999, rsa).unwrap();
+            let _ = server
+                .get_next_buffer(Some(&step1_out.output.unwrap()))
+                .unwrap();
+            assert!(server.is_established());
+            assert!(server.get_key().is_ok());
+
+            // 1. Invocação explícita de clear()
+            server.clear();
+            assert!(!server.is_established());
+            assert_eq!(server.get_key(), Err(HandshakeError::SessionNotEstablished));
+            assert_eq!(
+                server.derive_aes256_key().unwrap_err(),
+                HandshakeError::SessionNotEstablished
+            );
+            assert_eq!(
+                server.get_client_params(),
+                Err(HandshakeError::SessionNotEstablished)
+            );
+
+            // 2. Segunda chamada explícita para provar idempotência
+            server.clear();
+            assert!(!server.is_established());
+
+            // 3. Ao sair do escopo, Drop é invocado novamente sobre a instância já limpa
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        // 2 chamadas explícitas + 1 chamada no Drop = 3
+        assert_eq!(final_count, initial_count + 3);
+    }
+
+    #[test]
+    fn test_rsession_server_drop_after_processing_failure() {
+        let (rsa, _, _) = generate_test_server_rsa();
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let mut server = RSessionServer::create_server(0x7777, rsa).unwrap();
+            // Bloco RSA corrompido com tamanho incorreto (128 bytes em vez de 256)
+            let bad_input = [0xAAu8; 128];
+            let res = server.get_next_buffer(Some(&bad_input));
+            assert!(res.is_err());
+            assert_eq!(server.stage(), HandshakeStage::Failed);
+            assert!(!server.is_established());
+            assert!(server.get_key().is_err());
+            // Drop de server após transição para Failed
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        // 1 em fail_and_clear + 1 no Drop = 2
+        assert_eq!(final_count, initial_count + 2);
     }
 }

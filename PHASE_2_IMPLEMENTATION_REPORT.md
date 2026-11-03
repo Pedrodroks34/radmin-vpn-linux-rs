@@ -89,7 +89,10 @@ Toda a lógica foi implementada em Rust de forma limpa, modular e testável nos 
    - `test_srp_handshake_invalid_server_b_rejected_by_client`: valida rejeição de $B$ truncado pelo cliente com transição fail-closed.
    - `test_srp_handshake_divergent_group_parameters_rejected`: valida rejeição de parâmetros $g$ ou $N$ divergentes (valor divergente, multi-byte, vazio, truncado a 191B, expandido a 193B, valor adulterado) com transição fail-closed.
    - `test_control_session_explicit_clear`: valida que a chamada explícita a `clear()` sobrescreve chaves derivadas e segredos com zeros.
-   - `test_secret_bignum_raii_clearing`: valida o encapsulamento RAII de números grandes com `BN_clear` no `Drop`.
+   - `test_control_sessions_raii_drop`: valida o ciclo de vida e descarte seguro por RAII de `ControlClientNegotiator` e `ControlServerSession` nos estados inicial, intermediário e estabelecido.
+   - `test_secret_bignum_explicit_clear`: valida a limpeza isolada dos limbs do BigNum (`num_bits() == 0`).
+   - `test_secret_bignum_drop_executes_clear`: valida o descarte automático por `Drop` com `BN_clear` via instrumentação thread-local determinística sem concorrência entre threads.
+   - `test_rsession_server_drop_*`: conjunto de 5 testes cobrindo descarte de `RSessionServer` em estado inicial, após processamento de bloco válido, sessão estabelecida, chamada de `clear()` idempotente seguida de drop e após falha de processamento.
    - `test_control_client_transition_failure_zeroizes_ephemeral_secrets`: valida que falhas no Step 2, 4 e 6 transicionam para `Failed` e descartam segredos efêmeros.
    - `test_control_server_transition_failure_zeroizes_ephemeral_secrets`: valida que falhas no Step 1, 3 e 5 transicionam para `Failed` e descartam segredos efêmeros.
    - `test_control_handshake_debug_redacted` e `test_cipher_state_debug_redacted`: comprovam que credenciais, chaves e bignums são mascarados com `[REDACTED]`.
@@ -99,14 +102,15 @@ Toda a lógica foi implementada em Rust de forma limpa, modular e testável nos 
    - `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`: loopback TCP com injeção de prova $M_1$ adulterada, validando rejeição com `ProofVerificationFailed`, estado de servidor `Failed`, encerramento fail-closed do transporte e ausência de panics (com task do servidor aguardada explicitamente).
    - `test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed`: loopback TCP com injeção de prova $M_2$ adulterada, validando rejeição pelo cliente com fail-closed e término limpo do servidor sem panics.
    - `test_pcap_radmin_17301_control_frames_validation`: validação contra vetores de framing reais de `radmin_17301.pcap`.
-3. **Métricas Finais Consolidadas da Quarta Rodada de Auditoria**:
+3. **Métricas Finais Consolidadas da Quinta Rodada de Auditoria**:
    - `cargo fmt --check`: **Aprovado** (zero diferenças).
    - `cargo clippy --all-targets --all-features -- -D warnings`: **Aprovado** (zero advertências em toda a árvore).
-   - `cargo test --locked`: **122 testes avaliados** (113 unitários aprovados + 1 ignorado ambiental TAP; 8 testes de integração aprovados; 0 falhas). Total de **121 testes aprovados**.
+   - `cargo test --locked`: **127 testes avaliados** (118 unitários aprovados + 1 ignorado ambiental TAP; 8 testes de integração aprovados; 0 falhas). Total de **126 testes aprovados**.
 4. **Garantias de Ciclo de Vida e Segurança de Memória**:
-   - Endurecimento total do ciclo de vida das chaves AES de 32 bytes: `session_key()` retorna `Option<Zeroizing<[u8; 32]>>`, `session_key_ref()` permite acesso por referência direta `&[u8; 32]`, e `create_cipher_state()` inicializa o canal diretamente via `from_key_ref` sem alocação de buffers temporários intermediários não-zeroizados.
+   - Endurecimento do ciclo de vida das chaves AES de 32 bytes: `session_key()` retorna `Option<Zeroizing<[u8; 32]>>`, `session_key_ref()` permite acesso por referência direta `&[u8; 32]`, e `create_cipher_state()` inicializa o canal diretamente via `from_key_ref` sem alocação de buffers temporários intermediários não-zeroizados.
    - Construtores de `FamatechCipherState` (`from_key_ref`, `from_separate_keys_ref`, `from_rsession_key`) eliminam cópias redundantes e asseguram que quaisquer argumentos passados por valor sejam protegidos e limpos via `Zeroizing`.
+   - Implementação de `Drop` com rotina idempotente em `RSessionServer` e `HandshakeNegotiator` para limpeza explícita de `key_material` via `Zeroize::zeroize()`.
    - Wrapper RAII `SecretBigNum` em todos os expoentes, verifiers e segredos intermediários com chamada incondicional a `BN_clear` antes da desalocação heap (`BN_free`).
-   - Zeroização incondicional via `Zeroizing` para buffers de cifra, senhas, salts, digest de provas $M_1$/$M_2$ e chaves KDF.
+   - Zeroização via `Zeroizing` para buffers de cifra, senhas, salts, digest de provas $M_1$/$M_2$ e chaves KDF.
    - Redação total de `Debug` e eliminação de `Clone` indevido no estado de cifra.
-   - **Fronteiras e Limitações Técnicas Documentadas**: A garantia criptográfica de destruição de segredos abrange 100% dos buffers e estruturas de dados sob controle do Rust e das limbs dos `BIGNUM`s sob `SecretBigNum`. Limitações físicas e do ecossistema externo incluem buffers scratch efêmeros internos alocados em `BN_CTX` pela biblioteca C do OpenSSL (cuja reciclagem depende do contexto C) e potencial paginação em partição de swap pelo kernel do sistema operacional na ausência de privilégios de `mlock(2)`.
+   - **Fronteiras e Limitações Técnicas Documentadas**: A aplicação aplica zeroização determinística sobre as estruturas e buffers sob controle do Rust e sobre os limbs sob `SecretBigNum`. Limitações físicas e do ecossistema externo incluem buffers scratch efêmeros internos alocados em `BN_CTX` pela biblioteca C do OpenSSL (cuja reciclagem depende do contexto C) e potencial paginação em partição de swap pelo kernel do sistema operacional na ausência de privilégios de `mlock(2)`.
