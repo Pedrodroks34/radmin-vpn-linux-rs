@@ -3,7 +3,7 @@
 **Projeto:** Radmin VPN Linux (`Pedrodroks34/radmin-vpn-linux-rs`)  
 **Branch de trabalho:** `feat/phase-3-control-message-catalog`  
 **Base:** `ccb4b4a27579fb7e25ad31e15f9908a4d8431176` (`origin/main`, após configuração de CI do GitHub Actions; base anterior do PR #7: `81cccc312861ca697518fe8952ac791a5d43b0d3`)
-**Data da Auditoria:** 03 de novembro de 2026 (Revisão Corretiva Documental)
+**Data da Auditoria:** 03 de novembro de 2026 (Revisão Final Documental da Fase 3.1)
 **Status:** Concluído (Especificação Técnica Forense e Rastreabilidade Rigorosa)
 
 ---
@@ -28,7 +28,7 @@
 ## 1. Escopo e Metodologia
 
 ### 1.1 Objetivo da Etapa
-Investigar, auditar e formalizar a especificação forense das mensagens trocadas no **canal de controle TCP (porta 17301)** e nos canais de coordenação secundários (porta 17351) do Radmin VPN **após o término bem-sucedido do handshake criptográfico SRP-6a**, quando o canal de controle já se encontra cifrado sob o algoritmo Famatech AES-256-CBC com encadeamento contínuo de IV.
+Investigar, auditar e formalizar a especificação forense das mensagens trocadas no **canal de controle TCP (porta 17301)** e nos canais de coordenação secundários (porta 17351) do Radmin VPN **após o término bem-sucedido do handshake criptográfico SRP-6a**, quando o payload dos quadros do canal de controle passa a ser cifrado sob o algoritmo Famatech AES-256-CBC com encadeamento contínuo de IV (mantendo os prefixos de enquadramento TCP de 4 bytes em texto claro).
 
 O escopo desta entrega é estritamente **investigativo e documental**, com proibição expressa de implementação prematura de código de produção, de suposições arbitrárias ou de mascaramento de divergências via testes circulares de round-trip.
 
@@ -286,8 +286,8 @@ A distribuição real verificada no binário `RvControlSvc.exe` é:
 |---|---|---|---|
 | `0x01` | **`UINT32`** | 377 | Inteiro de 4 bytes sem sinal em Big-Endian no wire. |
 | `0x02` | **`UINT64`** | 110 | Inteiro de 8 bytes sem sinal em Big-Endian (IDs de rede, carimbos Epoch). |
-| `0x03` | **`INT32` / ID** | 101 | Inteiro de 4 bytes com sinal (referências numéricas, contadores). |
-| `0x04` | **`BOOL`** | 35 | Booleano representado em 1 ou 4 bytes (`0`=falso, `1`=verdadeiro). |
+| `0x03` | **`INT32`** | 101 | Inteiro de 4 bytes com sinal em Big-Endian (primitiva escalar; ver distinção semântica abaixo). |
+| `0x04` | **`BOOL`** | 35 | Booleano lógico (`0`=falso, `1`=verdadeiro; tamanho no wire ainda pendente de confirmação empírica). |
 | `0x05` | **`FLOAT`** | 5 | Ponto flutuante de precisão simples (IEEE 754 de 32 bits). |
 | `0x06` | **`DOUBLE`** | 3 | Ponto flutuante de precisão dupla (IEEE 754 de 64 bits). |
 | `0x08` | **`COMPOUND`** | 4 | Estrutura binária composta / flags compactadas. |
@@ -298,6 +298,17 @@ A distribuição real verificada no binário `RvControlSvc.exe` é:
 | `0x0D` | **`LIST / ARRAY`** | 7 | Coleção contígua de elementos homogêneos (ex.: lista de nós). |
 | `0x0E` | **`MAP / CONTAINER`**| 14 | Contêiner associativo chave-valor. |
 | **Total** | — | **744** | **Soma exata das 13 categorias ($377+110+101+35+5+3+4+22+14+51+1+7+14 = 744$).** |
+
+#### Esclarecimentos sobre os Tipos Primitivos `0x03` e `0x04`:
+1. **Diferenciação entre Primitiva `0x03` (INT32) e Semântica de Aplicação:**
+   - O prefixo `0x03` no byte superior identifica exclusivamente a primitiva escalar de inteiro com sinal de 32 bits (`INT32`, 4 bytes em Big-Endian no wire).
+   - Anotações anteriores rotulavam certas tags como `INT32 / ID` porque propriedades específicas (como referências de rede locais ou identificadores de entidade de sub-sistemas) utilizam esse tipo primitivo escalar.
+   - Na gramática do protocolo Famatech TLV, **não existe um tipo primitivo "ID"**: o wire transporta puramente um inteiro de 4 bytes com sinal, e o significado de identificador é uma semântica de aplicação específica de cada propriedade.
+2. **Status de Confirmação da Codificação de `0x04` (BOOL) no Wire:**
+   - A taxonomia registra 35 propriedades do tipo booleano (`0x04`), como `PROP_IS_ONLINE` (`0x040001e7`).
+   - Em código C++ compilado com MSVC (x86), existe duplicidade conceitual: o tipo primitivo nativo `bool` da linguagem C++ ocupa 1 byte (`sizeof(bool) == 1`), enquanto o typedef padrão Win32 `BOOL` ocupa 4 bytes (`sizeof(BOOL) == 4`, onde `0`=falso e `1`=verdadeiro).
+   - Nas capturas PCAP em texto claro acessíveis (como o pacote #5486 na porta 17351), somente figuram propriedades dos tipos `0x01` (`UINT32`) e `0x09` (`BLOB`); nenhuma propriedade booleana `0x04` estava presente desprotegida no wire.
+   - **Conclusão Forense:** O comprimento exato do campo `Length` de booleanos no wire (se o protocolo codifica como `Length = 1` byte ou `Length = 4` bytes) **permanece como comportamento ainda não confirmado empiricamente em capturas de tráfego**. Um parser defensivo em Rust deve estar preparado para aceitar comprimentos de 1 e 4 bytes até validação em testbed dinâmico.
 
 ---
 
@@ -331,7 +342,7 @@ Para evitar qualquer confusão de análise entre o canal de controle principal e
 +-----------------------------------------------------------------------------------------------------+
 | CANAL DE CONTROLE PRINCIPAL (TCP 17301)                                                            |
 | Finalidade: Handshake SRP-6a mútuo, negociação de chave mestra e controle cifrado da VPN           |
-| Cifração: Plaintext durante SRP-6a (#32..#50) -> 100% Cifrado AES-256-CBC após Pacote #50          |
+| Cifração: Plaintext durante SRP-6a (#32..#50) -> Payloads cifrados AES-256-CBC após Pacote #50      |
 +-----------------------------------------------------------------------------------------------------+
 
 +-----------------------------------------------------------------------------------------------------+
@@ -351,8 +362,8 @@ Para evitar qualquer confusão de análise entre o canal de controle principal e
   - Destino: `198.244.203.247:17301` (Servidor Oficial ROL Secundário)
 - **Estado Criptográfico:**
   - Pacotes #32 a #50: Handshake SRP-6a em texto claro (versão 3, salt, $A$, $B$, $M_1$, $M_2$).
-  - Pacotes #51 em diante: **100% Cifrado sob Famatech AES-256-CBC**.
-- **Nota fundamental:** Neste canal **não existe quadro de 288 bytes em texto claro**. Todo tráfego posterior ao handshake é encapsulado com prefixo de tamanho de 4 bytes e payload estritamente cifrado (208B, 2576B, 160B, 432B, etc.).
+  - Pacotes #51 em diante: **Payloads cifrados sob Famatech AES-256-CBC**, mantendo o prefixo de enquadramento TCP de 4 bytes (comprimento do bloco cifrado) em texto claro.
+- **Nota fundamental:** Neste canal **não existe quadro de 288 bytes em texto claro**. Todo tráfego posterior ao handshake é encapsulado com prefixo de tamanho de 4 bytes (enquadramento em texto claro) e payload interno estritamente cifrado (208B, 2576B, 160B, 432B, etc.).
 
 ---
 
@@ -437,7 +448,7 @@ sequenceDiagram
     participant S as Servidor de Controle ROL (17301)
 
     Note over C,S: Handshake Famatech SRP-6a Concluído (CONFIRMADO)
-    Note over C,S: Canal 100% Cifrado sob Famatech AES-256-CBC
+    Note over C,S: Payloads Cifrados sob Famatech AES-256-CBC (Prefixo de Tamanho em Texto Claro)
     
     rect rgb(240, 248, 255)
     Note over C,S: Fase 1: Registro e Concessão de Acesso (HIPÓTESE de Mapeamento)
@@ -517,13 +528,25 @@ Comprovados diretamente na desmontagem de `RvROLClient.dll`:
 A interface gráfica contém a rotina central de despacho de erros em `0x004ecf00`:
 ```x86asm
 4ecf00: lea -0x3ea(%esi), %eax      ; subtrai offset base 0x3ea (1002 em decimal)
-4ecf06: cmp $0x23, %eax             ; valida faixa de 36 entradas (1002 a 1037)
-4ecf09: ja 0x4ece31                 ; default: formato genérico "(%1)"
-4ecf0f: movzbl 0x4ed2e0(%eax), %eax ; consulta tabela de tradução em 0x004ed2e0
-4ecf16: jmp dword ptr [0x004ed284 + eax*4] ; salto para tratador de string oficial
+4ecf06: cmp $0x23, %eax             ; valida faixa de 36 entradas (0..35, códigos 1002 a 1037)
+4ecf09: ja 0x4ece31                 ; se fora da faixa, desvia para formatador genérico "\n(%1)"
+4ecf0f: movzbl 0x4ed2e0(%eax), %eax ; consulta tabela de tradução de 36 bytes em 0x004ed2e0
+4ecf16: jmp dword ptr [0x004ed284 + eax*4] ; salto para tratador correspondente (23 entradas: Jump[0]..Jump[22])
 ```
 
-A extração das strings literais associadas a cada manipulador comprova a semântica oficial:
+#### Arquitetura da Tabela e Análise dos 36 Códigos (1002 a 1037)
+A tabela de tradução `0x004ed2e0` cobre 36 posições indexadas. A desmontagem completa das 23 entradas da tabela de salto `0x004ed284` revela com precisão a razão pela qual apenas 20 códigos possuem tratadores dedicados:
+1. **20 Códigos com Tratadores Especializados:**
+   - **19 códigos** possuem strings literais descritivas em texto claro no binário (ex.: senha inválida, rede cheia, timeout, etc.).
+   - **1 código (1029)** desvia para `Jump[18]` (`0x004ecf1d`), que empacota a string vazia `""` (`0x005d25c6`), silenciando a mensagem textual adicional na UI.
+2. **16 Códigos com Redirecionamento ao Formatador Numérico Genérico:**
+   - Os 16 códigos intermediários restantes (**1003, 1005, 1010, 1018, 1022, 1023, 1025, 1026, 1027, 1028, 1030, 1031, 1034, 1035 e 1036**) possuem valores de índice `1` ou `22` na tabela de tradução `0x004ed2e0`.
+   - Tanto `Jump[1]` quanto `Jump[22]` apontam para o endereço `0x004ece31`, que empacota a string `"\n(%1)"` (`0x005e87c8`).
+   - Para esses 16 códigos, o cliente oficial não possui mensagens textuais dedicadas; eles são exibidos na interface gráfica formatados como código numérico bruto entre parênteses.
+3. **Códigos Fora da Faixa (< 1002 ou > 1037):**
+   - A instrução `ja 0x4ece31` desvia imediatamente qualquer valor fora do intervalo indexado para a mesma rotina de formatação genérica `"\n(%1)"`.
+
+Abaixo documentam-se os 20 códigos com tratadores dedicados identificados até o momento:
 
 | Código | Handler VA | String Literal no Binário | Endereço da String | Classificação |
 |---|---|---|---|---|
@@ -544,9 +567,15 @@ A extração das strings literais associadas a cada manipulador comprova a semâ
 | **1020** (`0x03fc`)| `0x004ed0cc` | `"Network is closed to new members, joining impossible"` | `0x005e86b4` | **CONFIRMADO** |
 | **1021** (`0x03fd`)| `0x004ed0f4` | `"Network name collision"` | `0x005e86ec` | **CONFIRMADO** |
 | **1024** (`0x0400`)| `0x004ed0a4` | `"The virtual network limit has been reached"` | `0x005e8688` | **CONFIRMADO** |
+| **1029** (`0x0405`)| `0x004ecf1d` | `""` *(String vazia / supressão de texto)* | `0x005d25c6` | **CONFIRMADO** |
 | **1032** (`0x0408`)| `0x004ed1e4` | `"User ignores you"` | `0x005e875c` | **CONFIRMADO** |
 | **1033** (`0x0409`)| `0x004ed20c` | `"You are muted in this chat"` | `0x005e8770` | **CONFIRMADO** |
 | **1037** (`0x040d`)| `0x004ecfe2` | `"Chat is under maintenance"` | `0x005e85d4` | **CONFIRMADO** |
+
+#### Mapeamento dos 16 Códigos com Formatação Genérica de Fallback:
+Os seguintes códigos da faixa 1002..1037 são roteados pelo cliente oficial para o formatador genérico `0x004ece31` (`"\n(%1)"`):
+`1003`, `1005`, `1010`, `1018`, `1022`, `1023`, `1025`, `1026`, `1027`, `1028`, `1030`, `1031`, `1034`, `1035`, `1036`.
+Nenhuma evidência estática adicional indica texto ou semântica específica para esses números; comportam-se como posições não associadas a strings personalizadas ou reservadas na arquitetura Famatech.
 
 > [!NOTE]
 > **Esclarecimento sobre a Numeração Antiga (0..4):**
@@ -567,10 +596,13 @@ A extração das strings literais associadas a cada manipulador comprova a semâ
 | **Tag de Hash de Autenticação `0x090001cd`** | **CONFIRMADO** | `shelper.dll`, `RvROLClient.dll` | Atribuição de digest SHA-1 de 20 bytes à propriedade `0x090001cd`. |
 | **Incompatibilidade da Tag `0x010001e3` (Atributo vs Membros)** | **CONFIRMADO** | `RvControlSvc.exe` (`0x41537e`), `RvROLClient.dll` (`0x1004ef1c`) | Operações bit a bit em flags operacionais; contagem de membros refutada. |
 | **Incompatibilidade da Tag `0x0100032b` (Capacidades vs Status)** | **CONFIRMADO** | `RvControlSvc.exe`, PCAP #5486, `RvROLClient.dll` `0x10016311` | Bitmask de capacidades do cliente; presença online é tag `0x040001e7`. |
-| **Contagem Total de 744 Descritores TLV Únicos** | **CONFIRMADO** | `RvControlSvc.exe` (`call 0x4aec20`) | Mapeamento exaustivo de todas as chamadas de registro no binário. |
-| **Tabela de Erros de Rede Oficiais (1002 a 1037)** | **CONFIRMADO** | `RvRvpnGui.exe` (`0x004ecf00`, `0x004ed284`, `0x004ed2e0`) | Tabela de salto e strings extraídas da desmontagem oficial. |
+| **Contagem Total de 744 Descritores TLV Únicos** | **CONFIRMADO** | `RvControlSvc.exe` (`call 0x4aec20`) | Mapeamento exaustivo de todas as chamadas de registro no binário em 13 categorias. |
+| **Primitiva INT32 (`0x03`) vs Semântica de ID** | **CONFIRMADO** | `RvControlSvc.exe`, `RvROLClient.dll` | Primitiva TLV é estritamente escalar inteiro de 4 bytes (BE); "ID" é semântica de aplicação. |
+| **Comprimento de Codificação no Wire de BOOL (`0x04`)** | **PARCIAL** | Taxonomia de 35 tags em `RvControlSvc.exe` | Semântica booleana confirmada; tamanho no wire (1B vs 4B) sem amostra não cifrada no PCAP. |
+| **Tabela de Erros de Rede Oficiais (1002 a 1037)** | **CONFIRMADO** | `RvRvpnGui.exe` (`0x004ecf00`, `0x004ed284`, `0x004ed2e0`) | Desmontagem de 36 slots: 20 tratadores dedicados (19 descritivos + 1 vazio) e 16 com fallback `"\n(%1)"`. |
+| **Enquadramento TCP 17301 Pós-Handshake** | **CONFIRMADO** | `radmin_17301.pcap` (#51 em diante) | Prefixo de enquadramento de 4B em texto claro; payload interno cifrado sob Famatech AES-256-CBC. |
 | **Sequência de Tamanhos Pós-Handshake na Porta 17301 (208B, 2576B, etc.)** | **CONFIRMADO** | `radmin_17301.pcap` (#51, #52, #61, #65) | Registro determinístico idêntico em fluxos distintos para servidores independentes. |
-| **Atribuição das Classes aos Pacotes Cifrados (208B / 2576B)** | **HIPÓTESE** | Correlação de temporização de fluxo | Pacotes estão cifrados sob AES-256-CBC e não foram decifrados offline. |
+| **Atribuição das Classes aos Pacotes Cifrados (208B / 2576B)** | **HIPÓTESE** | Correlação de temporização de fluxo | Payloads estão cifrados sob AES-256-CBC e não foram decifrados offline. |
 | **Decifração Integral do Tráfego Cifrado TCP 17301 nos PCAPs** | **DESCONHECIDO** | Capturas de tráfego de produção sem dump de RAM do Windows | Chave de sessão AES-256 é efêmera gerada por CSPRNG na VM; inviável decifrar passivamente. |
 | **Subcampos Internos de `PROP_ENDPOINT_CANDIDATES`** | **PARCIAL** | `RvROLClient.dll`, análise de buffers | Conhecida a presença de tuplas IP/Porta; formato de compactação pendente de testes. |
 
