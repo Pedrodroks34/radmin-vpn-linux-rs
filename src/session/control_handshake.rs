@@ -275,6 +275,91 @@ pub fn pad_bignum_bytes(bytes: &[u8], target_len: usize) -> Vec<u8> {
     }
 }
 
+/// Gera um expoente privado efêmero SRP ($a$ ou $b$) criptograficamente seguro:
+/// - Utiliza CSPRNG (`openssl::rand::rand_bytes`) gerando 192 bytes (1536 bits) de entropia.
+/// - Garante que o expoente pertença estritamente ao intervalo válido $1 < exp < N - 1$
+///   (isto é, $2 \le exp \le N - 2$) e não seja trivial ($0$ ou $1$).
+/// - Implementa amostragem com repetição/rejeição (rejection sampling) caso gere valor fora do domínio aceitável.
+pub fn random_srp_exponent(prime_n: &BigNum) -> Result<BigNum, ControlHandshakeError> {
+    let one = BigNum::from_u32(1)
+        .map_err(|e| ControlHandshakeError::CryptoError(format!("falha ao criar BN 1: {e}")))?;
+    let mut n_minus_1 = BigNum::new().map_err(|e| {
+        ControlHandshakeError::CryptoError(format!("falha ao criar BN n_minus_1: {e}"))
+    })?;
+    n_minus_1
+        .checked_sub(prime_n, &one)
+        .map_err(|e| ControlHandshakeError::CryptoError(format!("falha ao calcular N - 1: {e}")))?;
+
+    for _ in 0..128 {
+        let mut buf = [0u8; RADMIN_SRP1536_MODULUS_LEN];
+        rand_bytes(&mut buf).map_err(|e| {
+            ControlHandshakeError::CryptoError(format!("falha no CSPRNG ao gerar expoente: {e}"))
+        })?;
+
+        let candidate = BigNum::from_slice(&buf).map_err(|e| {
+            ControlHandshakeError::CryptoError(format!("falha ao carregar BN candidato: {e}"))
+        })?;
+
+        // Garante 1 < candidate < N - 1
+        if candidate > one && candidate < n_minus_1 {
+            return Ok(candidate);
+        }
+    }
+
+    Err(ControlHandshakeError::CryptoError(
+        "limite de tentativas excedido ao gerar expoente SRP".to_string(),
+    ))
+}
+
+/// Valida rigorosamente uma chave pública efêmera SRP ($A$ ou $B$) conforme RFC 5054 / Thomas Wu
+/// e desmontagem de `shelper.dll!0x10060510`:
+/// - Exige representação canônica com exatamente 192 bytes (`RADMIN_SRP1536_MODULUS_LEN`).
+/// - O valor deve ser estritamente não nulo ($val \ne 0$) e menor que o módulo primo ($val < N$).
+/// - Valida formalmente que $val \pmod N \ne 0$ utilizando `nnmod` com receptor e operandos corretos.
+pub fn validate_srp_public_value(
+    bytes: &[u8],
+    prime_n: &BigNum,
+) -> Result<BigNum, ControlHandshakeError> {
+    if bytes.len() != RADMIN_SRP1536_MODULUS_LEN {
+        warn!(
+            got_len = bytes.len(),
+            expected_len = RADMIN_SRP1536_MODULUS_LEN,
+            "validate_srp_public_value: tamanho inválido para chave pública SRP"
+        );
+        return Err(ControlHandshakeError::InvalidPublicEphemeral);
+    }
+
+    let val = BigNum::from_slice(bytes).map_err(|e| {
+        ControlHandshakeError::CryptoError(format!("falha ao carregar BigNum público: {e}"))
+    })?;
+
+    // Rejeita val == 0
+    if val.num_bits() == 0 {
+        warn!("validate_srp_public_value: valor público é zero");
+        return Err(ControlHandshakeError::InvalidPublicEphemeral);
+    }
+
+    // Rejeita val >= N
+    if &val >= prime_n {
+        warn!("validate_srp_public_value: valor público fora do domínio (val >= N)");
+        return Err(ControlHandshakeError::InvalidPublicEphemeral);
+    }
+
+    // Validação formal val mod N != 0 usando nnmod com receptor correto
+    let mut ctx = BigNumContext::new()
+        .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em BN ctx: {e}")))?;
+    let mut rem = BigNum::new()
+        .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em BN rem: {e}")))?;
+    rem.nnmod(&val, prime_n, &mut ctx)
+        .map_err(|e| ControlHandshakeError::CryptoError(format!("falha ao calcular nnmod: {e}")))?;
+    if rem.num_bits() == 0 {
+        warn!("validate_srp_public_value: val mod N == 0");
+        return Err(ControlHandshakeError::InvalidPublicEphemeral);
+    }
+
+    Ok(val)
+}
+
 /// Calcula o scrambler aleatório $u$ (`shelper.dll!0x10060810`):
 /// $$u = \text{SHA1}(\text{PAD}(A) \ || \ \text{PAD}(B))$$
 pub fn compute_srp_u(
@@ -478,13 +563,28 @@ impl ControlClientNegotiator {
     ///
     /// - No estado inicial (`State0Initial`), `in_buf` deve ser `None`. Retorna o buffer do Step 1.
     /// - Nos estados subsequentes, `in_buf` contém os bytes do frame de controle recebido do servidor.
+    /// - Em caso de qualquer erro, transiciona imediatamente e permanentemente para `ControlClientState::Failed`,
+    ///   garantindo encerramento em modo seguro (fail-closed) sem possibilidade de reutilização.
     pub fn step(
+        &mut self,
+        in_buf: Option<&[u8]>,
+    ) -> Result<ControlStepOutput, ControlHandshakeError> {
+        match self.step_inner(in_buf) {
+            Ok(output) => Ok(output),
+            Err(e) => {
+                self.state = ControlClientState::Failed(e.to_string());
+                Err(e)
+            }
+        }
+    }
+
+    fn step_inner(
         &mut self,
         in_buf: Option<&[u8]>,
     ) -> Result<ControlStepOutput, ControlHandshakeError> {
         match std::mem::replace(
             &mut self.state,
-            ControlClientState::Failed("in progress".into()),
+            ControlClientState::Failed("transição interrompida".into()),
         ) {
             ControlClientState::State0Initial => {
                 if in_buf.is_some() {
@@ -585,19 +685,7 @@ impl ControlClientNegotiator {
                     ControlHandshakeError::CryptoError(format!("falha ao criar BN Context: {e}"))
                 })?;
 
-                let mut a_bytes = [0u8; RADMIN_SRP1536_MODULUS_LEN];
-                rand_bytes(&mut a_bytes).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha no CSPRNG: {e}"))
-                })?;
-                let mut a_secret = BigNum::from_slice(&a_bytes).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN a: {e}"))
-                })?;
-                let rem = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN rem: {e}"))
-                })?;
-                a_secret.nnmod(&rem, &expected_n, &mut ctx).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em mod: {e}"))
-                })?;
+                let a_secret = random_srp_exponent(&expected_n)?;
 
                 let g_bn = BigNum::from_u32(RADMIN_SRP_GENERATOR as u32).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN g: {e}"))
@@ -673,32 +761,21 @@ impl ControlClientNegotiator {
                     });
                 }
 
-                // 2. Extrair B (Tag 0x60)
+                // 2. Extrair e validar B (Tag 0x60)
                 let b_bytes = find_item(&items, TAG_PUBLIC_EPHEMERAL).ok_or(
                     ControlHandshakeError::MissingRequiredTag {
                         tag: TAG_PUBLIC_EPHEMERAL,
                     },
                 )?;
 
-                let b_public = BigNum::from_slice(b_bytes).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN B: {e}"))
-                })?;
-
                 let prime_n = get_srp_prime_n()?;
                 let mut ctx = BigNumContext::new().map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN ctx: {e}"))
                 })?;
 
-                // Validação de segurança: B mod N != 0 (0x10060510)
-                let mut b_mod_n = BigNum::new()
-                    .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em BN: {e}")))?;
-                b_mod_n.nnmod(&b_public, &prime_n, &mut ctx).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em mod: {e}"))
-                })?;
-                if b_mod_n.num_bits() == 0 {
-                    warn!("ControlClient: B mod N == 0 (chave efêmera inválida)");
-                    return Err(ControlHandshakeError::InvalidPublicEphemeral);
-                }
+                // Validação rigorosa de segurança de B (0x10060510 e RFC 5054):
+                // Comprimento canônico de 192 bytes, 1 <= B < N, B mod N != 0
+                let b_public = validate_srp_public_value(b_bytes, &prime_n)?;
 
                 // 3. Calcular u = SHA1(PAD(A) || PAD(B))
                 let (u_bn, _u_bytes) = compute_srp_u(&a_public_bytes, b_bytes)?;
@@ -734,6 +811,10 @@ impl ControlClientNegotiator {
                     .map_err(|e| {
                         ControlHandshakeError::CryptoError(format!("falha em mod_sub base: {e}"))
                     })?;
+                if base.num_bits() == 0 {
+                    warn!("ControlClient: base (B - k*v) mod N == 0 (abortando handshake)");
+                    return Err(ControlHandshakeError::InvalidPublicEphemeral);
+                }
 
                 // 5. Calcular expoente: (a + u * x)
                 let mut ux = BigNum::new().map_err(|e| {
@@ -956,10 +1037,23 @@ impl ControlServerSession {
     }
 
     /// Executa um passo da máquina de estados do servidor.
+    ///
+    /// - Em caso de qualquer erro, transiciona imediatamente e permanentemente para `ControlServerState::Failed`,
+    ///   garantindo encerramento em modo seguro (fail-closed) sem possibilidade de reutilização.
     pub fn step(&mut self, in_buf: &[u8]) -> Result<ControlStepOutput, ControlHandshakeError> {
+        match self.step_inner(in_buf) {
+            Ok(output) => Ok(output),
+            Err(e) => {
+                self.state = ControlServerState::Failed(e.to_string());
+                Err(e)
+            }
+        }
+    }
+
+    fn step_inner(&mut self, in_buf: &[u8]) -> Result<ControlStepOutput, ControlHandshakeError> {
         match std::mem::replace(
             &mut self.state,
-            ControlServerState::Failed("in progress".into()),
+            ControlServerState::Failed("transição interrompida".into()),
         ) {
             ControlServerState::State1WaitingClientIdentity => {
                 let items = decode_items(in_buf)?;
@@ -987,10 +1081,18 @@ impl ControlServerSession {
                     });
                 }
 
-                // 2. Extrair Identidade (Tag 0x20)
+                // 2. Extrair Identidade (Tag 0x20) e validar
                 let id_bytes = find_item(&items, TAG_IDENTITY)
                     .ok_or(ControlHandshakeError::MissingRequiredTag { tag: TAG_IDENTITY })?;
                 let received_user = decode_identity(id_bytes);
+                if received_user != self.username {
+                    warn!(
+                        got = %received_user,
+                        expected = %self.username,
+                        "ControlServer: usuário incorreto"
+                    );
+                    return Err(ControlHandshakeError::ProofVerificationFailed);
+                }
 
                 // 3. Calcular verifier v = g^x mod N
                 let prime_n = get_srp_prime_n()?;
@@ -1021,20 +1123,8 @@ impl ControlServerSession {
                 out_buf.extend_from_slice(&item_n);
                 out_buf.extend_from_slice(&item_g);
 
-                // Gerar b secreto para a próxima etapa
-                let mut b_bytes = [0u8; RADMIN_SRP1536_MODULUS_LEN];
-                rand_bytes(&mut b_bytes).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha no CSPRNG b: {e}"))
-                })?;
-                let mut b_secret = BigNum::from_slice(&b_bytes).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN b: {e}"))
-                })?;
-                let rem = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN rem: {e}"))
-                })?;
-                b_secret.nnmod(&rem, &prime_n, &mut ctx).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em mod: {e}"))
-                })?;
+                // Gerar b secreto para a próxima etapa via CSPRNG dedicado
+                let b_secret = random_srp_exponent(&prime_n)?;
 
                 // Calcular B = (k*v + g^b) mod N
                 let k_bn = BigNum::from_u32(RADMIN_SRP_K).map_err(|e| {
@@ -1114,24 +1204,14 @@ impl ControlServerSession {
                     },
                 )?;
 
-                let a_public = BigNum::from_slice(a_bytes).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN A: {e}"))
-                })?;
-
                 let prime_n = get_srp_prime_n()?;
                 let mut ctx = BigNumContext::new().map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN ctx: {e}"))
                 })?;
 
-                // A mod N != 0
-                let mut a_mod_n = BigNum::new()
-                    .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em BN: {e}")))?;
-                a_mod_n.nnmod(&a_public, &prime_n, &mut ctx).map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em mod: {e}"))
-                })?;
-                if a_mod_n.num_bits() == 0 {
-                    return Err(ControlHandshakeError::InvalidPublicEphemeral);
-                }
+                // Validação rigorosa de segurança de A (0x10060510 e RFC 5054):
+                // Comprimento canônico de 192 bytes, 1 <= A < N, A mod N != 0
+                let a_public = validate_srp_public_value(a_bytes, &prime_n)?;
 
                 // 3. u = SHA1(PAD(A) || PAD(B))
                 let (u_bn, _) = compute_srp_u(a_bytes, &b_public_bytes)?;
@@ -1150,6 +1230,10 @@ impl ControlServerSession {
                     .map_err(|e| {
                         ControlHandshakeError::CryptoError(format!("falha em avu: {e}"))
                     })?;
+                if avu.num_bits() == 0 {
+                    warn!("ControlServer: (A * v^u) mod N == 0 (abortando handshake)");
+                    return Err(ControlHandshakeError::InvalidPublicEphemeral);
+                }
 
                 let mut s = BigNum::new().map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN S: {e}"))
@@ -1482,6 +1566,257 @@ mod tests {
                 expected: 2,
                 got: 5
             })
+        ));
+    }
+
+    #[test]
+    fn test_random_srp_exponent_bounds_and_entropy() {
+        let prime_n = get_srp_prime_n().unwrap();
+        let one = BigNum::from_u32(1).unwrap();
+        let mut n_minus_1 = BigNum::new().unwrap();
+        n_minus_1.checked_sub(&prime_n, &one).unwrap();
+
+        for _ in 0..10 {
+            let exp = random_srp_exponent(&prime_n).unwrap();
+            assert!(exp > one);
+            assert!(exp < n_minus_1);
+            // Entropia substancial: pelo menos 1500 bits
+            assert!(exp.num_bits() >= 1500);
+        }
+    }
+
+    #[test]
+    fn test_validate_srp_public_value_strict_checks() {
+        let prime_n = get_srp_prime_n().unwrap();
+
+        // 1. Chave canônica válida (1 < A < N, 192 bytes)
+        let g_bn = BigNum::from_u32(5).unwrap();
+        let a_secret = random_srp_exponent(&prime_n).unwrap();
+        let mut ctx = BigNumContext::new().unwrap();
+        let mut a_public = BigNum::new().unwrap();
+        a_public
+            .mod_exp(&g_bn, &a_secret, &prime_n, &mut ctx)
+            .unwrap();
+        let valid_bytes = pad_bignum_bytes(&a_public.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
+        assert_eq!(valid_bytes.len(), 192);
+        assert!(validate_srp_public_value(&valid_bytes, &prime_n).is_ok());
+
+        // 2. Tamanhos incorretos (não canônicos)
+        assert_eq!(
+            validate_srp_public_value(&valid_bytes[..191], &prime_n),
+            Err(ControlHandshakeError::InvalidPublicEphemeral)
+        );
+        let mut oversized = valid_bytes.clone();
+        oversized.push(0x00);
+        assert_eq!(
+            validate_srp_public_value(&oversized, &prime_n),
+            Err(ControlHandshakeError::InvalidPublicEphemeral)
+        );
+        assert_eq!(
+            validate_srp_public_value(&[], &prime_n),
+            Err(ControlHandshakeError::InvalidPublicEphemeral)
+        );
+
+        // 3. Valor Zero (0 mod N == 0)
+        let zero_bytes = vec![0u8; 192];
+        assert_eq!(
+            validate_srp_public_value(&zero_bytes, &prime_n),
+            Err(ControlHandshakeError::InvalidPublicEphemeral)
+        );
+
+        // 4. Valor exatamente igual a N (N mod N == 0)
+        let n_bytes = pad_bignum_bytes(&prime_n.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
+        assert_eq!(
+            validate_srp_public_value(&n_bytes, &prime_n),
+            Err(ControlHandshakeError::InvalidPublicEphemeral)
+        );
+
+        // 5. Valor maior que N (N + 1)
+        let one = BigNum::from_u32(1).unwrap();
+        let mut n_plus_one = BigNum::new().unwrap();
+        n_plus_one.checked_add(&prime_n, &one).unwrap();
+        let n_plus_one_bytes = pad_bignum_bytes(&n_plus_one.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
+        assert_eq!(
+            validate_srp_public_value(&n_plus_one_bytes, &prime_n),
+            Err(ControlHandshakeError::InvalidPublicEphemeral)
+        );
+    }
+
+    #[test]
+    fn test_srp_handshake_bad_username_fails_closed() {
+        let right_username = "alice";
+        let wrong_username = "bob";
+        let password = "password";
+
+        let mut client =
+            ControlClientNegotiator::new(wrong_username.to_string(), password.to_string());
+        let mut server =
+            ControlServerSession::new(right_username.to_string(), password.to_string()).unwrap();
+
+        let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+        let err = server.step(&s1);
+        assert_eq!(err, Err(ControlHandshakeError::ProofVerificationFailed));
+        assert!(!server.is_established());
+
+        // Servidor em estado de falha deve rejeitar passos adicionais (fail-closed)
+        let retry_err = server.step(&s1);
+        assert!(matches!(
+            retry_err,
+            Err(ControlHandshakeError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn test_srp_handshake_tampered_m1_fails_closed() {
+        let username = "alice";
+        let password = "password";
+
+        let mut client = ControlClientNegotiator::new(username.to_string(), password.to_string());
+        let mut server =
+            ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+        let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+        let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+        let s3 = client.step(Some(&s2)).unwrap().buffer_to_send.unwrap();
+        let s4 = server.step(&s3).unwrap().buffer_to_send.unwrap();
+        let mut s5 = client.step(Some(&s4)).unwrap().buffer_to_send.unwrap();
+
+        // Adultera a prova M1 no Step 5
+        let last_idx = s5.len() - 1;
+        s5[last_idx] ^= 0xAA;
+
+        let err = server.step(&s5);
+        assert_eq!(err, Err(ControlHandshakeError::ProofVerificationFailed));
+        assert!(!server.is_established());
+
+        // Servidor fail-closed
+        let retry_err = server.step(&s5);
+        assert!(matches!(
+            retry_err,
+            Err(ControlHandshakeError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn test_srp_handshake_invalid_client_a_rejected_by_server() {
+        let username = "alice";
+        let password = "password";
+
+        let mut client = ControlClientNegotiator::new(username.to_string(), password.to_string());
+        let mut server =
+            ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+        let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+        let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+        let _s3 = client.step(Some(&s2)).unwrap();
+
+        // Monta Step 3 malicioso com A = 0
+        let item_step3 = encode_item(TAG_STEP, &3u32.to_le_bytes()).unwrap();
+        let item_bad_a = encode_item(TAG_PUBLIC_EPHEMERAL, &[0u8; 192]).unwrap();
+        let mut malformed_s3 = item_step3;
+        malformed_s3.extend_from_slice(&item_bad_a);
+
+        let err = server.step(&malformed_s3);
+        assert_eq!(err, Err(ControlHandshakeError::InvalidPublicEphemeral));
+        assert!(!server.is_established());
+
+        // Fail-closed
+        assert!(matches!(
+            server.step(&malformed_s3),
+            Err(ControlHandshakeError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn test_srp_handshake_invalid_server_b_rejected_by_client() {
+        let username = "alice";
+        let password = "password";
+
+        let mut client = ControlClientNegotiator::new(username.to_string(), password.to_string());
+
+        let _s1 = client.step(None).unwrap();
+
+        let prime_n = get_srp_prime_n().unwrap();
+        let item_step2 = encode_item(TAG_STEP, &2u32.to_le_bytes()).unwrap();
+        let item_salt = encode_item(TAG_SALT, &[0x11; 16]).unwrap();
+        let item_n = encode_item(TAG_MODULUS, &prime_n.to_vec()).unwrap();
+        let item_g = encode_item(TAG_GENERATOR, &[RADMIN_SRP_GENERATOR]).unwrap();
+
+        let mut s2 = Vec::new();
+        s2.extend_from_slice(&item_step2);
+        s2.extend_from_slice(&item_salt);
+        s2.extend_from_slice(&item_n);
+        s2.extend_from_slice(&item_g);
+
+        let _s3 = client.step(Some(&s2)).unwrap();
+
+        // Servidor envia Step 4 com B inválido (tamanho truncado de 100 bytes)
+        let item_step4 = encode_item(TAG_STEP, &4u32.to_le_bytes()).unwrap();
+        let item_bad_b = encode_item(TAG_PUBLIC_EPHEMERAL, &[0x44; 100]).unwrap();
+        let mut malformed_s4 = item_step4;
+        malformed_s4.extend_from_slice(&item_bad_b);
+
+        let err = client.step(Some(&malformed_s4));
+        assert_eq!(err, Err(ControlHandshakeError::InvalidPublicEphemeral));
+        assert!(!client.is_established());
+
+        // Fail-closed
+        assert!(matches!(
+            client.step(Some(&malformed_s4)),
+            Err(ControlHandshakeError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn test_srp_handshake_divergent_group_parameters_rejected() {
+        let username = "alice";
+        let password = "password";
+
+        let mut client = ControlClientNegotiator::new(username.to_string(), password.to_string());
+        let _s1 = client.step(None).unwrap();
+
+        let prime_n = get_srp_prime_n().unwrap();
+        let item_step2 = encode_item(TAG_STEP, &2u32.to_le_bytes()).unwrap();
+        let item_salt = encode_item(TAG_SALT, &[0x11; 16]).unwrap();
+        let item_n = encode_item(TAG_MODULUS, &prime_n.to_vec()).unwrap();
+        // Gerador g incorreto: 2 em vez de 5
+        let item_bad_g = encode_item(TAG_GENERATOR, &[2u8]).unwrap();
+
+        let mut s2_bad = Vec::new();
+        s2_bad.extend_from_slice(&item_step2);
+        s2_bad.extend_from_slice(&item_salt);
+        s2_bad.extend_from_slice(&item_n);
+        s2_bad.extend_from_slice(&item_bad_g);
+
+        let err = client.step(Some(&s2_bad));
+        assert_eq!(err, Err(ControlHandshakeError::InvalidGroupParameters));
+        assert!(!client.is_established());
+
+        // Fail-closed
+        assert!(matches!(
+            client.step(Some(&s2_bad)),
+            Err(ControlHandshakeError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn test_failed_session_cannot_be_reused() {
+        let mut client = ControlClientNegotiator::new("alice".into(), "pass".into());
+        // Força falha passando entrada no Step 0
+        let err = client.step(Some(&[1, 2, 3]));
+        assert!(err.is_err());
+        assert!(!client.is_established());
+
+        // Tentativa de executar step novamente deve falhar imediatamente
+        let retry1 = client.step(None);
+        assert!(matches!(
+            retry1,
+            Err(ControlHandshakeError::InvalidState(_))
+        ));
+        let retry2 = client.step(Some(&[1, 2, 3]));
+        assert!(matches!(
+            retry2,
+            Err(ControlHandshakeError::InvalidState(_))
         ));
     }
 }

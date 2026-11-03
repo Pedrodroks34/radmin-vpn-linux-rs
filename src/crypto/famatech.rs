@@ -72,11 +72,10 @@ pub enum CryptoError {
 /// copia para um buffer temporário de 8 bytes preenchido com zeros à direita e soma.
 pub fn famatech_checksum_64(data: &[u8]) -> u64 {
     let mut sum: u64 = 0;
-    let chunks = data.chunks_exact(8);
-    let remainder = chunks.remainder();
+    let (chunks, remainder) = data.as_chunks::<8>();
 
     for chunk in chunks {
-        let word = u64::from_le_bytes(chunk.try_into().unwrap());
+        let word = u64::from_le_bytes(*chunk);
         sum = sum.wrapping_add(word);
     }
 
@@ -145,7 +144,7 @@ pub fn famatech_pad_and_sign(payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
 
 /// Verifica a integridade, remove o trailer e descarta o padding (`shelper.dll!0x10069f90`).
 pub fn famatech_verify_and_unpad(buf: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    if buf.len() < BLOCK_SIZE || buf.len() % BLOCK_SIZE != 0 {
+    if buf.len() < BLOCK_SIZE || !buf.len().is_multiple_of(BLOCK_SIZE) {
         return Err(CryptoError::InvalidCiphertextSize { size: buf.len() });
     }
 
@@ -349,7 +348,7 @@ impl FamatechCipherState {
     /// 3. Atualiza `dec_iv` com o último bloco de 16 bytes do ciphertext recebido
     /// 4. Valida padding `0xCC`, verifica integridade do trailer e retorna payload original (`0x10069f90`)
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.len() < BLOCK_SIZE || ciphertext.len() % BLOCK_SIZE != 0 {
+        if ciphertext.len() < BLOCK_SIZE || !ciphertext.len().is_multiple_of(BLOCK_SIZE) {
             return Err(CryptoError::InvalidCiphertextSize {
                 size: ciphertext.len(),
             });
