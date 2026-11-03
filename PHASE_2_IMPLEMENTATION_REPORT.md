@@ -21,13 +21,13 @@ Toda a lógica foi implementada em Rust de forma limpa, modular e testável nos 
 
 | Arquivo | Natureza da Alteração |
 |---|---|
-| [`CONTROL_HANDSHAKE_SPEC.md`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/CONTROL_HANDSHAKE_SPEC.md) | **Novo**: Especificação técnica formal forense do protocolo de controle SRP-6a, matriz de confiança, parâmetros do grupo 1536-bit, diagrama de sequência, framing TLV e KDF. |
-| [`src/session/control_handshake.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/src/session/control_handshake.rs) | **Novo**: Implementação completa das rotinas `SHelper_*`: codificação/decodificação de itens TLV, cálculos matemáticos SRP-6a com OpenSSL BigNum, KDF de 40 bytes, prova $M_1$/$M_2$, cliente (`ControlClientNegotiator`), servidor de teste (`ControlServerSession`) e 10 testes unitários. |
-| [`src/session/control.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/src/session/control.rs) | **Novo**: Gerenciador da conexão de controle (`ControlConnection`), validação da versão de protocolo (3), execução do fluxo SRP sobre `TcpChannel`, instalação da chave AES-256 e troca de mensagens cifradas. |
-| [`src/session/mod.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/src/session/mod.rs) | **Modificado**: Exposição dos submódulos `control` e `control_handshake` e reexportação dos tipos públicos correspondentes. |
-| [`tests/integration_test.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/tests/integration_test.rs) | **Modificado**: Adição dos testes de integração `test_e2e_phase2_control_channel_srp_handshake_and_continuity` e `test_pcap_radmin_17301_control_frames_validation`. |
-| [`PHASE_2_IMPLEMENTATION_REPORT.md`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/PHASE_2_IMPLEMENTATION_REPORT.md) | **Novo**: Este relatório consolidado. |
-| [`PHASE_2_UNRESOLVED.md`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/PHASE_2_UNRESOLVED.md) | **Novo**: Registro formal de pendências e próximos passos (Fase 3: catálogo TLV de login e gerenciamento de redes). |
+| [`CONTROL_HANDSHAKE_SPEC.md`](CONTROL_HANDSHAKE_SPEC.md) | **Novo**: Especificação técnica formal forense do protocolo de controle SRP-6a, matriz de confiança, parâmetros do grupo 1536-bit, diagrama de sequência, framing TLV e KDF. |
+| [`src/session/control_handshake.rs`](src/session/control_handshake.rs) | **Novo**: Implementação completa das rotinas `SHelper_*`: codificação/decodificação de itens TLV, cálculos matemáticos SRP-6a com OpenSSL BigNum, KDF de 40 bytes, prova $M_1$/$M_2$, cliente (`ControlClientNegotiator`), servidor de teste (`ControlServerSession`) e 10 testes unitários. |
+| [`src/session/control.rs`](src/session/control.rs) | **Novo**: Gerenciador da conexão de controle (`ControlConnection`), validação da versão de protocolo (3), execução do fluxo SRP sobre `TcpChannel`, instalação da chave AES-256 e troca de mensagens cifradas. |
+| [`src/session/mod.rs`](src/session/mod.rs) | **Modificado**: Exposição dos submódulos `control` e `control_handshake` e reexportação dos tipos públicos correspondentes. |
+| [`tests/integration_test.rs`](tests/integration_test.rs) | **Modificado**: Adição dos testes de integração `test_e2e_phase2_control_channel_srp_handshake_and_continuity` e `test_pcap_radmin_17301_control_frames_validation`. |
+| [`PHASE_2_IMPLEMENTATION_REPORT.md`](PHASE_2_IMPLEMENTATION_REPORT.md) | **Novo**: Este relatório consolidado. |
+| [`PHASE_2_UNRESOLVED.md`](PHASE_2_UNRESOLVED.md) | **Novo**: Registro formal de pendências e próximos passos (Fase 3: catálogo TLV de login e gerenciamento de redes). |
 
 ---
 
@@ -99,11 +99,14 @@ Toda a lógica foi implementada em Rust de forma limpa, modular e testável nos 
    - `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`: loopback TCP com injeção de prova $M_1$ adulterada, validando rejeição com `ProofVerificationFailed`, estado de servidor `Failed`, encerramento fail-closed do transporte e ausência de panics (com task do servidor aguardada explicitamente).
    - `test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed`: loopback TCP com injeção de prova $M_2$ adulterada, validando rejeição pelo cliente com fail-closed e término limpo do servidor sem panics.
    - `test_pcap_radmin_17301_control_frames_validation`: validação contra vetores de framing reais de `radmin_17301.pcap`.
-3. **Métricas Finais da Terceira Rodada de Auditoria**:
+3. **Métricas Finais Consolidadas da Quarta Rodada de Auditoria**:
    - `cargo fmt --check`: **Aprovado** (zero diferenças).
    - `cargo clippy --all-targets --all-features -- -D warnings`: **Aprovado** (zero advertências em toda a árvore).
-   - `cargo test --locked`: **119 testes avaliados** (110 unitários aprovados + 1 ignorado ambiental TAP; 8 testes de integração aprovados; 0 falhas). Total de **118 testes aprovados**.
+   - `cargo test --locked`: **122 testes avaliados** (113 unitários aprovados + 1 ignorado ambiental TAP; 8 testes de integração aprovados; 0 falhas). Total de **121 testes aprovados**.
 4. **Garantias de Ciclo de Vida e Segurança de Memória**:
-   - Wrapper RAII `SecretBigNum` em todos os expoentes, verifiers e segredos intermediários com chamada incondicional a `BN_clear` antes da desalocação.
+   - Endurecimento total do ciclo de vida das chaves AES de 32 bytes: `session_key()` retorna `Option<Zeroizing<[u8; 32]>>`, `session_key_ref()` permite acesso por referência direta `&[u8; 32]`, e `create_cipher_state()` inicializa o canal diretamente via `from_key_ref` sem alocação de buffers temporários intermediários não-zeroizados.
+   - Construtores de `FamatechCipherState` (`from_key_ref`, `from_separate_keys_ref`, `from_rsession_key`) eliminam cópias redundantes e asseguram que quaisquer argumentos passados por valor sejam protegidos e limpos via `Zeroizing`.
+   - Wrapper RAII `SecretBigNum` em todos os expoentes, verifiers e segredos intermediários com chamada incondicional a `BN_clear` antes da desalocação heap (`BN_free`).
    - Zeroização incondicional via `Zeroizing` para buffers de cifra, senhas, salts, digest de provas $M_1$/$M_2$ e chaves KDF.
    - Redação total de `Debug` e eliminação de `Clone` indevido no estado de cifra.
+   - **Fronteiras e Limitações Técnicas Documentadas**: A garantia criptográfica de destruição de segredos abrange 100% dos buffers e estruturas de dados sob controle do Rust e das limbs dos `BIGNUM`s sob `SecretBigNum`. Limitações físicas e do ecossistema externo incluem buffers scratch efêmeros internos alocados em `BN_CTX` pela biblioteca C do OpenSSL (cuja reciclagem depende do contexto C) e potencial paginação em partição de swap pelo kernel do sistema operacional na ausência de privilégios de `mlock(2)`.

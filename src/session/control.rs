@@ -6,7 +6,6 @@
 //! 3. Instalação e ativação da cifra AES-256-CBC (`FamatechCipherState`) no canal de transporte.
 //! 4. Troca segura de comandos de controle criptografados (gerenciamento de rede, login, etc.).
 
-use crate::crypto::famatech::FamatechCipherState;
 use crate::session::control_handshake::{
     ControlClientNegotiator, ControlHandshakeError, SHELPER_PROTOCOL_VERSION,
 };
@@ -288,11 +287,7 @@ impl ControlConnection {
         // -------------------------------------------------------------------
         // Fase 5: Ativação da Cifra de Sessão AES-256 no Canal
         // -------------------------------------------------------------------
-        let session_key = negotiator.session_key().ok_or_else(|| {
-            ControlHandshakeError::InvalidState("Chave ausente após conclusão".into())
-        })?;
-
-        let cipher_state = FamatechCipherState::new(session_key);
+        let cipher_state = negotiator.create_cipher_state()?;
         channel.enable_cipher(cipher_state);
 
         self.negotiator = Some(negotiator);

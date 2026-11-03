@@ -226,7 +226,6 @@ async fn test_e2e_phase1_rsession_handshake_and_cchannel_continuity() {
 /// Handshake de controle SRP-6a (`SHelper_*`) com negociação de versão e canal seguro AES-256.
 #[tokio::test]
 async fn test_e2e_phase2_control_channel_srp_handshake_and_continuity() {
-    use radmin_vpn::crypto::famatech::FamatechCipherState;
     use radmin_vpn::session::control::{ControlConnection, ControlConnectionState};
     use radmin_vpn::session::control_handshake::ControlServerSession;
     use radmin_vpn::transport::{ChannelConfig, TcpChannel};
@@ -289,7 +288,11 @@ async fn test_e2e_phase2_control_channel_srp_handshake_and_continuity() {
 
         // 3. Ativa cifra AES-256 no canal do servidor com a chave derivada de 32 bytes
         let srv_key = srv_session.session_key().expect("server key");
-        let srv_cipher = FamatechCipherState::new(srv_key);
+        assert_ne!(&*srv_key, &[0u8; 32]);
+        assert_eq!(srv_session.session_key_ref().unwrap(), &*srv_key);
+        let srv_cipher = srv_session
+            .create_cipher_state()
+            .expect("server cipher state");
         srv_ch.enable_cipher(srv_cipher);
 
         // 4. Troca de comandos de controle cifrados

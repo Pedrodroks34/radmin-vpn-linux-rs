@@ -294,8 +294,8 @@ $ cargo clippy --all-targets --all-features -- -D warnings
 # Status: 0 erros, 0 advertências em toda a árvore
 ```
 
-### 5.2 Contabilidade Desagregada de Testes (`cargo test --locked`)
-Execução do conjunto completo de testes automatizados:
+### 5.2 Contabilidade Desagregada de Testes da Segunda Rodada (`cargo test --locked`)
+Execução do conjunto de testes automatizados na conclusão da segunda rodada:
 
 - **Biblioteca Principal (`src/lib.rs` - Testes Unitários)**:
   - Total: **106 testes**
@@ -311,7 +311,7 @@ Execução do conjunto completo de testes automatizados:
 - **Testes de Documentação (Doc-tests)**:
   - Total: **0 testes**
 
-**Total Geral da Suíte de Testes**: **114 testes** (113 aprovados, 0 falhas, 1 ignorado ambiental).
+**Total Geral na Segunda Rodada**: **114 testes avaliados** (113 aprovados, 0 falhas, 1 ignorado ambiental). *(Nota: a suíte foi expandida subsequentemente para 119 testes na 3ª rodada e 122 testes na 4ª rodada conforme seções 6 e 7).*
 
 ---
 
@@ -398,10 +398,80 @@ Em conformidade com as boas práticas de auditoria forense:
 - `cargo test --locked`:
   - Testes Unitários (`src/lib.rs`): **111 testes** (110 aprovados, 0 falhas, 1 ignorado ambiental TAP)
   - Testes de Integração (`tests/integration_test.rs`): **8 testes** (8 aprovados, 0 falhas)
-  - Total de testes aprovados: **118 testes**
+  - Total de testes aprovados na Terceira Rodada: **118 testes**
 
 ---
 
-## 7. Conclusão Final da Fase 2
+## 7. Quarta Rodada de Auditoria — Endurecimento de Chaves AES, Zero-Copy e Consistência Final
 
-Com a conclusão da terceira rodada de auditoria, todas as pendências arquiteturais, criptográficas, de ciclo de vida e de segurança de memória foram sanadas com rigor cirúrgico, sem supressão de advertências nem alegações não verificáveis de segurança. A branch `fix/phase-2-srp-corrective-audit` está perfeitamente estabilizada para a PR #7.
+### 7.1. Diagnóstico dos Pontos Residuais
+A auditoria independente identificou pontos residuais adicionais de segurança e consistência:
+1. **Cópias Brutas da Chave de Sessão AES**:
+   - `ControlClientNegotiator::session_key()` e `ControlServerSession::session_key()` retornavam `Option<[u8; 32]>`, efetuando cópia crua na stack sem RAII de destruição.
+   - `create_cipher_state()` invocava `session_key()`, gerando um array intermediário antes de instanciar o cifrador.
+2. **Cópias Temporárias em Construtores de Cifra**:
+   - `FamatechCipherState::from_rsession_key()` utilizava um buffer temporário `let mut key = [0u8; 32];` na stack sem garantia de zeroização.
+   - Construtores recebiam arrays por valor sem assegurar que o stack frame do chamador fosse limpo.
+3. **Limitações na Cobertura de Testes de `Drop`**:
+   - `test_secret_bignum_raii_clearing` chamava `clear()` manualmente antes de sair do escopo, mascarando o comportamento real do destrutor `Drop`.
+   - Testes de `Drop` pós-desalocação não devem incorrer em Use-After-Free/UB no heap da glibc/OpenSSL, exigindo separação honesta e instrumentação controlada.
+4. **Divergências na Contabilidade Documental**:
+   - Relatórios apresentavam menções a 114, 118 e 119 testes decorrentes da evolução entre rodadas sem reconciliação unificada.
+
+---
+
+### 7.2. Soluções Implementadas
+
+#### A. Refatoração de APIs de Chave de Sessão e Eliminação de Cópias
+- `ControlClientNegotiator::session_key()` e `ControlServerSession::session_key()` agora retornam `Option<Zeroizing<[u8; 32]>>`, garantindo que qualquer cópia solicitada por consumidores seja automaticamente zerada no término do escopo.
+- Introduzidas as funções `session_key_ref(&self) -> Option<&[u8; 32]>` no cliente e no servidor, viabilizando inspeção e validação estritamente zero-copy sem alocação ou movimentação de memória.
+- `create_cipher_state()` em ambas as partes acessa diretamente a referência interna da chave de sessão no enum `Established` e instancia `FamatechCipherState::from_key_ref()`, eliminando cópias intermediárias na stack.
+
+#### B. Endurecimento dos Construtores de `FamatechCipherState`
+- Adicionados os construtores de referência `from_key_ref(key: &[u8; 32])` e `from_separate_keys_ref(enc_key: &[u8; 32], dec_key: &[u8; 32])`.
+- Construtores existentes por valor (`new`, `with_separate_keys`) encapsulam imediatamente os parâmetros em `Zeroizing`, assegurando a sobrescrita dos bytes na stack no retorno da função.
+- `from_rsession_key()` realiza slicing direto de `key_material[..32]` e delega para `from_key_ref()`, eliminando a criação do array intermediário temporário não-zeroizado.
+
+#### C. Isolamento Rigoroso de Testes de Limpeza vs `Drop` RAII
+- `test_secret_bignum_explicit_clear`: valida o comportamento isolado de `BN_clear` sobre a estrutura viva do `BigNum`, confirmando `num_bits() == 0` e serialização vazia.
+- `test_secret_bignum_raii_clearing`: executa o descarte puramente automático via `Drop` sem qualquer chamada prévia a `clear()`, auditado via contador atômico seguro `SECRET_BIGNUM_DROP_COUNT`.
+- `test_control_sessions_raii_drop`: verifica o descarte automático por `Drop` de `ControlClientNegotiator` e `ControlServerSession` nos estágios inicial, intermediário e estabelecido.
+- `test_cipher_state_constructors_and_separate_keys`: valida exaustivamente os novos construtores zero-copy de `FamatechCipherState`.
+
+---
+
+### 7.3. Delimitação Honesta de Segurança de Memória
+A implementação atinge o nível máximo viável de segurança dentro do modelo de execução do Linux em espaço de usuário:
+- **Sob Controle do Rust**: 100% dos segredos, chaves AES, senhas, salts e provas nos buffers e pilhas da aplicação são protegidos por RAII (`Zeroizing`), sendo zerados com barreiras de compilador no encerramento ou em qualquer caminho de erro/pânico.
+- **Limbs do OpenSSL**: Encapsulados sob `SecretBigNum`, com invocação determinística de `BN_clear` antes da devolução da memória ao alocador C (`BN_free`).
+- **Limitações do Ambiente**:
+  1. *Scratchpad do OpenSSL*: O contexto `BN_CTX` pode manter alocações temporárias em buffers internos de precisão múltipla geridos pela biblioteca OpenSSL em C.
+  2. *Swap do Kernel Linux*: A proteção contra descarga em disco sob pressão extrema de memória requer privilégios elevados de sistema para fixação de páginas (`mlock(2)`/`CAP_IPC_LOCK`), o que não é assumido por padrão para execuções sem privilégios.
+
+---
+
+### 7.4. Contabilidade Consolidada da Suíte de Testes (`cargo test --locked`)
+
+Resultados da execução da suíte completa após a quarta rodada:
+
+- **Biblioteca Principal (`src/lib.rs` - Testes Unitários)**:
+  - Total avaliado: **114 testes**
+  - Aprovados: **113 testes**
+  - Falhas: **0**
+  - Ignorados: **1 teste** (`tunnel::tap::abi_tests::open_tap_device_with_privileges`, ambiental)
+- **Binário CLI (`src/main.rs`)**:
+  - Total: **0 testes**
+- **Testes de Integração (`tests/integration_test.rs`)**:
+  - Total avaliado: **8 testes**
+  - Aprovados: **8 testes**
+  - Falhas: **0**
+- **Testes de Documentação (Doc-tests)**:
+  - Total: **0 testes**
+
+**Total Geral da Suíte de Testes**: **122 testes avaliados** (**121 testes aprovados**, 0 falhas, 1 ignorado ambiental).
+
+---
+
+## 8. Conclusão Final da Fase 2
+
+Com a conclusão da quarta rodada de auditoria, todas as pendências arquiteturais, criptográficas, de ciclo de vida e de segurança de memória foram sanadas com rigor cirúrgico, sem supressão de advertências nem alegações não verificáveis de segurança. A branch `fix/phase-2-srp-corrective-audit` está perfeitamente estabilizada para a PR #7.

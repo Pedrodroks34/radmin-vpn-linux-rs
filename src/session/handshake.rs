@@ -51,6 +51,7 @@ use openssl::rand::rand_bytes;
 use openssl::rsa::{Padding, Rsa};
 use thiserror::Error;
 use tracing::{debug, info};
+use zeroize::Zeroizing;
 
 /// Tamanho do bloco RSA-2048 gerado no Estado 0 do `SHelper_RSession` (`0x100` = 256 bytes).
 pub const RSESSION_RSA_BLOCK_SIZE: usize = 256;
@@ -279,15 +280,24 @@ impl HandshakeNegotiator {
             .ok_or(HandshakeError::SessionNotEstablished)
     }
 
+    /// Retorna uma referência direta à chave AES-256 de 32 bytes (`0x20`) nos primeiros 32 bytes do buffer de 64 bytes.
+    pub fn derive_aes256_key_ref(&self) -> Result<&[u8; RSESSION_AES256_KEY_SIZE], HandshakeError> {
+        let key_material = self.get_key()?;
+        Ok(key_material[..RSESSION_AES256_KEY_SIZE]
+            .try_into()
+            .expect("slice length matches RSESSION_AES256_KEY_SIZE"))
+    }
+
     /// Extrai a chave AES-256 de 32 bytes (`0x20`) a partir dos primeiros 32 bytes do buffer de 64 bytes
-    /// de `SHelper_RSession_GetKey`, conforme comprovado em `RvROLClient.dll!0x100df250`,
-    /// `0x100df470`, `0x1003de29` e `0x10096f0d`.
+    /// de `SHelper_RSession_GetKey`, protegida por `Zeroizing`.
     ///
     /// Nunca confunde o token de 4 bytes do servidor com a chave AES de 32 bytes.
-    pub fn derive_aes256_key(&self) -> Result<[u8; RSESSION_AES256_KEY_SIZE], HandshakeError> {
-        let key_material = self.get_key()?;
-        let mut aes_key = [0u8; RSESSION_AES256_KEY_SIZE];
-        aes_key.copy_from_slice(&key_material[..RSESSION_AES256_KEY_SIZE]);
+    pub fn derive_aes256_key(
+        &self,
+    ) -> Result<Zeroizing<[u8; RSESSION_AES256_KEY_SIZE]>, HandshakeError> {
+        let key_ref = self.derive_aes256_key_ref()?;
+        let mut aes_key = Zeroizing::new([0u8; RSESSION_AES256_KEY_SIZE]);
+        aes_key.copy_from_slice(key_ref);
         Ok(aes_key)
     }
 
@@ -525,11 +535,21 @@ impl RSessionServer {
             .ok_or(HandshakeError::SessionNotEstablished)
     }
 
-    /// Extrai a chave AES-256 de 32 bytes (`0..32`) do buffer de 64 bytes (`RvROLClient.dll!0x100df250`).
-    pub fn derive_aes256_key(&self) -> Result<[u8; RSESSION_AES256_KEY_SIZE], HandshakeError> {
+    /// Retorna uma referência direta à chave AES-256 de 32 bytes (`0..32`) no buffer de 64 bytes.
+    pub fn derive_aes256_key_ref(&self) -> Result<&[u8; RSESSION_AES256_KEY_SIZE], HandshakeError> {
         let key_material = self.get_key()?;
-        let mut aes_key = [0u8; RSESSION_AES256_KEY_SIZE];
-        aes_key.copy_from_slice(&key_material[..RSESSION_AES256_KEY_SIZE]);
+        Ok(key_material[..RSESSION_AES256_KEY_SIZE]
+            .try_into()
+            .expect("slice length matches RSESSION_AES256_KEY_SIZE"))
+    }
+
+    /// Extrai a chave AES-256 de 32 bytes (`0..32`) do buffer de 64 bytes (`RvROLClient.dll!0x100df250`), protegida por `Zeroizing`.
+    pub fn derive_aes256_key(
+        &self,
+    ) -> Result<Zeroizing<[u8; RSESSION_AES256_KEY_SIZE]>, HandshakeError> {
+        let key_ref = self.derive_aes256_key_ref()?;
+        let mut aes_key = Zeroizing::new([0u8; RSESSION_AES256_KEY_SIZE]);
+        aes_key.copy_from_slice(key_ref);
         Ok(aes_key)
     }
 
@@ -725,6 +745,10 @@ mod tests {
         let server_aes_32 = server.derive_aes256_key().unwrap();
         assert_eq!(client_aes_32, server_aes_32);
         assert_eq!(&client_aes_32[..], &client_key_64[..32]);
+        assert_eq!(
+            client.derive_aes256_key_ref().unwrap(),
+            server.derive_aes256_key_ref().unwrap()
+        );
 
         // Valida comunicação criptografada bidirecional via SHelper_CChannel (FamatechCipherState)
         let mut client_cipher = client.create_cipher().unwrap();

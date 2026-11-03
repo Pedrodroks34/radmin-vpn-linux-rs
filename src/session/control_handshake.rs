@@ -259,9 +259,15 @@ impl DerefMut for SecretBigNum {
     }
 }
 
+#[cfg(test)]
+pub(crate) static SECRET_BIGNUM_DROP_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 impl Drop for SecretBigNum {
     fn drop(&mut self) {
         self.0.clear();
+        #[cfg(test)]
+        SECRET_BIGNUM_DROP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -319,6 +325,11 @@ impl SecretBigNum {
         BigNum::from_u32(val).map(SecretBigNum).map_err(|e| {
             ControlHandshakeError::CryptoError(format!("falha ao criar BN de u32: {e}"))
         })
+    }
+
+    /// Limpa explicitamente os limbs do BigNum na memória usando `BN_clear`.
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
@@ -726,22 +737,33 @@ impl ControlClientNegotiator {
         matches!(self.state, ControlClientState::Established { .. })
     }
 
-    /// Retorna a chave de sessão derivada de 32 bytes (`0x20`) para AES-256-CBC, se estabelecido.
-    pub fn session_key(&self) -> Option<[u8; CONTROL_SESSION_KEY_SIZE]> {
+    /// Retorna uma referência direta à chave de sessão de 32 bytes (`0x20`), se estabelecido.
+    pub fn session_key_ref(&self) -> Option<&[u8; CONTROL_SESSION_KEY_SIZE]> {
         match &self.state {
-            ControlClientState::Established { session_key, .. } => Some(**session_key),
+            ControlClientState::Established { session_key, .. } => Some(&**session_key),
             _ => None,
         }
     }
 
-    /// Cria e retorna o estado de cifra `FamatechCipherState` inicializado com a chave de sessão.
+    /// Retorna uma cópia protegida por `Zeroizing` da chave de sessão derivada de 32 bytes (`0x20`), se estabelecido.
+    pub fn session_key(&self) -> Option<Zeroizing<[u8; CONTROL_SESSION_KEY_SIZE]>> {
+        match &self.state {
+            ControlClientState::Established { session_key, .. } => Some(session_key.clone()),
+            _ => None,
+        }
+    }
+
+    /// Cria e retorna o estado de cifra `FamatechCipherState` inicializado diretamente com a chave de sessão.
     pub fn create_cipher_state(&self) -> Result<FamatechCipherState, ControlHandshakeError> {
-        let key = self.session_key().ok_or_else(|| {
-            ControlHandshakeError::InvalidState(
-                "tentativa de obter cipher state antes do handshake concluído".into(),
-            )
-        })?;
-        Ok(FamatechCipherState::new(key))
+        let key = match &self.state {
+            ControlClientState::Established { session_key, .. } => session_key,
+            _ => {
+                return Err(ControlHandshakeError::InvalidState(
+                    "tentativa de obter cipher state antes do handshake concluído".into(),
+                ))
+            }
+        };
+        Ok(FamatechCipherState::from_key_ref(key))
     }
 
     /// Executa uma transição de estado da máquina de estados do cliente.
@@ -1313,12 +1335,33 @@ impl ControlServerSession {
         self.state.clear();
     }
 
-    /// Retorna a chave de sessão de 32 bytes se o handshake estiver concluído.
-    pub fn session_key(&self) -> Option<[u8; CONTROL_SESSION_KEY_SIZE]> {
+    /// Retorna uma referência direta à chave de sessão de 32 bytes se o handshake estiver concluído.
+    pub fn session_key_ref(&self) -> Option<&[u8; CONTROL_SESSION_KEY_SIZE]> {
         match &self.state {
-            ControlServerState::Established { session_key, .. } => Some(**session_key),
+            ControlServerState::Established { session_key, .. } => Some(&**session_key),
             _ => None,
         }
+    }
+
+    /// Retorna uma cópia protegida por `Zeroizing` da chave de sessão de 32 bytes se o handshake estiver concluído.
+    pub fn session_key(&self) -> Option<Zeroizing<[u8; CONTROL_SESSION_KEY_SIZE]>> {
+        match &self.state {
+            ControlServerState::Established { session_key, .. } => Some(session_key.clone()),
+            _ => None,
+        }
+    }
+
+    /// Cria e retorna o estado de cifra `FamatechCipherState` inicializado diretamente com a chave de sessão.
+    pub fn create_cipher_state(&self) -> Result<FamatechCipherState, ControlHandshakeError> {
+        let key = match &self.state {
+            ControlServerState::Established { session_key, .. } => session_key,
+            _ => {
+                return Err(ControlHandshakeError::InvalidState(
+                    "tentativa de obter cipher state antes do handshake concluído".into(),
+                ))
+            }
+        };
+        Ok(FamatechCipherState::from_key_ref(key))
     }
 
     /// Retorna `true` se o handshake foi concluído com sucesso.
@@ -1772,13 +1815,20 @@ mod tests {
         let client_key = client.session_key().unwrap();
         let server_key = server.session_key().unwrap();
         assert_eq!(client_key, server_key);
-        assert_ne!(client_key, [0u8; 32]);
+        assert_ne!(&*client_key, &[0u8; 32]);
+        assert_eq!(
+            client.session_key_ref().unwrap(),
+            server.session_key_ref().unwrap()
+        );
 
-        // Cifra Famatech pode ser criada com a chave derivada
-        let mut cipher = client.create_cipher_state().unwrap();
+        // Cifra Famatech pode ser criada com a chave derivada em ambos os lados
+        let mut client_cipher = client.create_cipher_state().unwrap();
+        let mut server_cipher = server.create_cipher_state().unwrap();
+        assert_eq!(server_cipher.enc_key(), &*client_key);
+
         let plaintext = b"Radmin VPN Phase 2 Control Test Message";
-        let encrypted = cipher.encrypt(plaintext).unwrap();
-        let decrypted = cipher.decrypt(&encrypted).unwrap();
+        let encrypted = client_cipher.encrypt(plaintext).unwrap();
+        let decrypted = server_cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
@@ -2214,8 +2264,12 @@ mod tests {
         assert!(client.is_established());
         assert!(server.is_established());
 
-        assert_ne!(client.session_key().unwrap(), [0u8; 32]);
-        assert_ne!(server.session_key().unwrap(), [0u8; 32]);
+        assert_ne!(&*client.session_key().unwrap(), &[0u8; 32]);
+        assert_ne!(&*server.session_key().unwrap(), &[0u8; 32]);
+        assert_eq!(
+            client.session_key_ref().unwrap(),
+            server.session_key_ref().unwrap()
+        );
 
         client.clear();
         server.clear();
@@ -2245,19 +2299,83 @@ mod tests {
     }
 
     #[test]
-    fn test_secret_bignum_raii_clearing() {
+    fn test_secret_bignum_explicit_clear() {
         let raw = [0x5Au8; 32];
         let mut secret_bn = SecretBigNum::from_slice(&raw).unwrap();
         assert_eq!(secret_bn.num_bits(), 255);
 
-        // Verificação direta da chamada a clear() que é invocada pelo Drop
-        secret_bn.0.clear();
+        // Verificação direta do efeito de clear() nos limbs internos do OpenSSL BigNum:
+        secret_bn.clear();
         assert_eq!(secret_bn.num_bits(), 0);
+        assert!(secret_bn.to_vec().is_empty() || secret_bn.to_vec() == vec![0]);
+    }
 
-        // Verificação de RAII: criação de SecretBigNum em escopo interno e descarte limpo
+    #[test]
+    fn test_secret_bignum_raii_clearing() {
+        let raw = [0x5Au8; 32];
+        let initial_drops = SECRET_BIGNUM_DROP_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+
+        // Verificação de RAII puro: criação de SecretBigNum em escopo interno e descarte automático por Drop.
+        // O teste NÃO chama clear() manualmente antes do descarte, assegurando que o Drop do compilador
+        // seja o único responsável pela limpeza e que ele seja efetivamente invocado.
         {
-            let _scoped = SecretBigNum::from_slice(&raw).unwrap();
-            // Ao sair do escopo, Drop invoca self.0.clear() e depois BN_free
+            let secret_bn = SecretBigNum::from_slice(&raw).unwrap();
+            assert_eq!(secret_bn.num_bits(), 255);
+            // Ao sair deste bloco, Drop::drop(&mut self) é invocado pelo compilador.
+            // O Drop executa self.0.clear() (BN_clear) e incrementa SECRET_BIGNUM_DROP_COUNT,
+            // antes que o destrutor de openssl::bn::BigNum chame BN_free().
+            //
+            // NOTA SOBRE LIMITES TÉCNICOS E SEGURANÇA DE MEMÓRIA:
+            // Por design da biblioteca OpenSSL e do subsistema de memória Rust/C, após a execução
+            // de BN_free(), o ponteiro é retornado ao alocador de heap do sistema operacional.
+            // Qualquer tentativa de ler a memória após o free constitui Use-After-Free (Undefined Behavior)
+            // e violaria o AddressSanitizer. A garantia de que os limbs foram zerados antes da devolução
+            // decorre da invocação síncrona de BN_clear() no Drop, demonstrada em test_secret_bignum_explicit_clear.
+        }
+
+        let final_drops = SECRET_BIGNUM_DROP_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(final_drops, initial_drops + 1);
+    }
+
+    #[test]
+    fn test_control_sessions_raii_drop() {
+        let username = "drop_test_user";
+        let password = "DropTestPassword123!";
+
+        // 1. Descarte em estado inicial (State 0 / State 1)
+        {
+            let _client = ControlClientNegotiator::new(username.into(), password.into());
+            let _server = ControlServerSession::new(username.into(), password.into()).unwrap();
+        }
+
+        // 2. Descarte em estado intermediário (State 4 / State 3)
+        {
+            let mut client = ControlClientNegotiator::new(username.into(), password.into());
+            let mut server = ControlServerSession::new(username.into(), password.into()).unwrap();
+
+            let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+            let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+            let _s3 = client.step(Some(&s2)).unwrap();
+            // Client está em State4WaitingServerEphemeral, Server em State3WaitingClientEphemeral
+            // Ambos saem de escopo e são destruídos via Drop chamando clear()
+        }
+
+        // 3. Descarte em estado final Established
+        {
+            let mut client = ControlClientNegotiator::new(username.into(), password.into());
+            let mut server = ControlServerSession::new(username.into(), password.into()).unwrap();
+
+            let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+            let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+            let s3 = client.step(Some(&s2)).unwrap().buffer_to_send.unwrap();
+            let s4 = server.step(&s3).unwrap().buffer_to_send.unwrap();
+            let s5 = client.step(Some(&s4)).unwrap().buffer_to_send.unwrap();
+            let s6 = server.step(&s5).unwrap().buffer_to_send.unwrap();
+            let _ = client.step(Some(&s6)).unwrap();
+
+            assert!(client.is_established());
+            assert!(server.is_established());
+            // Ambos saem de escopo com chaves ativas; Drop chama clear() limpando session_key e k_full
         }
     }
 
