@@ -38,6 +38,7 @@
 use openssl::hash::{hash, MessageDigest};
 use openssl::symm::{Cipher, Crypter, Mode};
 use thiserror::Error;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const BLOCK_SIZE: usize = 16;
 pub const AES_256_KEY_SIZE: usize = 32;
@@ -72,11 +73,10 @@ pub enum CryptoError {
 /// copia para um buffer temporário de 8 bytes preenchido com zeros à direita e soma.
 pub fn famatech_checksum_64(data: &[u8]) -> u64 {
     let mut sum: u64 = 0;
-    let chunks = data.chunks_exact(8);
-    let remainder = chunks.remainder();
+    let (chunks, remainder) = data.as_chunks::<8>();
 
     for chunk in chunks {
-        let word = u64::from_le_bytes(chunk.try_into().unwrap());
+        let word = u64::from_le_bytes(*chunk);
         sum = sum.wrapping_add(word);
     }
 
@@ -145,7 +145,7 @@ pub fn famatech_pad_and_sign(payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
 
 /// Verifica a integridade, remove o trailer e descarta o padding (`shelper.dll!0x10069f90`).
 pub fn famatech_verify_and_unpad(buf: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    if buf.len() < BLOCK_SIZE || buf.len() % BLOCK_SIZE != 0 {
+    if buf.len() < BLOCK_SIZE || !buf.len().is_multiple_of(BLOCK_SIZE) {
         return Err(CryptoError::InvalidCiphertextSize { size: buf.len() });
     }
 
@@ -190,7 +190,6 @@ pub fn famatech_verify_and_unpad(buf: &[u8]) -> Result<Vec<u8>, CryptoError> {
 /// - `dec_key`: chave de decifragem AES-256 (32 bytes, configurada via `0x10062d60`)
 /// - `enc_iv`: IV de envio de 16 bytes (`+0x1ec`, inicializado com zeros)
 /// - `dec_iv`: IV de recepção de 16 bytes (`+0x1fc`, inicializado com zeros)
-#[derive(Debug, Clone)]
 pub struct FamatechCipherState {
     enc_key: [u8; AES_256_KEY_SIZE],
     dec_key: [u8; AES_256_KEY_SIZE],
@@ -198,13 +197,45 @@ pub struct FamatechCipherState {
     dec_iv: [u8; BLOCK_SIZE],
 }
 
+impl std::fmt::Debug for FamatechCipherState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FamatechCipherState")
+            .field("enc_key", &"[REDACTED]")
+            .field("dec_key", &"[REDACTED]")
+            .field("enc_iv", &"[REDACTED]")
+            .field("dec_iv", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl FamatechCipherState {
+    /// Inicializa o canal a partir de uma referência direta à chave de 32 bytes sem cópias intermediárias na stack.
+    pub fn from_key_ref(key: &[u8; AES_256_KEY_SIZE]) -> Self {
+        Self {
+            enc_key: *key,
+            dec_key: *key,
+            enc_iv: [0u8; BLOCK_SIZE],
+            dec_iv: [0u8; BLOCK_SIZE],
+        }
+    }
+
     /// Inicializa o canal com a mesma chave de 32 bytes para cifragem e decifragem e IVs zerados
     /// (`RvROLClient.dll!0x100df250` / `shelper.dll!0x10062ca9`).
+    /// O parâmetro recebido por valor é envolvido em `Zeroizing` para garantir que o stack frame
+    /// seja limpo após a inicialização.
     pub fn new(key: [u8; AES_256_KEY_SIZE]) -> Self {
+        let key = Zeroizing::new(key);
+        Self::from_key_ref(&key)
+    }
+
+    /// Inicializa o canal a partir de referências explícitas para as chaves de 32 bytes de envio e recepção.
+    pub fn from_separate_keys_ref(
+        enc_key: &[u8; AES_256_KEY_SIZE],
+        dec_key: &[u8; AES_256_KEY_SIZE],
+    ) -> Self {
         Self {
-            enc_key: key,
-            dec_key: key,
+            enc_key: *enc_key,
+            dec_key: *dec_key,
             enc_iv: [0u8; BLOCK_SIZE],
             dec_iv: [0u8; BLOCK_SIZE],
         }
@@ -212,26 +243,26 @@ impl FamatechCipherState {
 
     /// Inicializa o canal com chaves de 32 bytes explícitas para envio e recepção
     /// (`shelper.dll!0x1006a8b0` `SHelper_CChannel_CreateClient` / `0x1006a990` `CreateServer`).
+    /// Os parâmetros recebidos por valor são envolvidos em `Zeroizing` para garantir sua limpeza.
     pub fn with_separate_keys(
         enc_key: [u8; AES_256_KEY_SIZE],
         dec_key: [u8; AES_256_KEY_SIZE],
     ) -> Self {
-        Self {
-            enc_key,
-            dec_key,
-            enc_iv: [0u8; BLOCK_SIZE],
-            dec_iv: [0u8; BLOCK_SIZE],
-        }
+        let enc_key = Zeroizing::new(enc_key);
+        let dec_key = Zeroizing::new(dec_key);
+        Self::from_separate_keys_ref(&enc_key, &dec_key)
     }
 
     /// Inicializa o canal a partir do buffer de 64 bytes retornado por `SHelper_RSession_GetKey`
     /// (`shelper.dll!0x1006ba80` -> `0x1006a270`), conforme comprovado em
     /// `RvROLClient.dll!0x10096f0d..0x10096f21`, `0x100df250` e `0x100df470`:
     /// os primeiros 32 bytes (`0..32`) são instalados como `key_enc` e `key_dec`.
+    /// Utiliza referência direta sem criar buffers intermediários não-zeroizados na stack.
     pub fn from_rsession_key(key_material: &[u8; RSESSION_KEY_BUFFER_SIZE]) -> Self {
-        let mut key = [0u8; AES_256_KEY_SIZE];
-        key.copy_from_slice(&key_material[..AES_256_KEY_SIZE]);
-        Self::new(key)
+        let key_ref: &[u8; AES_256_KEY_SIZE] = key_material[..AES_256_KEY_SIZE]
+            .try_into()
+            .expect("slice matches AES_256_KEY_SIZE");
+        Self::from_key_ref(key_ref)
     }
 
     /// Atualiza a chave de cifragem (`shelper.dll!0x10062e00` `CChannel_SetKeyEnc`),
@@ -277,10 +308,10 @@ impl FamatechCipherState {
 
     /// Limpa chaves e IVs em memória (`shelper.dll!0x10062c80` `CChannel_Clear`).
     pub fn clear(&mut self) {
-        self.enc_key.fill(0);
-        self.dec_key.fill(0);
-        self.enc_iv.fill(0);
-        self.dec_iv.fill(0);
+        self.enc_key.zeroize();
+        self.dec_key.zeroize();
+        self.enc_iv.zeroize();
+        self.dec_iv.zeroize();
     }
 
     pub fn key(&self) -> &[u8; AES_256_KEY_SIZE] {
@@ -308,7 +339,7 @@ impl FamatechCipherState {
     /// 2. Cifra o bloco resultante usando AES-256-CBC com o `enc_iv` atual
     /// 3. Atualiza `enc_iv` com o último bloco de 16 bytes do ciphertext gerado
     pub fn encrypt(&mut self, payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let padded = famatech_pad_and_sign(payload)?;
+        let padded = Zeroizing::new(famatech_pad_and_sign(payload)?);
         debug_assert_eq!(padded.len() % BLOCK_SIZE, 0);
 
         let mut crypter = Crypter::new(
@@ -349,7 +380,7 @@ impl FamatechCipherState {
     /// 3. Atualiza `dec_iv` com o último bloco de 16 bytes do ciphertext recebido
     /// 4. Valida padding `0xCC`, verifica integridade do trailer e retorna payload original (`0x10069f90`)
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.len() < BLOCK_SIZE || ciphertext.len() % BLOCK_SIZE != 0 {
+        if ciphertext.len() < BLOCK_SIZE || !ciphertext.len().is_multiple_of(BLOCK_SIZE) {
             return Err(CryptoError::InvalidCiphertextSize {
                 size: ciphertext.len(),
             });
@@ -365,7 +396,7 @@ impl FamatechCipherState {
 
         crypter.pad(false);
 
-        let mut plaintext = vec![0u8; ciphertext.len() + BLOCK_SIZE];
+        let mut plaintext = Zeroizing::new(vec![0u8; ciphertext.len() + BLOCK_SIZE]);
         let mut count = crypter
             .update(ciphertext, &mut plaintext)
             .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
@@ -378,7 +409,8 @@ impl FamatechCipherState {
         let last_block_start = ciphertext.len() - BLOCK_SIZE;
         self.dec_iv.copy_from_slice(&ciphertext[last_block_start..]);
 
-        // Valida e desempacota (0x10069f90)
+        // Valida e desempacota (0x10069f90). Plaintext é zeroizado automaticamente via Drop do Zeroizing
+        // mesmo em caso de erro no trailer ou na remoção do padding.
         famatech_verify_and_unpad(&plaintext)
     }
 }
@@ -664,5 +696,58 @@ mod state_regression {
         assert!(receiver.decrypt(&damaged).is_err());
 
         assert!(receiver.decrypt(&second).is_err());
+    }
+
+    #[test]
+    fn cipher_state_clear_and_drop_zeroizes_sensitive_material() {
+        let key = [0x5au8; 32];
+        let mut state = FamatechCipherState::new(key);
+        let _ = state.encrypt(b"secret payload test").unwrap();
+        assert_ne!(state.enc_iv(), &[0u8; 16]);
+
+        state.clear();
+        assert_eq!(state.enc_key(), &[0u8; 32]);
+        assert_eq!(state.dec_key(), &[0u8; 32]);
+        assert_eq!(state.enc_iv(), &[0u8; 16]);
+        assert_eq!(state.dec_iv(), &[0u8; 16]);
+    }
+
+    #[test]
+    fn test_cipher_state_debug_redacted() {
+        let key = [0x77u8; 32];
+        let state = FamatechCipherState::new(key);
+        let debug_str = format!("{state:?}");
+        assert!(debug_str.contains("[REDACTED]"));
+        assert!(!debug_str.contains("0x77"));
+        assert!(!debug_str.contains("119")); // 0x77 in decimal
+    }
+
+    #[test]
+    fn test_cipher_state_constructors_and_separate_keys() {
+        let key_enc = [0x11u8; 32];
+        let key_dec = [0x22u8; 32];
+
+        // from_key_ref
+        let state_ref = FamatechCipherState::from_key_ref(&key_enc);
+        assert_eq!(state_ref.enc_key(), &key_enc);
+        assert_eq!(state_ref.dec_key(), &key_enc);
+
+        // from_separate_keys_ref
+        let state_sep_ref = FamatechCipherState::from_separate_keys_ref(&key_enc, &key_dec);
+        assert_eq!(state_sep_ref.enc_key(), &key_enc);
+        assert_eq!(state_sep_ref.dec_key(), &key_dec);
+
+        // with_separate_keys
+        let state_sep = FamatechCipherState::with_separate_keys(key_enc, key_dec);
+        assert_eq!(state_sep.enc_key(), &key_enc);
+        assert_eq!(state_sep.dec_key(), &key_dec);
+
+        // from_rsession_key
+        let mut rsession_buf = [0u8; 64];
+        rsession_buf[..32].copy_from_slice(&key_enc);
+        rsession_buf[32..].fill(0xee);
+        let state_rsession = FamatechCipherState::from_rsession_key(&rsession_buf);
+        assert_eq!(state_rsession.enc_key(), &key_enc);
+        assert_eq!(state_rsession.dec_key(), &key_enc);
     }
 }

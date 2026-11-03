@@ -6,7 +6,6 @@
 //! 3. Instalação e ativação da cifra AES-256-CBC (`FamatechCipherState`) no canal de transporte.
 //! 4. Troca segura de comandos de controle criptografados (gerenciamento de rede, login, etc.).
 
-use crate::crypto::famatech::FamatechCipherState;
 use crate::session::control_handshake::{
     ControlClientNegotiator, ControlHandshakeError, SHELPER_PROTOCOL_VERSION,
 };
@@ -14,6 +13,7 @@ use crate::transport::{ChannelConfig, TcpChannel};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{debug, error, info};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Timeout padrão para as etapas do handshake de controle.
 pub const DEFAULT_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,7 +71,7 @@ pub struct ControlStats {
 /// Gerenciador de uma conexão de controle segura com a infraestrutura oficial do Radmin VPN.
 pub struct ControlConnection {
     username: String,
-    password: String,
+    password: Zeroizing<String>,
     server_addr: Option<String>,
     state: ControlConnectionState,
     channel: Option<TcpChannel>,
@@ -80,12 +80,25 @@ pub struct ControlConnection {
     stats: ControlStats,
 }
 
+impl std::fmt::Debug for ControlConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlConnection")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("server_addr", &self.server_addr)
+            .field("state", &self.state)
+            .field("timeout", &self.timeout)
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
 impl ControlConnection {
     /// Cria uma nova conexão de controle com as credenciais especificadas.
     pub fn new(username: String, password: String) -> Self {
         Self {
             username,
-            password,
+            password: Zeroizing::new(password),
             server_addr: None,
             state: ControlConnectionState::Disconnected,
             channel: None,
@@ -191,7 +204,7 @@ impl ControlConnection {
         self.stats.rx_packets += 1;
 
         let mut negotiator =
-            ControlClientNegotiator::new(self.username.clone(), self.password.clone());
+            ControlClientNegotiator::new(self.username.clone(), (*self.password).clone());
         negotiator.process_version_response(&version_frame.payload)?;
 
         // -------------------------------------------------------------------
@@ -274,11 +287,7 @@ impl ControlConnection {
         // -------------------------------------------------------------------
         // Fase 5: Ativação da Cifra de Sessão AES-256 no Canal
         // -------------------------------------------------------------------
-        let session_key = negotiator.session_key().ok_or_else(|| {
-            ControlHandshakeError::InvalidState("Chave ausente após conclusão".into())
-        })?;
-
-        let cipher_state = FamatechCipherState::new(session_key);
+        let cipher_state = negotiator.create_cipher_state()?;
         channel.enable_cipher(cipher_state);
 
         self.negotiator = Some(negotiator);
@@ -336,22 +345,40 @@ impl ControlConnection {
 
     /// Encerra a conexão de forma limpa, destruindo material de chave e fechando o transporte.
     pub async fn close(&mut self) {
+        self.password.zeroize();
+        if let Some(mut neg) = self.negotiator.take() {
+            neg.clear();
+        }
         if let Some(mut ch) = self.channel.take() {
             ch.clear_cipher();
             let _ = ch.close().await;
         }
-        self.negotiator = None;
         self.state = ControlConnectionState::Closed;
         info!("Conexão de controle encerrada e material criptográfico destruído.");
     }
 
     /// Falha a conexão com a mensagem de erro fornecida, descartando chaves.
     async fn fail_session(&mut self, reason: String) {
+        self.password.zeroize();
+        if let Some(mut neg) = self.negotiator.take() {
+            neg.clear();
+        }
         if let Some(mut ch) = self.channel.take() {
             ch.clear_cipher();
             let _ = ch.close().await;
         }
-        self.negotiator = None;
         self.state = ControlConnectionState::Failed(reason);
+    }
+}
+
+impl Drop for ControlConnection {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        if let Some(neg) = self.negotiator.as_mut() {
+            neg.clear();
+        }
+        if let Some(ch) = self.channel.as_mut() {
+            ch.clear_cipher();
+        }
     }
 }

@@ -226,7 +226,6 @@ async fn test_e2e_phase1_rsession_handshake_and_cchannel_continuity() {
 /// Handshake de controle SRP-6a (`SHelper_*`) com negociação de versão e canal seguro AES-256.
 #[tokio::test]
 async fn test_e2e_phase2_control_channel_srp_handshake_and_continuity() {
-    use radmin_vpn::crypto::famatech::FamatechCipherState;
     use radmin_vpn::session::control::{ControlConnection, ControlConnectionState};
     use radmin_vpn::session::control_handshake::ControlServerSession;
     use radmin_vpn::transport::{ChannelConfig, TcpChannel};
@@ -289,7 +288,11 @@ async fn test_e2e_phase2_control_channel_srp_handshake_and_continuity() {
 
         // 3. Ativa cifra AES-256 no canal do servidor com a chave derivada de 32 bytes
         let srv_key = srv_session.session_key().expect("server key");
-        let srv_cipher = FamatechCipherState::new(srv_key);
+        assert_ne!(&*srv_key, &[0u8; 32]);
+        assert_eq!(srv_session.session_key_ref().unwrap(), &*srv_key);
+        let srv_cipher = srv_session
+            .create_cipher_state()
+            .expect("server cipher state");
         srv_ch.enable_cipher(srv_cipher);
 
         // 4. Troca de comandos de controle cifrados
@@ -329,6 +332,202 @@ async fn test_e2e_phase2_control_channel_srp_handshake_and_continuity() {
     client_conn.close().await;
     assert_eq!(client_conn.state(), &ControlConnectionState::Closed);
     assert!(!client_conn.is_active());
+}
+
+/// Teste de integração end-to-end: a prova M1 do cliente é adulterada em trânsito.
+/// Valida explicitamente que:
+/// 1. O servidor detecta e rejeita a prova adulterada com `ProofVerificationFailed`.
+/// 2. O servidor NÃO estabelece sessão (`!srv_session.is_established()`) e transiciona para `ControlServerState::Failed`.
+/// 3. O servidor encerra a conexão sem `panic`.
+/// 4. O cliente detecta a desconexão e falha em modo fechado (fail-closed, `ControlConnectionState::Failed`).
+/// 5. O `server_task` é aguardado com `.expect("server task completed successfully without panic")`.
+#[tokio::test]
+async fn test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed() {
+    use radmin_vpn::session::control::{ControlConnection, ControlConnectionState};
+    use radmin_vpn::session::control_handshake::{
+        ControlHandshakeError, ControlServerSession, ControlServerState,
+    };
+
+    let username = "auditor_sec";
+    let password = "AuditorPassword456!";
+
+    let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("local addr");
+
+    let server_task = tokio::spawn(async move {
+        let mut srv_ch = listener.accept().await.expect("accept server");
+
+        // Versão: 03 00 00 00
+        let v_frame = srv_ch.receive().await.expect("recv version");
+        srv_ch.send(v_frame.payload).await.expect("echo version");
+
+        let mut srv_session =
+            ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+        // Step 1 -> Step 2
+        let s1 = srv_ch.receive().await.expect("recv step 1");
+        let s2 = srv_session.step(&s1.payload).expect("server step 2");
+        srv_ch
+            .send(s2.buffer_to_send.unwrap())
+            .await
+            .expect("send step 2");
+
+        // Step 3 -> Step 4
+        let s3 = srv_ch.receive().await.expect("recv step 3");
+        let s4 = srv_session.step(&s3.payload).expect("server step 4");
+        srv_ch
+            .send(s4.buffer_to_send.unwrap())
+            .await
+            .expect("send step 4");
+
+        // Step 5: Recebe frame do cliente contendo M1 e adultera o byte da prova
+        let s5 = srv_ch.receive().await.expect("recv step 5");
+        let mut tampered_payload = s5.payload;
+        let last_idx = tampered_payload.len() - 1;
+        tampered_payload[last_idx] ^= 0xEE; // Corrompe byte final da prova M1
+
+        // O servidor executa a validação e deve rejeitar categoricamente
+        let srv_res = srv_session.step(&tampered_payload);
+        assert_eq!(
+            srv_res,
+            Err(ControlHandshakeError::ProofVerificationFailed),
+            "Servidor deve rejeitar prova M1 adulterada com ProofVerificationFailed"
+        );
+        assert!(
+            !srv_session.is_established(),
+            "Servidor NÃO deve estabelecer sessão após falha na verificação de M1"
+        );
+        assert!(
+            matches!(srv_session.state(), ControlServerState::Failed(_)),
+            "Servidor deve transicionar irreversivelmente para estado Failed"
+        );
+
+        // Fecha canal sem pânico
+        srv_ch.close().await.expect("srv_ch close");
+    });
+
+    let mut client_conn = ControlConnection::new(username.to_string(), password.to_string());
+    let res = client_conn.connect(&addr.to_string()).await;
+    assert!(
+        res.is_err(),
+        "Conexão com prova adulterada deve falhar no cliente"
+    );
+
+    // Valida propriedades fail-closed do cliente
+    assert!(!client_conn.is_active(), "Cliente não deve ficar ativo");
+    assert!(
+        matches!(client_conn.state(), ControlConnectionState::Failed(_)),
+        "Cliente deve estar em estado Failed"
+    );
+
+    // Envio ou recebimento em canal falhado é rejeitado imediatamente
+    let send_res = client_conn.send_message(b"unauthorized").await;
+    assert!(send_res.is_err());
+
+    let recv_res = client_conn.recv_message().await;
+    assert!(recv_res.is_err());
+
+    // Assegura que o servidor completou normalmente sem pânico
+    server_task
+        .await
+        .expect("server task completed successfully without panic");
+}
+
+/// Teste de integração end-to-end: a prova M2 emitida pelo servidor é adulterada antes de chegar ao cliente.
+/// Valida explicitamente que:
+/// 1. O servidor processa M1 com sucesso e emite Step 6 (M2).
+/// 2. O frame é adulterado em trânsito.
+/// 3. O cliente valida a prova com `ProofVerificationFailed`, rejeita a sessão e encerra a conexão.
+/// 4. O cliente transiciona para `ControlConnectionState::Failed`.
+/// 5. O servidor percebe o fechamento da conexão pelo cliente e termina sem pânico.
+/// 6. O `server_task` é aguardado com `.expect("server task completed successfully without panic")`.
+#[tokio::test]
+async fn test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed() {
+    use radmin_vpn::session::control::{ControlConnection, ControlConnectionState};
+    use radmin_vpn::session::control_handshake::ControlServerSession;
+
+    let username = "auditor_sec_m2";
+    let password = "AuditorPassword456!_M2";
+
+    let listener = TcpChannelListener::bind("127.0.0.1:0", ChannelConfig::default())
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("local addr");
+
+    let server_task = tokio::spawn(async move {
+        let mut srv_ch = listener.accept().await.expect("accept server");
+
+        // Versão
+        let v_frame = srv_ch.receive().await.expect("recv version");
+        srv_ch.send(v_frame.payload).await.expect("echo version");
+
+        let mut srv_session =
+            ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+        // Step 1 -> Step 2
+        let s1 = srv_ch.receive().await.expect("recv step 1");
+        let s2 = srv_session.step(&s1.payload).expect("server step 2");
+        srv_ch
+            .send(s2.buffer_to_send.unwrap())
+            .await
+            .expect("send step 2");
+
+        // Step 3 -> Step 4
+        let s3 = srv_ch.receive().await.expect("recv step 3");
+        let s4 = srv_session.step(&s3.payload).expect("server step 4");
+        srv_ch
+            .send(s4.buffer_to_send.unwrap())
+            .await
+            .expect("send step 4");
+
+        // Step 5 -> Step 6: O servidor valida M1 e calcula M2 legítimo
+        let s5 = srv_ch.receive().await.expect("recv step 5");
+        let s6 = srv_session.step(&s5.payload).expect("server step 6");
+        let mut tampered_buf = s6.buffer_to_send.unwrap();
+        let last_idx = tampered_buf.len() - 1;
+        tampered_buf[last_idx] ^= 0xEE; // Corrompe byte final da prova M2
+
+        srv_ch
+            .send(tampered_buf)
+            .await
+            .expect("send tampered step 6");
+
+        // Como o cliente falha ao validar M2 adulterado, o cliente encerra a conexão.
+        // O servidor tenta receber o próximo frame ou EOF sem pânico.
+        let next_frame = srv_ch.receive().await;
+        assert!(
+            next_frame.is_err(),
+            "Servidor deve observar EOF ou erro de conexão após cliente abortar"
+        );
+        srv_ch.close().await.expect("server close");
+    });
+
+    let mut client_conn = ControlConnection::new(username.to_string(), password.to_string());
+    let res = client_conn.connect(&addr.to_string()).await;
+    assert!(
+        res.is_err(),
+        "Conexão com M2 adulterado deve falhar no cliente"
+    );
+
+    // Valida propriedades de fail-closed
+    assert!(!client_conn.is_active());
+    assert!(matches!(
+        client_conn.state(),
+        ControlConnectionState::Failed(_)
+    ));
+
+    // Envio ou recebimento em canal falhado é rejeitado imediatamente
+    let send_res = client_conn.send_message(b"unauthorized").await;
+    assert!(send_res.is_err());
+
+    let recv_res = client_conn.recv_message().await;
+    assert!(recv_res.is_err());
+
+    server_task
+        .await
+        .expect("server task completed successfully without panic");
 }
 
 /// Teste com dados e vetores reais de framing extraídos de `radmin_17301.pcap`.

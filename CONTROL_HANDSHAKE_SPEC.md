@@ -181,35 +181,39 @@ sequenceDiagram
 - **Validações**:
   - Item `0x10000000` com valor `2`.
   - Item `0x30000000` (salt $s$).
-  - Itens `0x40000000` e `0x50000000` validados contra o grupo esperado ($N$ e $g$).
+  - Itens `0x40000000` e `0x50000000` validados contra o grupo esperado ($N$ e $g$). Se divergirem, transiciona imediatamente para `Failed` (fail-closed).
 - **Ações**:
-  1. Gera expoente secreto efêmero $a$ criptograficamente seguro ($1536$ bits aleatórios via `RAND_bytes`).
-  2. Reduz $a \pmod N$.
-  3. Calcula a chave efêmera pública:
+  1. Gera expoente secreto efêmero $a$ criptograficamente seguro via gerador dedicado `random_srp_exponent`:
+     - Utiliza CSPRNG com 1536 bits de entropia.
+     - Aplica amostragem por rejeição (rejection sampling) garantindo estritamente $1 < a < N - 1$ (não trivial, sem neutralização por operações de módulo espúrias).
+  2. Calcula a chave efêmera pública:
      $$A = g^a \pmod N$$
-  4. Monta Item `0x10000000` com valor `00 00 00 03`.
-  5. Monta Item `0x60000000` com $A$ (192 bytes big-endian).
-  6. Transiciona `state = 4` (`WaitingServerProof`).
+  3. Monta Item `0x10000000` com valor `00 00 00 03`.
+  4. Monta Item `0x60000000` com $A$ (192 bytes big-endian canônicos).
+  5. Transiciona `state = 4` (`WaitingServerProof`).
 
 ### 4.4 Passo 4: Efêmera Pública do Servidor (Estado 3 do Servidor, `0x100670d0`)
 - **Entrada**: Buffer do Passo 3.
 - **Validações**:
   - Item `0x10000000` com valor `3`.
-  - Item `0x60000000` contendo $A$ ($192$ bytes, $A \not\equiv 0 \pmod N$).
+  - Item `0x60000000` contendo $A$:
+    - Validação canônica estrita via `validate_srp_public_value`: comprimento exato de 192 bytes, $1 \le A < N$, e $A \pmod N \ne 0$.
+    - Rejeição de valores nulos, truncados ou $\ge N$, transicionando para `Failed` em caso de violação.
 - **Ações**:
-  1. Gera expoente secreto efêmero $b$ ($1536$ bits aleatórios).
+  1. Gera expoente secreto efêmero $b$ via `random_srp_exponent` ($1536$ bits, $1 < b < N - 1$).
   2. Calcula a chave pública efêmera do servidor:
      $$B = (k \cdot v + g^b) \pmod N$$
   3. Monta Item `0x10000000` com valor `00 00 00 04`.
-  4. Monta Item `0x60000000` com $B$ (192 bytes big-endian).
+  4. Monta Item `0x60000000` com $B$ (192 bytes big-endian canônicos).
   5. Transiciona `state = 5`.
 
 ### 4.5 Passo 5: Prova do Cliente $M_1$ (Estado 4 do Cliente, `0x10066680`)
 - **Entrada**: Buffer do Passo 4.
 - **Validações**:
   - Item `0x10000000` com valor `4`.
-  - Item `0x60000000` contendo $B$ ($192$ bytes).
-  - Valida $B \not\equiv 0 \pmod N$ (`0x10060510`).
+  - Item `0x60000000` contendo $B$:
+    - Validação canônica estrita via `validate_srp_public_value`: comprimento exato de 192 bytes, $1 \le B < N$, e $B \pmod N \ne 0$ (`0x10060510`).
+    - Validação adicional: base $(B - k \cdot v) \pmod N \ne 0$ (aborto com `InvalidPublicEphemeral` se nulo).
 - **Ações**:
   1. Calcula o scrambler aleatório $u$:
      $$u = \text{SHA1}(\text{PAD}(A) \ || \ \text{PAD}(B))$$

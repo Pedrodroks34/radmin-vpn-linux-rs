@@ -51,6 +51,7 @@ use openssl::rand::rand_bytes;
 use openssl::rsa::{Padding, Rsa};
 use thiserror::Error;
 use tracing::{debug, info};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Tamanho do bloco RSA-2048 gerado no Estado 0 do `SHelper_RSession` (`0x100` = 256 bytes).
 pub const RSESSION_RSA_BLOCK_SIZE: usize = 256;
@@ -279,15 +280,24 @@ impl HandshakeNegotiator {
             .ok_or(HandshakeError::SessionNotEstablished)
     }
 
+    /// Retorna uma referência direta à chave AES-256 de 32 bytes (`0x20`) nos primeiros 32 bytes do buffer de 64 bytes.
+    pub fn derive_aes256_key_ref(&self) -> Result<&[u8; RSESSION_AES256_KEY_SIZE], HandshakeError> {
+        let key_material = self.get_key()?;
+        Ok(key_material[..RSESSION_AES256_KEY_SIZE]
+            .try_into()
+            .expect("slice length matches RSESSION_AES256_KEY_SIZE"))
+    }
+
     /// Extrai a chave AES-256 de 32 bytes (`0x20`) a partir dos primeiros 32 bytes do buffer de 64 bytes
-    /// de `SHelper_RSession_GetKey`, conforme comprovado em `RvROLClient.dll!0x100df250`,
-    /// `0x100df470`, `0x1003de29` e `0x10096f0d`.
+    /// de `SHelper_RSession_GetKey`, protegida por `Zeroizing`.
     ///
     /// Nunca confunde o token de 4 bytes do servidor com a chave AES de 32 bytes.
-    pub fn derive_aes256_key(&self) -> Result<[u8; RSESSION_AES256_KEY_SIZE], HandshakeError> {
-        let key_material = self.get_key()?;
-        let mut aes_key = [0u8; RSESSION_AES256_KEY_SIZE];
-        aes_key.copy_from_slice(&key_material[..RSESSION_AES256_KEY_SIZE]);
+    pub fn derive_aes256_key(
+        &self,
+    ) -> Result<Zeroizing<[u8; RSESSION_AES256_KEY_SIZE]>, HandshakeError> {
+        let key_ref = self.derive_aes256_key_ref()?;
+        let mut aes_key = Zeroizing::new([0u8; RSESSION_AES256_KEY_SIZE]);
+        aes_key.copy_from_slice(key_ref);
         Ok(aes_key)
     }
 
@@ -438,7 +448,7 @@ impl HandshakeNegotiator {
     /// Zera o material de chave e invalida o estado (`shelper.dll!0x1006a730` `RSession_Destroy`).
     pub fn clear(&mut self) {
         if let Some(ref mut key) = self.key_material {
-            key.fill(0);
+            key.zeroize();
         }
         self.key_material = None;
         self.server_token = None;
@@ -461,6 +471,16 @@ impl Drop for HandshakeNegotiator {
 ///
 /// Utilizada para verificação de ponta a ponta da máquina de estados RSA-2048 PKCS#1 v1.5
 /// (`76B` plaintext -> `256B` RSA block -> `4B` server token -> `64B` key material -> `32B` AES-256 key).
+///
+/// # Ciclo de Vida e Segurança de Dados
+/// - `key_material`: Segredo simétrico efêmero de 64 bytes gerado pelo cliente via CSPRNG e decifrado
+///   pelo servidor. É zerado deterministicamente via `Zeroize::zeroize()` tanto na chamada a `clear()`
+///   quanto automaticamente via `Drop`.
+/// - `private_key`: Chave privada RSA-2048 de longo prazo da infraestrutura do servidor, gerenciada pela
+///   estrutura `openssl::rsa::Rsa<Private>`. A liberação de seus limbs e estruturas internas em C é governada pelo
+///   destrutor de `Rsa` que chama `RSA_free()`. Trata-se de credencial estática de serviço, não de segredo efêmero de sessão.
+/// - `client_params`: Metadados públicos de negociação (3 DWORDs little-endian: flags de protocolo e versão).
+/// - `server_token`: Nonce de 4 bytes público transmitido em texto plano no Step 2.
 #[derive(Debug)]
 pub struct RSessionServer {
     stage: HandshakeStage,
@@ -525,11 +545,21 @@ impl RSessionServer {
             .ok_or(HandshakeError::SessionNotEstablished)
     }
 
-    /// Extrai a chave AES-256 de 32 bytes (`0..32`) do buffer de 64 bytes (`RvROLClient.dll!0x100df250`).
-    pub fn derive_aes256_key(&self) -> Result<[u8; RSESSION_AES256_KEY_SIZE], HandshakeError> {
+    /// Retorna uma referência direta à chave AES-256 de 32 bytes (`0..32`) no buffer de 64 bytes.
+    pub fn derive_aes256_key_ref(&self) -> Result<&[u8; RSESSION_AES256_KEY_SIZE], HandshakeError> {
         let key_material = self.get_key()?;
-        let mut aes_key = [0u8; RSESSION_AES256_KEY_SIZE];
-        aes_key.copy_from_slice(&key_material[..RSESSION_AES256_KEY_SIZE]);
+        Ok(key_material[..RSESSION_AES256_KEY_SIZE]
+            .try_into()
+            .expect("slice length matches RSESSION_AES256_KEY_SIZE"))
+    }
+
+    /// Extrai a chave AES-256 de 32 bytes (`0..32`) do buffer de 64 bytes (`RvROLClient.dll!0x100df250`), protegida por `Zeroizing`.
+    pub fn derive_aes256_key(
+        &self,
+    ) -> Result<Zeroizing<[u8; RSESSION_AES256_KEY_SIZE]>, HandshakeError> {
+        let key_ref = self.derive_aes256_key_ref()?;
+        let mut aes_key = Zeroizing::new([0u8; RSESSION_AES256_KEY_SIZE]);
+        aes_key.copy_from_slice(key_ref);
         Ok(aes_key)
     }
 
@@ -567,15 +597,14 @@ impl RSessionServer {
                 }
 
                 // 0x1006a354 -> 0x10065bc7 -> 0x10065de8: RSA_private_decrypt com RSA_PKCS1_PADDING (1)
-                let mut decrypted = [0u8; RSESSION_RSA_BLOCK_SIZE];
+                let mut decrypted = Zeroizing::new([0u8; RSESSION_RSA_BLOCK_SIZE]);
                 let dec_len =
                     match self
                         .private_key
-                        .private_decrypt(buf, &mut decrypted, Padding::PKCS1)
+                        .private_decrypt(buf, &mut *decrypted, Padding::PKCS1)
                     {
                         Ok(len) => len,
                         Err(e) => {
-                            decrypted.fill(0);
                             self.fail_and_clear();
                             return Err(HandshakeError::RsaDecryptionFailed(e.to_string()));
                         }
@@ -583,7 +612,6 @@ impl RSessionServer {
 
                 // 0x1006a36d: cmp dword ptr [ebp-0x10], 0x4c; jne 0x1006a4c2
                 if dec_len != RSESSION_PLAINTEXT_SIZE {
-                    decrypted.fill(0);
                     self.fail_and_clear();
                     return Err(HandshakeError::InvalidDecryptedPlaintextSize {
                         expected: RSESSION_PLAINTEXT_SIZE,
@@ -595,14 +623,13 @@ impl RSessionServer {
                 let d1 = u32::from_le_bytes(decrypted[4..8].try_into().unwrap());
                 let d2 = u32::from_le_bytes(decrypted[8..12].try_into().unwrap());
 
-                let mut key_material = [0u8; RSESSION_KEY_MATERIAL_SIZE];
+                let mut key_material = Zeroizing::new([0u8; RSESSION_KEY_MATERIAL_SIZE]);
                 key_material.copy_from_slice(
                     &decrypted[RSESSION_CLIENT_HEADER_SIZE..RSESSION_PLAINTEXT_SIZE],
                 );
-                decrypted.fill(0);
 
                 self.client_params = Some([d0, d1, d2]);
-                self.key_material = Some(key_material);
+                self.key_material = Some(*key_material);
                 self.is_established = true;
                 self.stage = HandshakeStage::State3Completed;
 
@@ -624,13 +651,20 @@ impl RSessionServer {
         }
     }
 
+    /// Zera o material de chave simétrica da sessão e invalida o estado da sessão
+    /// (`shelper.dll!0x1006a730` `RSession_Destroy`).
+    ///
+    /// Esta operação é estritamente idempotente: invocações repetidas (incluindo uma chamada explícita
+    /// seguida do `Drop` automático) são seguras e não causam pânicos ou comportamentos indefinidos.
     pub fn clear(&mut self) {
         if let Some(ref mut key) = self.key_material {
-            key.fill(0);
+            key.zeroize();
         }
         self.key_material = None;
         self.client_params = None;
         self.is_established = false;
+        #[cfg(test)]
+        THREAD_RSESSION_SERVER_CLEANUP_COUNT.with(|c| c.set(c.get() + 1));
     }
 
     fn fail_and_clear(&mut self) {
@@ -642,6 +676,18 @@ impl RSessionServer {
 impl Drop for RSessionServer {
     fn drop(&mut self) {
         self.clear();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static THREAD_RSESSION_SERVER_CLEANUP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+impl RSessionServer {
+    pub(crate) fn test_cleanup_count() -> usize {
+        THREAD_RSESSION_SERVER_CLEANUP_COUNT.with(|c| c.get())
     }
 }
 
@@ -725,6 +771,10 @@ mod tests {
         let server_aes_32 = server.derive_aes256_key().unwrap();
         assert_eq!(client_aes_32, server_aes_32);
         assert_eq!(&client_aes_32[..], &client_key_64[..32]);
+        assert_eq!(
+            client.derive_aes256_key_ref().unwrap(),
+            server.derive_aes256_key_ref().unwrap()
+        );
 
         // Valida comunicação criptografada bidirecional via SHelper_CChannel (FamatechCipherState)
         let mut client_cipher = client.create_cipher().unwrap();
@@ -836,5 +886,136 @@ mod tests {
             }
         );
         assert_eq!(server2.stage(), HandshakeStage::Failed);
+    }
+
+    #[test]
+    fn test_rsession_server_drop_initial_state() {
+        let (rsa, _, _) = generate_test_server_rsa();
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let server = RSessionServer::create_server(0x1234, rsa).unwrap();
+            assert_eq!(
+                server.stage(),
+                HandshakeStage::ServerState1WaitingClientBlock
+            );
+            assert!(!server.is_established());
+            assert!(server.get_key().is_err());
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        assert_eq!(final_count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_rsession_server_drop_after_processing_valid_block() {
+        let (rsa, modulus, exponent) = generate_test_server_rsa();
+        let mut client = HandshakeNegotiator::new();
+        client
+            .set_server_public_key_components(&modulus, &exponent)
+            .unwrap();
+        let step1_out = client.get_next_buffer(None).unwrap();
+        let rsa_block = step1_out.output.unwrap();
+
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let mut server = RSessionServer::create_server(0x4321, rsa).unwrap();
+            let step2_out = server.get_next_buffer(Some(&rsa_block)).unwrap();
+            assert!(step2_out.is_complete);
+            assert!(server.is_established());
+            assert!(server.get_key().is_ok());
+            assert_ne!(server.get_key().unwrap(), &[0u8; 64]);
+            // Ao sair do escopo, Drop é invocado automaticamente, limpando key_material
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        assert_eq!(final_count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_rsession_server_drop_after_full_session_established() {
+        let (rsa, modulus, exponent) = generate_test_server_rsa();
+        let mut client = HandshakeNegotiator::new();
+        client
+            .set_server_public_key_components(&modulus, &exponent)
+            .unwrap();
+        let step1_out = client.get_next_buffer(None).unwrap();
+
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let mut server = RSessionServer::create_server(0x5678, rsa).unwrap();
+            let step2_out = server
+                .get_next_buffer(Some(&step1_out.output.unwrap()))
+                .unwrap();
+            let _ = client
+                .get_next_buffer(Some(&step2_out.output.unwrap()))
+                .unwrap();
+
+            assert!(client.is_established());
+            assert!(server.is_established());
+            assert_eq!(client.get_key().unwrap(), server.get_key().unwrap());
+            // Drop de server com sessão estabelecida
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        assert_eq!(final_count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_rsession_server_explicit_clear_followed_by_drop() {
+        let (rsa, modulus, exponent) = generate_test_server_rsa();
+        let mut client = HandshakeNegotiator::new();
+        client
+            .set_server_public_key_components(&modulus, &exponent)
+            .unwrap();
+        let step1_out = client.get_next_buffer(None).unwrap();
+
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let mut server = RSessionServer::create_server(0x9999, rsa).unwrap();
+            let _ = server
+                .get_next_buffer(Some(&step1_out.output.unwrap()))
+                .unwrap();
+            assert!(server.is_established());
+            assert!(server.get_key().is_ok());
+
+            // 1. Invocação explícita de clear()
+            server.clear();
+            assert!(!server.is_established());
+            assert_eq!(server.get_key(), Err(HandshakeError::SessionNotEstablished));
+            assert_eq!(
+                server.derive_aes256_key().unwrap_err(),
+                HandshakeError::SessionNotEstablished
+            );
+            assert_eq!(
+                server.get_client_params(),
+                Err(HandshakeError::SessionNotEstablished)
+            );
+
+            // 2. Segunda chamada explícita para provar idempotência
+            server.clear();
+            assert!(!server.is_established());
+
+            // 3. Ao sair do escopo, Drop é invocado novamente sobre a instância já limpa
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        // 2 chamadas explícitas + 1 chamada no Drop = 3
+        assert_eq!(final_count, initial_count + 3);
+    }
+
+    #[test]
+    fn test_rsession_server_drop_after_processing_failure() {
+        let (rsa, _, _) = generate_test_server_rsa();
+        let initial_count = RSessionServer::test_cleanup_count();
+        {
+            let mut server = RSessionServer::create_server(0x7777, rsa).unwrap();
+            // Bloco RSA corrompido com tamanho incorreto (128 bytes em vez de 256)
+            let bad_input = [0xAAu8; 128];
+            let res = server.get_next_buffer(Some(&bad_input));
+            assert!(res.is_err());
+            assert_eq!(server.stage(), HandshakeStage::Failed);
+            assert!(!server.is_established());
+            assert!(server.get_key().is_err());
+            // Drop de server após transição para Failed
+        }
+        let final_count = RSessionServer::test_cleanup_count();
+        // 1 em fail_and_clear + 1 no Drop = 2
+        assert_eq!(final_count, initial_count + 2);
     }
 }
