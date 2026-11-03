@@ -37,6 +37,7 @@ use openssl::rand::rand_bytes;
 use openssl::sha::sha1;
 use thiserror::Error;
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 /// Versão do protocolo de rede do SHelper (`shelper.dll!0x1006b1d0` -> `return 3`).
 pub const SHELPER_PROTOCOL_VERSION: u32 = 3;
@@ -253,15 +254,20 @@ pub fn compute_srp_x(
     cred_buf.extend_from_slice(username.as_bytes());
     cred_buf.push(b':');
     cred_buf.extend_from_slice(password.as_bytes());
-    let h1 = sha1(&cred_buf);
+    let mut h1 = sha1(&cred_buf);
+    cred_buf.zeroize();
 
     let mut x_buf = Vec::with_capacity(salt.len() + h1.len());
     x_buf.extend_from_slice(salt);
     x_buf.extend_from_slice(&h1);
-    let x_bytes = sha1(&x_buf);
+    h1.zeroize();
+    let mut x_bytes = sha1(&x_buf);
+    x_buf.zeroize();
 
-    BigNum::from_slice(&x_bytes)
-        .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em BN para x: {e}")))
+    let bn = BigNum::from_slice(&x_bytes)
+        .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em BN para x: {e}")));
+    x_bytes.zeroize();
+    bn
 }
 
 /// Preenche um buffer com zeros à esquerda até atingir o comprimento especificado.
@@ -297,8 +303,10 @@ pub fn random_srp_exponent(prime_n: &BigNum) -> Result<BigNum, ControlHandshakeE
         })?;
 
         let candidate = BigNum::from_slice(&buf).map_err(|e| {
+            buf.zeroize();
             ControlHandshakeError::CryptoError(format!("falha ao carregar BN candidato: {e}"))
         })?;
+        buf.zeroize();
 
         // Garante 1 < candidate < N - 1
         if candidate > one && candidate < n_minus_1 {
@@ -388,15 +396,19 @@ pub fn compute_srp_kdf(s_bytes: &[u8]) -> [u8; RADMIN_SRP_KDF_KEY_LEN] {
     let mut buf0 = Vec::with_capacity(s_bytes.len() + 4);
     buf0.extend_from_slice(s_bytes);
     buf0.extend_from_slice(&0u32.to_be_bytes());
-    let k0 = sha1(&buf0);
+    let mut k0 = sha1(&buf0);
+    buf0.zeroize();
 
     let mut buf1 = Vec::with_capacity(s_bytes.len() + 4);
     buf1.extend_from_slice(s_bytes);
     buf1.extend_from_slice(&1u32.to_be_bytes());
-    let k1 = sha1(&buf1);
+    let mut k1 = sha1(&buf1);
+    buf1.zeroize();
 
     out[..20].copy_from_slice(&k0);
     out[20..40].copy_from_slice(&k1);
+    k0.zeroize();
+    k1.zeroize();
     out
 }
 
@@ -488,12 +500,54 @@ pub enum ControlClientState {
     Failed(String),
 }
 
+impl ControlClientState {
+    /// Zera material criptográfico e segredos em memória.
+    pub fn clear(&mut self) {
+        match self {
+            ControlClientState::State4WaitingServerEphemeral {
+                a_secret,
+                a_public_bytes,
+                salt,
+                x_secret,
+            } => {
+                a_secret.clear();
+                a_public_bytes.zeroize();
+                salt.zeroize();
+                x_secret.clear();
+            }
+            ControlClientState::State6WaitingServerProof {
+                a_public_bytes,
+                m1_proof,
+                k_full,
+            } => {
+                a_public_bytes.zeroize();
+                m1_proof.zeroize();
+                k_full.zeroize();
+            }
+            ControlClientState::Established {
+                session_key,
+                k_full,
+            } => {
+                session_key.zeroize();
+                k_full.zeroize();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Negociador do handshake de controle do cliente (Família `SHelper_*`).
 pub struct ControlClientNegotiator {
     username: String,
     password: String,
     state: ControlClientState,
     version_exchanged: bool,
+}
+
+impl Drop for ControlClientNegotiator {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 impl ControlClientNegotiator {
@@ -505,6 +559,18 @@ impl ControlClientNegotiator {
             state: ControlClientState::State0Initial,
             version_exchanged: false,
         }
+    }
+
+    /// Retorna uma referência ao estado interno atual.
+    pub fn state(&self) -> &ControlClientState {
+        &self.state
+    }
+
+    /// Zera credenciais e material de chave em memória.
+    pub fn clear(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+        self.state.clear();
     }
 
     /// Retorna `true` se a validação inicial de versão de protocolo (`version = 3`) já ocorreu.
@@ -659,6 +725,15 @@ impl ControlClientNegotiator {
                 let g_bytes = find_item(&items, TAG_GENERATOR)
                     .ok_or(ControlHandshakeError::MissingRequiredTag { tag: TAG_GENERATOR })?;
 
+                if n_bytes.len() != RADMIN_SRP1536_MODULUS_LEN {
+                    warn!(
+                        got_len = n_bytes.len(),
+                        expected_len = RADMIN_SRP1536_MODULUS_LEN,
+                        "ControlClient: comprimento do módulo N inválido (esperado exatamente 192 bytes)"
+                    );
+                    return Err(ControlHandshakeError::InvalidGroupParameters);
+                }
+
                 let expected_n = get_srp_prime_n()?;
                 let received_n = BigNum::from_slice(n_bytes).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("módulo N inválido: {e}"))
@@ -669,11 +744,11 @@ impl ControlClientNegotiator {
                     return Err(ControlHandshakeError::InvalidGroupParameters);
                 }
 
-                if g_bytes.is_empty() || g_bytes[0] != RADMIN_SRP_GENERATOR {
+                if g_bytes.len() != 1 || g_bytes[0] != RADMIN_SRP_GENERATOR {
                     warn!(
                         got = ?g_bytes,
                         expected = RADMIN_SRP_GENERATOR,
-                        "ControlClient: gerador g diverge do oficial"
+                        "ControlClient: gerador g diverge do oficial (deve ter 1 byte e valor 5)"
                     );
                     return Err(ControlHandshakeError::InvalidGroupParameters);
                 }
@@ -725,10 +800,10 @@ impl ControlClientNegotiator {
             }
 
             ControlClientState::State4WaitingServerEphemeral {
-                a_secret,
+                mut a_secret,
                 a_public_bytes,
                 salt,
-                x_secret,
+                mut x_secret,
             } => {
                 let data = in_buf.ok_or_else(|| {
                     ControlHandshakeError::InvalidState(
@@ -839,10 +914,14 @@ impl ControlClientNegotiator {
                     ControlHandshakeError::CryptoError(format!("falha em mod_exp S: {e}"))
                 })?;
 
-                let s_bytes = pad_bignum_bytes(&s.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
+                let mut s_bytes = pad_bignum_bytes(&s.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
+                s.clear();
+                a_secret.clear();
+                x_secret.clear();
 
                 // 7. Derivar chave de 40 bytes via KDF (0x10061790)
                 let k_full = compute_srp_kdf(&s_bytes);
+                s_bytes.zeroize();
 
                 // 8. Calcular prova do cliente M1
                 let n_vec = prime_n.to_vec();
@@ -990,12 +1069,58 @@ pub enum ControlServerState {
     Failed(String),
 }
 
+impl ControlServerState {
+    /// Zera material criptográfico e segredos em memória.
+    pub fn clear(&mut self) {
+        match self {
+            ControlServerState::State3WaitingClientEphemeral {
+                username,
+                salt,
+                verifier,
+                b_secret,
+                b_public_bytes,
+            } => {
+                username.zeroize();
+                salt.zeroize();
+                verifier.clear();
+                b_secret.clear();
+                b_public_bytes.zeroize();
+            }
+            ControlServerState::State5WaitingClientProof {
+                a_public_bytes,
+                m1_expected,
+                m2_proof,
+                k_full,
+            } => {
+                a_public_bytes.zeroize();
+                m1_expected.zeroize();
+                m2_proof.zeroize();
+                k_full.zeroize();
+            }
+            ControlServerState::Established {
+                session_key,
+                k_full,
+            } => {
+                session_key.zeroize();
+                k_full.zeroize();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Implementação do lado servidor do handshake de controle (usado para testes e emulação).
 pub struct ControlServerSession {
     username: String,
     password: String,
     salt: Vec<u8>,
     state: ControlServerState,
+}
+
+impl Drop for ControlServerSession {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 impl ControlServerSession {
@@ -1021,6 +1146,19 @@ impl ControlServerSession {
             salt,
             state: ControlServerState::State1WaitingClientIdentity,
         }
+    }
+
+    /// Retorna uma referência ao estado interno atual.
+    pub fn state(&self) -> &ControlServerState {
+        &self.state
+    }
+
+    /// Zera credenciais e material de chave em memória.
+    pub fn clear(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+        self.salt.zeroize();
+        self.state.clear();
     }
 
     /// Retorna a chave de sessão de 32 bytes se o handshake estiver concluído.
@@ -1100,7 +1238,7 @@ impl ControlServerSession {
                     ControlHandshakeError::CryptoError(format!("falha em BN ctx: {e}"))
                 })?;
 
-                let x = compute_srp_x(&self.username, &self.password, &self.salt)?;
+                let mut x = compute_srp_x(&self.username, &self.password, &self.salt)?;
                 let g_bn = BigNum::from_u32(RADMIN_SRP_GENERATOR as u32).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN g: {e}"))
                 })?;
@@ -1110,11 +1248,15 @@ impl ControlServerSession {
                 })?;
                 v.mod_exp(&g_bn, &x, &prime_n, &mut ctx)
                     .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em v: {e}")))?;
+                x.clear();
 
                 // 4. Emitir Step 2 + Salt + N + g
                 let item_step2 = encode_item(TAG_STEP, &2u32.to_le_bytes())?;
                 let item_salt = encode_item(TAG_SALT, &self.salt)?;
-                let item_n = encode_item(TAG_MODULUS, &prime_n.to_vec())?;
+                let item_n = encode_item(
+                    TAG_MODULUS,
+                    &pad_bignum_bytes(&prime_n.to_vec(), RADMIN_SRP1536_MODULUS_LEN),
+                )?;
                 let item_g = encode_item(TAG_GENERATOR, &[RADMIN_SRP_GENERATOR])?;
 
                 let mut out_buf = Vec::new();
@@ -1168,8 +1310,8 @@ impl ControlServerSession {
             ControlServerState::State3WaitingClientEphemeral {
                 username,
                 salt,
-                verifier,
-                b_secret,
+                mut verifier,
+                mut b_secret,
                 b_public_bytes,
             } => {
                 let items = decode_items(in_buf)?;
@@ -1241,8 +1383,13 @@ impl ControlServerSession {
                 s.mod_exp(&avu, &b_secret, &prime_n, &mut ctx)
                     .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em S: {e}")))?;
 
-                let s_bytes = pad_bignum_bytes(&s.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
+                let mut s_bytes = pad_bignum_bytes(&s.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
+                s.clear();
+                b_secret.clear();
+                verifier.clear();
+
                 let k_full = compute_srp_kdf(&s_bytes);
+                s_bytes.zeroize();
 
                 let n_vec = prime_n.to_vec();
                 let m1_expected = compute_srp_m1(
@@ -1570,18 +1717,29 @@ mod tests {
     }
 
     #[test]
-    fn test_random_srp_exponent_bounds_and_entropy() {
+    fn test_random_srp_exponent_bounds_and_bit_length() {
         let prime_n = get_srp_prime_n().unwrap();
         let one = BigNum::from_u32(1).unwrap();
         let mut n_minus_1 = BigNum::new().unwrap();
         n_minus_1.checked_sub(&prime_n, &one).unwrap();
 
+        let mut previous_samples = Vec::new();
+
         for _ in 0..10 {
             let exp = random_srp_exponent(&prime_n).unwrap();
+            // Verifica limites estritos do domínio: 1 < exp < N - 1
             assert!(exp > one);
             assert!(exp < n_minus_1);
-            // Entropia substancial: pelo menos 1500 bits
+            // Comprimento de bits adequado para chave efêmera de 1536 bits
             assert!(exp.num_bits() >= 1500);
+
+            // Verifica que amostras consecutivas geradas pelo CSPRNG são distintas
+            let exp_bytes = exp.to_vec();
+            assert!(
+                !previous_samples.contains(&exp_bytes),
+                "colisão detectada em expoentes aleatórios gerados"
+            );
+            previous_samples.push(exp_bytes);
         }
     }
 
@@ -1772,31 +1930,182 @@ mod tests {
         let username = "alice";
         let password = "password";
 
-        let mut client = ControlClientNegotiator::new(username.to_string(), password.to_string());
-        let _s1 = client.step(None).unwrap();
-
         let prime_n = get_srp_prime_n().unwrap();
+        let valid_n = pad_bignum_bytes(&prime_n.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
         let item_step2 = encode_item(TAG_STEP, &2u32.to_le_bytes()).unwrap();
         let item_salt = encode_item(TAG_SALT, &[0x11; 16]).unwrap();
-        let item_n = encode_item(TAG_MODULUS, &prime_n.to_vec()).unwrap();
-        // Gerador g incorreto: 2 em vez de 5
-        let item_bad_g = encode_item(TAG_GENERATOR, &[2u8]).unwrap();
 
-        let mut s2_bad = Vec::new();
-        s2_bad.extend_from_slice(&item_step2);
-        s2_bad.extend_from_slice(&item_salt);
-        s2_bad.extend_from_slice(&item_n);
-        s2_bad.extend_from_slice(&item_bad_g);
+        // Subcaso 1: Gerador g com valor divergente (2 em vez de 5)
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let _s1 = client.step(None).unwrap();
+            let item_n = encode_item(TAG_MODULUS, &valid_n).unwrap();
+            let item_bad_g = encode_item(TAG_GENERATOR, &[2u8]).unwrap();
 
-        let err = client.step(Some(&s2_bad));
-        assert_eq!(err, Err(ControlHandshakeError::InvalidGroupParameters));
-        assert!(!client.is_established());
+            let mut s2 = Vec::new();
+            s2.extend_from_slice(&item_step2);
+            s2.extend_from_slice(&item_salt);
+            s2.extend_from_slice(&item_n);
+            s2.extend_from_slice(&item_bad_g);
 
-        // Fail-closed
-        assert!(matches!(
-            client.step(Some(&s2_bad)),
-            Err(ControlHandshakeError::InvalidState(_))
-        ));
+            let err = client.step(Some(&s2));
+            assert_eq!(err, Err(ControlHandshakeError::InvalidGroupParameters));
+            assert!(!client.is_established());
+            assert!(matches!(
+                client.step(Some(&s2)),
+                Err(ControlHandshakeError::InvalidState(_))
+            ));
+        }
+
+        // Subcaso 2: Gerador g multi-byte (2 bytes mesmo começando com 5)
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let _s1 = client.step(None).unwrap();
+            let item_n = encode_item(TAG_MODULUS, &valid_n).unwrap();
+            let item_bad_g = encode_item(TAG_GENERATOR, &[5u8, 0u8]).unwrap();
+
+            let mut s2 = Vec::new();
+            s2.extend_from_slice(&item_step2);
+            s2.extend_from_slice(&item_salt);
+            s2.extend_from_slice(&item_n);
+            s2.extend_from_slice(&item_bad_g);
+
+            let err = client.step(Some(&s2));
+            assert_eq!(err, Err(ControlHandshakeError::InvalidGroupParameters));
+            assert!(!client.is_established());
+        }
+
+        // Subcaso 3: Gerador g vazio (0 bytes)
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let _s1 = client.step(None).unwrap();
+            let item_n = encode_item(TAG_MODULUS, &valid_n).unwrap();
+            let item_bad_g = encode_item(TAG_GENERATOR, &[]).unwrap();
+
+            let mut s2 = Vec::new();
+            s2.extend_from_slice(&item_step2);
+            s2.extend_from_slice(&item_salt);
+            s2.extend_from_slice(&item_n);
+            s2.extend_from_slice(&item_bad_g);
+
+            let err = client.step(Some(&s2));
+            assert_eq!(err, Err(ControlHandshakeError::InvalidGroupParameters));
+            assert!(!client.is_established());
+        }
+
+        // Subcaso 4: Módulo N truncado (191 bytes)
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let _s1 = client.step(None).unwrap();
+            let item_bad_n = encode_item(TAG_MODULUS, &valid_n[..191]).unwrap();
+            let item_g = encode_item(TAG_GENERATOR, &[RADMIN_SRP_GENERATOR]).unwrap();
+
+            let mut s2 = Vec::new();
+            s2.extend_from_slice(&item_step2);
+            s2.extend_from_slice(&item_salt);
+            s2.extend_from_slice(&item_bad_n);
+            s2.extend_from_slice(&item_g);
+
+            let err = client.step(Some(&s2));
+            assert_eq!(err, Err(ControlHandshakeError::InvalidGroupParameters));
+            assert!(!client.is_established());
+        }
+
+        // Subcaso 5: Módulo N expandido (193 bytes)
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let _s1 = client.step(None).unwrap();
+            let mut bad_n = valid_n.clone();
+            bad_n.push(0x00);
+            let item_bad_n = encode_item(TAG_MODULUS, &bad_n).unwrap();
+            let item_g = encode_item(TAG_GENERATOR, &[RADMIN_SRP_GENERATOR]).unwrap();
+
+            let mut s2 = Vec::new();
+            s2.extend_from_slice(&item_step2);
+            s2.extend_from_slice(&item_salt);
+            s2.extend_from_slice(&item_bad_n);
+            s2.extend_from_slice(&item_g);
+
+            let err = client.step(Some(&s2));
+            assert_eq!(err, Err(ControlHandshakeError::InvalidGroupParameters));
+            assert!(!client.is_established());
+        }
+
+        // Subcaso 6: Módulo N com comprimento 192 bytes mas valor divergente
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let _s1 = client.step(None).unwrap();
+            let mut bad_n = valid_n;
+            bad_n[0] ^= 0x01;
+            let item_bad_n = encode_item(TAG_MODULUS, &bad_n).unwrap();
+            let item_g = encode_item(TAG_GENERATOR, &[RADMIN_SRP_GENERATOR]).unwrap();
+
+            let mut s2 = Vec::new();
+            s2.extend_from_slice(&item_step2);
+            s2.extend_from_slice(&item_salt);
+            s2.extend_from_slice(&item_bad_n);
+            s2.extend_from_slice(&item_g);
+
+            let err = client.step(Some(&s2));
+            assert_eq!(err, Err(ControlHandshakeError::InvalidGroupParameters));
+            assert!(!client.is_established());
+        }
+    }
+
+    #[test]
+    fn test_control_session_zeroization_on_clear_and_drop() {
+        let username = "alice";
+        let password = "SecretPassword123";
+
+        let mut client = ControlClientNegotiator::new(username.to_string(), password.to_string());
+        let mut server =
+            ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+        let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+        let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+        let s3 = client.step(Some(&s2)).unwrap().buffer_to_send.unwrap();
+        let s4 = server.step(&s3).unwrap().buffer_to_send.unwrap();
+        let s5 = client.step(Some(&s4)).unwrap().buffer_to_send.unwrap();
+        let s6 = server.step(&s5).unwrap().buffer_to_send.unwrap();
+        let _ = client.step(Some(&s6)).unwrap();
+
+        assert!(client.is_established());
+        assert!(server.is_established());
+
+        assert_ne!(client.session_key().unwrap(), [0u8; 32]);
+        assert_ne!(server.session_key().unwrap(), [0u8; 32]);
+
+        client.clear();
+        server.clear();
+
+        // Após clear, chaves derivadas foram substituídas por zeros
+        if let ControlClientState::Established {
+            session_key,
+            k_full,
+        } = client.state()
+        {
+            assert_eq!(*session_key, [0u8; 32]);
+            assert_eq!(*k_full, [0u8; 40]);
+        } else {
+            panic!("client state should remain Established after clear");
+        }
+
+        if let ControlServerState::Established {
+            session_key,
+            k_full,
+        } = server.state()
+        {
+            assert_eq!(*session_key, [0u8; 32]);
+            assert_eq!(*k_full, [0u8; 40]);
+        } else {
+            panic!("server state should remain Established after clear");
+        }
     }
 
     #[test]

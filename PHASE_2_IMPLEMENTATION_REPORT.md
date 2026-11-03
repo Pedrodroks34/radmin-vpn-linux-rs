@@ -81,19 +81,21 @@ Toda a lógica foi implementada em Rust de forma limpa, modular e testável nos 
    - `test_srp_handshake_wrong_password_fails`: valida rejeição estrita quando a senha está incorreta.
    - `test_srp_handshake_tampered_m2_fails`: valida detecção de prova $M_2$ adulterada.
    - `test_srp_handshake_unexpected_step`: valida rejeição de transição fora de ordem.
-   - `test_random_srp_exponent_bounds_and_entropy`: valida que expoentes gerados estão estritamente em $1 < exp < N - 1$ e possuem alta entropia ($>= 1500$ bits).
+   - `test_random_srp_exponent_bounds_and_bit_length`: valida que expoentes gerados estão estritamente em $1 < exp < N - 1$, comprimento de bits $\ge 1500$ e distinção entre amostras geradas pelo CSPRNG.
    - `test_validate_srp_public_value_strict_checks`: valida rejeição estrita de comprimentos não canônicos ($!= 192$ bytes), valor 0, valor $N$, valor $N+1$.
    - `test_srp_handshake_bad_username_fails_closed`: valida rejeição de usuário incorreto pelo servidor com transição fail-closed.
    - `test_srp_handshake_tampered_m1_fails_closed`: valida detecção de prova $M_1$ adulterada com transição fail-closed.
    - `test_srp_handshake_invalid_client_a_rejected_by_server`: valida rejeição de $A$ fora dos limites ($A = 0$) pelo servidor com transição fail-closed.
    - `test_srp_handshake_invalid_server_b_rejected_by_client`: valida rejeição de $B$ truncado pelo cliente com transição fail-closed.
-   - `test_srp_handshake_divergent_group_parameters_rejected`: valida rejeição de parâmetros $g$ ou $N$ divergentes com transição fail-closed.
+   - `test_srp_handshake_divergent_group_parameters_rejected`: valida rejeição de parâmetros $g$ ou $N$ divergentes (valor divergente, multi-byte, vazio, truncado a 191B, expandido a 193B, valor adulterado) com transição fail-closed.
+   - `test_control_session_zeroization_on_clear_and_drop`: valida que a chamada a `clear()` e o encerramento da sessão sobrescrevem chaves derivadas e segredos com zeros.
    - `test_failed_session_cannot_be_reused`: garante que sessões em estado `Failed` rejeitem qualquer invocação subsequente de `step()`.
 2. **Testes de Integração (`tests/integration_test.rs`)**:
    - `test_e2e_phase2_control_channel_srp_handshake_and_continuity`: servidor TCP local simulado + cliente `ControlConnection`, handshake completo (versão + SRP-6a) e troca bidirecional de múltiplos comandos cifrados via AES-256-CBC.
-   - `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`: loopback TCP com injeção de prova adulterada, validando encerramento fail-closed do transporte e rejeição de mensagens subsequentes.
+   - `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`: loopback TCP com injeção de prova $M_1$ adulterada, validando rejeição com `ProofVerificationFailed`, estado de servidor `Failed`, encerramento fail-closed do transporte e ausência de panics (com task do servidor aguardada explicitamente).
+   - `test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed`: loopback TCP com injeção de prova $M_2$ adulterada, validando rejeição pelo cliente com fail-closed e término limpo do servidor sem panics.
    - `test_pcap_radmin_17301_control_frames_validation`: validação contra vetores de framing reais de `radmin_17301.pcap`.
 3. **Métricas Finais da Auditoria Corretiva**:
    - `cargo fmt --check`: **Aprovado** (zero diferenças).
    - `cargo clippy --all-targets --all-features -- -D warnings`: **Aprovado** (zero advertências em toda a árvore).
-   - `cargo test --locked`: **110 testes aprovados** (103 unitários + 7 de integração, 0 falhas, 1 ignorado que requer root/TAP).
+   - `cargo test --locked`: **114 testes avaliados** (105 unitários aprovados + 1 ignorado ambiental TAP; 8 testes de integração aprovados; 0 falhas). Total de **113 testes aprovados**.

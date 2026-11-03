@@ -206,25 +206,115 @@ Resultado: compilação 100% limpa com `cargo clippy --all-targets --all-feature
 
 ---
 
-## 4. Resultados Finais de Verificação
+## 4. Segunda Rodada de Auditoria e Refinamento Crítico (PR #7)
 
+Em decorrência de uma segunda rodada de revisão técnica sobre o PR #7 (`fix/phase-2-srp-corrective-audit`), foram identificadas e sanadas quatro áreas prioritárias de consistência, segurança de memória e rigor de integração:
+
+### 4.1 Resolução do Falso Positivo no Teste de Integração
+
+#### Causa Raiz
+Na versão inicial do teste `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`:
+1. A corrupção simulava tampering de $M_2$ gerado pelo servidor, mas o servidor já havia executado `srv_session.step(&s5.payload)` com sucesso, marcando seu estado interno como `Established`.
+2. A linha final continha o padrão inseguro `let _ = server_task.await;`, que descartava o resultado da task assíncrona do servidor, ocultando potenciais panics ou inconsistências de encerramento.
+
+#### Solução Arquitetural
+A suíte de integração foi reestruturada em dois testes end-to-end complementares e determinísticos:
+- **`test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`**:
+  - Simula ataque de integridade onde a prova $M_1$ emitida pelo cliente é adulterada em trânsito no canal TCP.
+  - O servidor executa `srv_session.step(&tampered_payload)`.
+  - O servidor valida formalmente o retorno `Err(ControlHandshakeError::ProofVerificationFailed)`.
+  - Assegura categoricamente que `!srv_session.is_established()` e que o estado do servidor é `ControlServerState::Failed(_)`.
+  - O servidor fecha ordenadamente o socket sem pânico.
+  - O cliente detecta o encerramento do par e transiciona para `ControlConnectionState::Failed(_)`, recusando mensagens com fail-closed.
+  - O resultado da task do servidor é explicitamente validado com `server_task.await.expect("server task completed successfully without panic");`.
+- **`test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed`**:
+  - Simula adulteração da resposta $M_2$ do servidor antes de chegar ao cliente.
+  - O cliente detecta a adulteração, rejeita com `ProofVerificationFailed`, falha em modo fechado e fecha o transporte.
+  - O servidor consome o encerramento do transporte sem pânico.
+  - O resultado da task é validado com `server_task.await.expect("server task completed successfully without panic");`.
+
+Nenhum descarte silencioso (`let _ =`) remanesce em toda a suíte de integração.
+
+---
+
+### 4.2 Revisão da Validação de Expoentes SRP
+
+O teste de geração de expoentes foi renomeado de `test_random_srp_exponent_bounds_and_entropy` para `test_random_srp_exponent_bounds_and_bit_length`:
+- Removidas alegações metodologicamente impróprias de "medição estatística formal de entropia".
+- O teste valida deterministicamente que:
+  1. O expoente satisfaz os limites estritos de domínio da RFC 5054 ($1 < exp < N - 1$).
+  2. O comprimento em bits é robusto ($\ge 1500$ bits).
+  3. Amostras sucessivas extraídas do CSPRNG são mutuamente distintas, sem asserções probabilísticas sujeitas a falsos positivos.
+
+---
+
+### 4.3 Política Abrangente de Zeroização de Segredos e Limitações Técnicas
+
+Foi incorporada a crate `zeroize` (v1.9.1) ao projeto, estabelecendo rotinas explícitas de limpeza e destruição de dados sensíveis:
+
+1. **`FamatechCipherState`**:
+   - `clear(&mut self)` zera `enc_key`, `dec_key`, `enc_iv` e `dec_iv` usando `Zeroize::zeroize()`.
+   - `Drop` chama automaticamente `clear()`.
+   - `encrypt` e `decrypt` aplicam `zeroize()` em buffers temporários de texto plano e padding (`padded`, `plaintext`) antes de retornar ou em caso de erro OpenSSL.
+2. **`ControlClientNegotiator` e `ControlServerSession`**:
+   - Implementam `clear(&mut self)` e `Drop` zerando credenciais (`username`, `password`, `salt`) e invocando `clear()` recursivamente no estado interno (`ControlClientState` e `ControlServerState`).
+   - Estados contendo chaves efêmeras (`a_secret`, `b_secret`, `x_secret`, `verifier`) utilizam `BigNum::clear(&mut self)` (invocando `ffi::BN_clear`) para sobrescrever com zeros os buffers nativos alocados no heap.
+   - Buffers de prova e chaves derivadas (`s_bytes`, `k_full`, `session_key`, `m1_proof`, `m2_proof`) são zerados com barreiras de memória do compilador (`zeroize`).
+3. **`ControlConnection`**:
+   - Ao executar `close()`, `fail_session()` ou `Drop`, zera a senha em memória, limpa as cifras ativas do `TcpChannel` e invoca `clear()` no `ControlClientNegotiator`.
+
+#### Limitações Técnicas Documentadas
+A sobrescrita explícita de memória via `Zeroize` e `BN_clear` elimina resíduos nos buffers alocados e gerenciados pelo Rust e nos limbs dos `BIGNUM`s do OpenSSL. Entretanto:
+- **Buffers Scratch do OpenSSL**: Cálculos intermediários em contextos de grande precisão (`BN_CTX`) podem manter dados efêmeros em estruturas internas de scratch da biblioteca C até que o contexto seja desalocado ou reciclado.
+- **Paginação do Sistema Operacional (Swap)**: Sem o uso explícito de `mlock(2)` no processo, o kernel Linux pode eventualmente paginar regiões de memória do usuário para o disco sob pressão de memória física.
+
+---
+
+### 4.4 Validação Rigorosa dos Parâmetros de Grupo ($N$ e $g$)
+
+A validação foi endurecida contra entradas truncadas, deformadas ou com padding indevido:
+- **Gerador $g$**: Exige estritamente `g_bytes.len() == 1 && g_bytes[0] == RADMIN_SRP_GENERATOR` (rejeita buffers vazios ou sequências multi-byte iniciadas por 5).
+- **Módulo $N$**: Exige estritamente comprimento canônico de 192 bytes (`n_bytes.len() == RADMIN_SRP1536_MODULUS_LEN`) e igualdade matemática com o valor oficial `expected_n` (rejeita 191 bytes ou 193 bytes).
+- **Testes Negativos**: O teste `test_srp_handshake_divergent_group_parameters_rejected` foi expandido para testar 6 subcasos negativos específicos (valor de $g$ incorreto, $g$ com 2 bytes, $g$ vazio, $N$ com 191 bytes, $N$ com 193 bytes, e $N$ de 192 bytes com byte alterado).
+- Adicionado o teste `test_control_session_zeroization_on_clear_and_drop` comprovando a limpeza de chaves em memória.
+
+---
+
+## 5. Resultados Finais de Verificação
+
+### 5.1 Compilação e Linters
 ```bash
 $ cargo fmt --check
-# Status: 0 diferenças (código 100% formatado)
+# Status: 0 diferenças (código 100% formatado conforme rustfmt)
 
 $ cargo check --all-targets --all-features
 # Status: Compilação concluída com sucesso
 
 $ cargo clippy --all-targets --all-features -- -D warnings
-# Status: 0 erros, 0 advertências
-
-$ cargo test --locked
-# Status: 103 unit tests passed; 7 integration tests passed; 0 failed; 1 ignored (TAP requer CAP_NET_ADMIN)
-# Total de 110 testes aprovados.
+# Status: 0 erros, 0 advertências em toda a árvore
 ```
+
+### 5.2 Contabilidade Desagregada de Testes (`cargo test --locked`)
+Execução do conjunto completo de testes automatizados:
+
+- **Biblioteca Principal (`src/lib.rs` - Testes Unitários)**:
+  - Total: **106 testes**
+  - Aprovados: **105 testes**
+  - Falhas: **0**
+  - Ignorados: **1 teste** (`tunnel::tap::abi_tests::open_tap_device_with_privileges`, requer permissões reais `CAP_NET_ADMIN` e `/dev/net/tun`)
+- **Binário CLI (`src/main.rs`)**:
+  - Total: **0 testes**
+- **Testes de Integração (`tests/integration_test.rs`)**:
+  - Total: **8 testes**
+  - Aprovados: **8 testes** (`test_e2e_crypto_tampering_resilience`, `test_e2e_ethernet_pipeline`, `test_e2e_phase1_rsession_handshake_and_cchannel_continuity`, `test_e2e_phase2_control_channel_srp_handshake_and_continuity`, `test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed`, `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`, `test_e2e_real_captured_packet_686_validation`, `test_pcap_radmin_17301_control_frames_validation`)
+  - Falhas: **0**
+- **Testes de Documentação (Doc-tests)**:
+  - Total: **0 testes**
+
+**Total Geral da Suíte de Testes**: **114 testes** (113 aprovados, 0 falhas, 1 ignorado ambiental).
 
 ---
 
-## 5. Conclusão da Fase 2
+## 6. Conclusão da Fase 2
 
-Com as correções desta auditoria corretiva, a **Fase 2 (Handshake SHelper da Conexão de Controle)** atinge conformidade criptográfica integral e formal com o cliente oficial Radmin VPN 2.1, estabelecendo uma base sólida, auditada e matematicamente comprovada para a subsequente Fase 3 (catálogo TLV de login de conta e gerenciamento de rede).
+Com as correções desta segunda rodada de auditoria, a implementação do handshake SRP-6a da Conexão de Controle (Fase 2) alcança excelência em segurança defensiva, higienização criptográfica de memória, resiliência fail-closed e testes de integração determinísticos sem falsos positivos. A branch `fix/phase-2-srp-corrective-audit` está pronta e validada para merge no PR #7.

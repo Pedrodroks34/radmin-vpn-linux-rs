@@ -38,6 +38,7 @@
 use openssl::hash::{hash, MessageDigest};
 use openssl::symm::{Cipher, Crypter, Mode};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 pub const BLOCK_SIZE: usize = 16;
 pub const AES_256_KEY_SIZE: usize = 32;
@@ -276,10 +277,10 @@ impl FamatechCipherState {
 
     /// Limpa chaves e IVs em memória (`shelper.dll!0x10062c80` `CChannel_Clear`).
     pub fn clear(&mut self) {
-        self.enc_key.fill(0);
-        self.dec_key.fill(0);
-        self.enc_iv.fill(0);
-        self.dec_iv.fill(0);
+        self.enc_key.zeroize();
+        self.dec_key.zeroize();
+        self.enc_iv.zeroize();
+        self.dec_iv.zeroize();
     }
 
     pub fn key(&self) -> &[u8; AES_256_KEY_SIZE] {
@@ -307,7 +308,7 @@ impl FamatechCipherState {
     /// 2. Cifra o bloco resultante usando AES-256-CBC com o `enc_iv` atual
     /// 3. Atualiza `enc_iv` com o último bloco de 16 bytes do ciphertext gerado
     pub fn encrypt(&mut self, payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let padded = famatech_pad_and_sign(payload)?;
+        let mut padded = famatech_pad_and_sign(payload)?;
         debug_assert_eq!(padded.len() % BLOCK_SIZE, 0);
 
         let mut crypter = Crypter::new(
@@ -316,17 +317,23 @@ impl FamatechCipherState {
             &self.enc_key,
             Some(&self.enc_iv),
         )
-        .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
+        .map_err(|e| {
+            padded.zeroize();
+            CryptoError::OpenSslError(e.to_string())
+        })?;
 
         crypter.pad(false);
 
         let mut ciphertext = vec![0u8; padded.len() + BLOCK_SIZE];
-        let mut count = crypter
-            .update(&padded, &mut ciphertext)
-            .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
-        count += crypter
-            .finalize(&mut ciphertext[count..])
-            .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
+        let mut count = crypter.update(&padded, &mut ciphertext).map_err(|e| {
+            padded.zeroize();
+            CryptoError::OpenSslError(e.to_string())
+        })?;
+        count += crypter.finalize(&mut ciphertext[count..]).map_err(|e| {
+            padded.zeroize();
+            CryptoError::OpenSslError(e.to_string())
+        })?;
+        padded.zeroize();
         ciphertext.truncate(count);
 
         if ciphertext.len() < BLOCK_SIZE {
@@ -378,7 +385,9 @@ impl FamatechCipherState {
         self.dec_iv.copy_from_slice(&ciphertext[last_block_start..]);
 
         // Valida e desempacota (0x10069f90)
-        famatech_verify_and_unpad(&plaintext)
+        let result = famatech_verify_and_unpad(&plaintext);
+        plaintext.zeroize();
+        result
     }
 }
 
@@ -663,5 +672,19 @@ mod state_regression {
         assert!(receiver.decrypt(&damaged).is_err());
 
         assert!(receiver.decrypt(&second).is_err());
+    }
+
+    #[test]
+    fn cipher_state_clear_and_drop_zeroizes_sensitive_material() {
+        let key = [0x5au8; 32];
+        let mut state = FamatechCipherState::new(key);
+        let _ = state.encrypt(b"secret payload test").unwrap();
+        assert_ne!(state.enc_iv(), &[0u8; 16]);
+
+        state.clear();
+        assert_eq!(state.enc_key(), &[0u8; 32]);
+        assert_eq!(state.dec_key(), &[0u8; 32]);
+        assert_eq!(state.enc_iv(), &[0u8; 16]);
+        assert_eq!(state.dec_iv(), &[0u8; 16]);
     }
 }

@@ -14,6 +14,7 @@ use crate::transport::{ChannelConfig, TcpChannel};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{debug, error, info};
+use zeroize::Zeroize;
 
 /// Timeout padrão para as etapas do handshake de controle.
 pub const DEFAULT_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -336,22 +337,40 @@ impl ControlConnection {
 
     /// Encerra a conexão de forma limpa, destruindo material de chave e fechando o transporte.
     pub async fn close(&mut self) {
+        self.password.zeroize();
+        if let Some(mut neg) = self.negotiator.take() {
+            neg.clear();
+        }
         if let Some(mut ch) = self.channel.take() {
             ch.clear_cipher();
             let _ = ch.close().await;
         }
-        self.negotiator = None;
         self.state = ControlConnectionState::Closed;
         info!("Conexão de controle encerrada e material criptográfico destruído.");
     }
 
     /// Falha a conexão com a mensagem de erro fornecida, descartando chaves.
     async fn fail_session(&mut self, reason: String) {
+        self.password.zeroize();
+        if let Some(mut neg) = self.negotiator.take() {
+            neg.clear();
+        }
         if let Some(mut ch) = self.channel.take() {
             ch.clear_cipher();
             let _ = ch.close().await;
         }
-        self.negotiator = None;
         self.state = ControlConnectionState::Failed(reason);
+    }
+}
+
+impl Drop for ControlConnection {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        if let Some(neg) = self.negotiator.as_mut() {
+            neg.clear();
+        }
+        if let Some(ch) = self.channel.as_mut() {
+            ch.clear_cipher();
+        }
     }
 }

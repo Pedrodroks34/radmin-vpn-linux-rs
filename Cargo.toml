@@ -34,6 +34,7 @@ thiserror = "1"
 anyhow = "1"
 
 uuid = { version = "1", features = ["v4"] }
+zeroize = { version = "1.9.1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
