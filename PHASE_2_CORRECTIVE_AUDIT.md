@@ -4,7 +4,7 @@
 > **Repositório**: https://github.com/Pedrodroks34/radmin-vpn-linux-rs  
 > **Branch de Trabalho**: `fix/phase-2-srp-corrective-audit`  
 > **Branch de Destino**: `main` (commit base: `f7e102e529c49382c4b4f4ac4069477911d391d7`, merge do PR #6)  
-> **Status**: Auditoria e Correções 100% Concluídas e Verificadas  
+> **Status**: Auditoria Corretiva Concluída — Suíte de Testes Aprovada (126 aprovados, 1 ignorado por requisitos ambientais, 0 falhas)
 
 ---
 
@@ -353,7 +353,7 @@ Em `random_srp_exponent()`, candidatos fora do domínio ($1 < candidate < N - 1$
 
 #### B. Proteção RAII com `zeroize::Zeroizing` para Slices e Vetores Criptográficos
 - As variáveis e campos sensíveis como `password`, `salt`, `s_bytes`, `k_full`, `m1_proof`, `m2_proof` e `session_key` passaram a ser protegidos pelo wrapper `zeroize::Zeroizing`.
-- Em caso de retorno antecipado (`?`), erro de tag TLV, corrupção de protocolo ou pânico, os buffers são garantidamente sobrescritos com zeros via barreira de memória de compilador no momento da destruição.
+- Em caso de retorno antecipado (`?`), erro de tag TLV, corrupção de protocolo ou pânico, os buffers protegidos com `Zeroizing` executam o descarte determinístico sobrescrevendo seus bytes antes da liberação do escopo.
 - Em `src/crypto/famatech.rs`:
   - `encrypt`: o vetor com padding e assinatura agora é inicializado como `Zeroizing::new(famatech_pad_and_sign(payload)?)`. Falhas de cifra ou alocação limpam o padding com zeros de forma incondicional.
   - `decrypt`: o buffer de recepção `plaintext` é envolvido em `Zeroizing::new(vec![0u8; ciphertext.len() + BLOCK_SIZE])`. Qualquer erro de integridade ou desserialização subsequente descarta o plaintext perfeitamente zerado.
@@ -399,14 +399,18 @@ Em conformidade com as boas práticas de auditoria forense e sem afirmações ab
 
 ---
 
-### 6.5. Resultados da Verificação Técnica na Terceira Rodada
+### 6.5. Resultados da Verificação Técnica Consolidada
 
 - `cargo fmt --check`: **Aprovado (0 inconsistências)**
+- `cargo check --all-targets --all-features`: **Aprovado (0 erros)**
 - `cargo clippy --all-targets --all-features -- -D warnings`: **Aprovado (0 warnings, 0 erros)**
+- `git diff --check`: **Aprovado (0 problemas de formatação/diff)**
 - `cargo test --locked`:
-  - Testes Unitários (`src/lib.rs`): **111 testes** (110 aprovados, 0 falhas, 1 ignorado ambiental TAP)
-  - Testes de Integração (`tests/integration_test.rs`): **8 testes** (8 aprovados, 0 falhas)
-  - Total de testes aprovados na Terceira Rodada: **118 testes**
+  - Testes Unitários (`src/lib.rs`): **119 testes avaliados** (118 aprovados, 0 falhas, 1 ignorado por requisitos ambientais de TUN/TAP)
+  - Binário CLI (`src/main.rs`): **0 testes**
+  - Testes de Integração (`tests/integration_test.rs`): **8 testes avaliados** (8 aprovados, 0 falhas)
+  - Doc-tests: **0 testes**
+  - **Total consolidado**: **127 testes avaliados** (**126 aprovados**, 1 ignorado ambiental, 0 falhas)
 
 ---
 
@@ -493,7 +497,7 @@ Resultados da execução da suíte completa de testes na quarta rodada:
      - `test_rsession_server_drop_after_processing_failure`: descarte após transição para `Failed`.
 2. **Determinismo e Isolamento do Teste de `SecretBigNum::Drop`**:
    - Substituído o contador global compartilhado `SECRET_BIGNUM_DROP_COUNT` por um contador estritamente thread-local (`THREAD_SECRET_BIGNUM_DROP_COUNT` com `thread_local! { Cell<usize> }`).
-   - O teste `test_secret_bignum_drop_executes_clear` agora executa de maneira 100% determinística em paralelo com o restante da suíte `cargo test`, sem interferência cruzada entre threads de teste concorrentes.
+   - O teste `test_secret_bignum_drop_executes_clear` agora executa de maneira estritamente determinística em paralelo com o restante da suíte `cargo test`, sem interferência cruzada entre threads de teste concorrentes.
 3. **Reconciliação e Higienização Documental**:
    - Atualizados todos os nomes de testes históricos para suas nomenclaturas definitivas no código-fonte.
    - Reconciliadas todas as métricas desagregadas com a saída real dos testes automatizados.
@@ -523,6 +527,8 @@ Resultados da execução da suíte completa de testes após a quinta rodada:
 
 ---
 
-## 9. Conclusão Final da Auditoria da Fase 2
+## 9. Conclusão da Auditoria Corretiva da Fase 2
 
-Com a conclusão da quinta rodada de auditoria corretiva, todos os apontamentos de arquitetura, protocolo matemático SRP-6a, ciclo de vida de instâncias, zeroização de buffers e determinismo de testes foram sanados com precisão cirúrgica. A branch `fix/phase-2-srp-corrective-audit` encontra-se consolidada e pronta para a revisão independente final da PR #7.
+Com a consolidação das rodadas de auditoria corretiva, os apontamentos de arquitetura, protocolo matemático SRP-6a, ciclo de vida de instâncias, zeroização de buffers efêmeros (incluindo o buffer de decifragem RSA e a cópia de material de chave em `RSessionServer`) e o isolamento de testes foram tratados e verificados pela suíte automatizada.
+
+A suíte completa totaliza 127 testes avaliados (126 aprovados, 1 ignorado por requisitos ambientais de TUN/TAP, 0 falhas). A branch `fix/phase-2-srp-corrective-audit` e a Pull Request #7 encontram-se organizadas e submetidas para a revisão independente final.

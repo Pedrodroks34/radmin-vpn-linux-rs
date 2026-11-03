@@ -623,13 +623,13 @@ impl RSessionServer {
                 let d1 = u32::from_le_bytes(decrypted[4..8].try_into().unwrap());
                 let d2 = u32::from_le_bytes(decrypted[8..12].try_into().unwrap());
 
-                let mut key_material = [0u8; RSESSION_KEY_MATERIAL_SIZE];
+                let mut key_material = Zeroizing::new([0u8; RSESSION_KEY_MATERIAL_SIZE]);
                 key_material.copy_from_slice(
                     &decrypted[RSESSION_CLIENT_HEADER_SIZE..RSESSION_PLAINTEXT_SIZE],
                 );
 
                 self.client_params = Some([d0, d1, d2]);
-                self.key_material = Some(key_material);
+                self.key_material = Some(*key_material);
                 self.is_established = true;
                 self.stage = HandshakeStage::State3Completed;
 
