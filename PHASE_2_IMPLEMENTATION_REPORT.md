@@ -3,7 +3,7 @@
 > **Repositório**: https://github.com/Pedrodroks34/radmin-vpn-linux-rs  
 > **Branch de Origem**: `feature/control-channel-handshake`  
 > **Branch de Destino**: `main` (commit base: `8d6f09c`, merge do PR #5)  
-> **Status**: Concluído — Testes Unitários e de Integração 100% Aprovados  
+> **Status**: Concluído — Testes Executados Aprovados (126 aprovados, 1 ignorado por requisitos ambientais, 0 falhas)
 
 ---
 

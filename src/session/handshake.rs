@@ -597,15 +597,14 @@ impl RSessionServer {
                 }
 
                 // 0x1006a354 -> 0x10065bc7 -> 0x10065de8: RSA_private_decrypt com RSA_PKCS1_PADDING (1)
-                let mut decrypted = [0u8; RSESSION_RSA_BLOCK_SIZE];
+                let mut decrypted = Zeroizing::new([0u8; RSESSION_RSA_BLOCK_SIZE]);
                 let dec_len =
                     match self
                         .private_key
-                        .private_decrypt(buf, &mut decrypted, Padding::PKCS1)
+                        .private_decrypt(buf, &mut *decrypted, Padding::PKCS1)
                     {
                         Ok(len) => len,
                         Err(e) => {
-                            decrypted.fill(0);
                             self.fail_and_clear();
                             return Err(HandshakeError::RsaDecryptionFailed(e.to_string()));
                         }
@@ -613,7 +612,6 @@ impl RSessionServer {
 
                 // 0x1006a36d: cmp dword ptr [ebp-0x10], 0x4c; jne 0x1006a4c2
                 if dec_len != RSESSION_PLAINTEXT_SIZE {
-                    decrypted.fill(0);
                     self.fail_and_clear();
                     return Err(HandshakeError::InvalidDecryptedPlaintextSize {
                         expected: RSESSION_PLAINTEXT_SIZE,
@@ -629,7 +627,6 @@ impl RSessionServer {
                 key_material.copy_from_slice(
                     &decrypted[RSESSION_CLIENT_HEADER_SIZE..RSESSION_PLAINTEXT_SIZE],
                 );
-                decrypted.fill(0);
 
                 self.client_params = Some([d0, d1, d2]);
                 self.key_material = Some(key_material);
