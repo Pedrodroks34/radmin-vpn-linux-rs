@@ -88,14 +88,22 @@ Toda a lógica foi implementada em Rust de forma limpa, modular e testável nos 
    - `test_srp_handshake_invalid_client_a_rejected_by_server`: valida rejeição de $A$ fora dos limites ($A = 0$) pelo servidor com transição fail-closed.
    - `test_srp_handshake_invalid_server_b_rejected_by_client`: valida rejeição de $B$ truncado pelo cliente com transição fail-closed.
    - `test_srp_handshake_divergent_group_parameters_rejected`: valida rejeição de parâmetros $g$ ou $N$ divergentes (valor divergente, multi-byte, vazio, truncado a 191B, expandido a 193B, valor adulterado) com transição fail-closed.
-   - `test_control_session_zeroization_on_clear_and_drop`: valida que a chamada a `clear()` e o encerramento da sessão sobrescrevem chaves derivadas e segredos com zeros.
+   - `test_control_session_explicit_clear`: valida que a chamada explícita a `clear()` sobrescreve chaves derivadas e segredos com zeros.
+   - `test_secret_bignum_raii_clearing`: valida o encapsulamento RAII de números grandes com `BN_clear` no `Drop`.
+   - `test_control_client_transition_failure_zeroizes_ephemeral_secrets`: valida que falhas no Step 2, 4 e 6 transicionam para `Failed` e descartam segredos efêmeros.
+   - `test_control_server_transition_failure_zeroizes_ephemeral_secrets`: valida que falhas no Step 1, 3 e 5 transicionam para `Failed` e descartam segredos efêmeros.
+   - `test_control_handshake_debug_redacted` e `test_cipher_state_debug_redacted`: comprovam que credenciais, chaves e bignums são mascarados com `[REDACTED]`.
    - `test_failed_session_cannot_be_reused`: garante que sessões em estado `Failed` rejeitem qualquer invocação subsequente de `step()`.
 2. **Testes de Integração (`tests/integration_test.rs`)**:
    - `test_e2e_phase2_control_channel_srp_handshake_and_continuity`: servidor TCP local simulado + cliente `ControlConnection`, handshake completo (versão + SRP-6a) e troca bidirecional de múltiplos comandos cifrados via AES-256-CBC.
    - `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`: loopback TCP com injeção de prova $M_1$ adulterada, validando rejeição com `ProofVerificationFailed`, estado de servidor `Failed`, encerramento fail-closed do transporte e ausência de panics (com task do servidor aguardada explicitamente).
    - `test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed`: loopback TCP com injeção de prova $M_2$ adulterada, validando rejeição pelo cliente com fail-closed e término limpo do servidor sem panics.
    - `test_pcap_radmin_17301_control_frames_validation`: validação contra vetores de framing reais de `radmin_17301.pcap`.
-3. **Métricas Finais da Auditoria Corretiva**:
+3. **Métricas Finais da Terceira Rodada de Auditoria**:
    - `cargo fmt --check`: **Aprovado** (zero diferenças).
    - `cargo clippy --all-targets --all-features -- -D warnings`: **Aprovado** (zero advertências em toda a árvore).
-   - `cargo test --locked`: **114 testes avaliados** (105 unitários aprovados + 1 ignorado ambiental TAP; 8 testes de integração aprovados; 0 falhas). Total de **113 testes aprovados**.
+   - `cargo test --locked`: **119 testes avaliados** (110 unitários aprovados + 1 ignorado ambiental TAP; 8 testes de integração aprovados; 0 falhas). Total de **118 testes aprovados**.
+4. **Garantias de Ciclo de Vida e Segurança de Memória**:
+   - Wrapper RAII `SecretBigNum` em todos os expoentes, verifiers e segredos intermediários com chamada incondicional a `BN_clear` antes da desalocação.
+   - Zeroização incondicional via `Zeroizing` para buffers de cifra, senhas, salts, digest de provas $M_1$/$M_2$ e chaves KDF.
+   - Redação total de `Debug` e eliminação de `Clone` indevido no estado de cifra.

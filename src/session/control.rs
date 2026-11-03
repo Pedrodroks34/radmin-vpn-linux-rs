@@ -14,7 +14,7 @@ use crate::transport::{ChannelConfig, TcpChannel};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{debug, error, info};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Timeout padrão para as etapas do handshake de controle.
 pub const DEFAULT_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -72,7 +72,7 @@ pub struct ControlStats {
 /// Gerenciador de uma conexão de controle segura com a infraestrutura oficial do Radmin VPN.
 pub struct ControlConnection {
     username: String,
-    password: String,
+    password: Zeroizing<String>,
     server_addr: Option<String>,
     state: ControlConnectionState,
     channel: Option<TcpChannel>,
@@ -81,12 +81,25 @@ pub struct ControlConnection {
     stats: ControlStats,
 }
 
+impl std::fmt::Debug for ControlConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlConnection")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("server_addr", &self.server_addr)
+            .field("state", &self.state)
+            .field("timeout", &self.timeout)
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
 impl ControlConnection {
     /// Cria uma nova conexão de controle com as credenciais especificadas.
     pub fn new(username: String, password: String) -> Self {
         Self {
             username,
-            password,
+            password: Zeroizing::new(password),
             server_addr: None,
             state: ControlConnectionState::Disconnected,
             channel: None,
@@ -192,7 +205,7 @@ impl ControlConnection {
         self.stats.rx_packets += 1;
 
         let mut negotiator =
-            ControlClientNegotiator::new(self.username.clone(), self.password.clone());
+            ControlClientNegotiator::new(self.username.clone(), (*self.password).clone());
         negotiator.process_version_response(&version_frame.payload)?;
 
         // -------------------------------------------------------------------

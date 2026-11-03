@@ -38,7 +38,7 @@
 use openssl::hash::{hash, MessageDigest};
 use openssl::symm::{Cipher, Crypter, Mode};
 use thiserror::Error;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const BLOCK_SIZE: usize = 16;
 pub const AES_256_KEY_SIZE: usize = 32;
@@ -190,12 +190,22 @@ pub fn famatech_verify_and_unpad(buf: &[u8]) -> Result<Vec<u8>, CryptoError> {
 /// - `dec_key`: chave de decifragem AES-256 (32 bytes, configurada via `0x10062d60`)
 /// - `enc_iv`: IV de envio de 16 bytes (`+0x1ec`, inicializado com zeros)
 /// - `dec_iv`: IV de recepção de 16 bytes (`+0x1fc`, inicializado com zeros)
-#[derive(Debug, Clone)]
 pub struct FamatechCipherState {
     enc_key: [u8; AES_256_KEY_SIZE],
     dec_key: [u8; AES_256_KEY_SIZE],
     enc_iv: [u8; BLOCK_SIZE],
     dec_iv: [u8; BLOCK_SIZE],
+}
+
+impl std::fmt::Debug for FamatechCipherState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FamatechCipherState")
+            .field("enc_key", &"[REDACTED]")
+            .field("dec_key", &"[REDACTED]")
+            .field("enc_iv", &"[REDACTED]")
+            .field("dec_iv", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl FamatechCipherState {
@@ -308,7 +318,7 @@ impl FamatechCipherState {
     /// 2. Cifra o bloco resultante usando AES-256-CBC com o `enc_iv` atual
     /// 3. Atualiza `enc_iv` com o último bloco de 16 bytes do ciphertext gerado
     pub fn encrypt(&mut self, payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let mut padded = famatech_pad_and_sign(payload)?;
+        let padded = Zeroizing::new(famatech_pad_and_sign(payload)?);
         debug_assert_eq!(padded.len() % BLOCK_SIZE, 0);
 
         let mut crypter = Crypter::new(
@@ -317,23 +327,17 @@ impl FamatechCipherState {
             &self.enc_key,
             Some(&self.enc_iv),
         )
-        .map_err(|e| {
-            padded.zeroize();
-            CryptoError::OpenSslError(e.to_string())
-        })?;
+        .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
 
         crypter.pad(false);
 
         let mut ciphertext = vec![0u8; padded.len() + BLOCK_SIZE];
-        let mut count = crypter.update(&padded, &mut ciphertext).map_err(|e| {
-            padded.zeroize();
-            CryptoError::OpenSslError(e.to_string())
-        })?;
-        count += crypter.finalize(&mut ciphertext[count..]).map_err(|e| {
-            padded.zeroize();
-            CryptoError::OpenSslError(e.to_string())
-        })?;
-        padded.zeroize();
+        let mut count = crypter
+            .update(&padded, &mut ciphertext)
+            .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
+        count += crypter
+            .finalize(&mut ciphertext[count..])
+            .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
         ciphertext.truncate(count);
 
         if ciphertext.len() < BLOCK_SIZE {
@@ -371,7 +375,7 @@ impl FamatechCipherState {
 
         crypter.pad(false);
 
-        let mut plaintext = vec![0u8; ciphertext.len() + BLOCK_SIZE];
+        let mut plaintext = Zeroizing::new(vec![0u8; ciphertext.len() + BLOCK_SIZE]);
         let mut count = crypter
             .update(ciphertext, &mut plaintext)
             .map_err(|e| CryptoError::OpenSslError(e.to_string()))?;
@@ -384,10 +388,9 @@ impl FamatechCipherState {
         let last_block_start = ciphertext.len() - BLOCK_SIZE;
         self.dec_iv.copy_from_slice(&ciphertext[last_block_start..]);
 
-        // Valida e desempacota (0x10069f90)
-        let result = famatech_verify_and_unpad(&plaintext);
-        plaintext.zeroize();
-        result
+        // Valida e desempacota (0x10069f90). Plaintext é zeroizado automaticamente via Drop do Zeroizing
+        // mesmo em caso de erro no trailer ou na remoção do padding.
+        famatech_verify_and_unpad(&plaintext)
     }
 }
 
@@ -686,5 +689,15 @@ mod state_regression {
         assert_eq!(state.dec_key(), &[0u8; 32]);
         assert_eq!(state.enc_iv(), &[0u8; 16]);
         assert_eq!(state.dec_iv(), &[0u8; 16]);
+    }
+
+    #[test]
+    fn test_cipher_state_debug_redacted() {
+        let key = [0x77u8; 32];
+        let state = FamatechCipherState::new(key);
+        let debug_str = format!("{state:?}");
+        assert!(debug_str.contains("[REDACTED]"));
+        assert!(!debug_str.contains("0x77"));
+        assert!(!debug_str.contains("119")); // 0x77 in decimal
     }
 }

@@ -315,6 +315,93 @@ Execução do conjunto completo de testes automatizados:
 
 ---
 
-## 6. Conclusão da Fase 2
+## 6. Terceira Rodada de Auditoria — Ciclo de Vida, Zeroização e Segurança de Memória
 
-Com as correções desta segunda rodada de auditoria, a implementação do handshake SRP-6a da Conexão de Controle (Fase 2) alcança excelência em segurança defensiva, higienização criptográfica de memória, resiliência fail-closed e testes de integração determinísticos sem falsos positivos. A branch `fix/phase-2-srp-corrective-audit` está pronta e validada para merge no PR #7.
+### 6.1. Diagnóstico do Problema de Vazamento em Caminhos de Erro
+
+Na auditoria independente de segurança de memória, foi identificado que tanto no cliente quanto no servidor (`src/session/control_handshake.rs`), a execução dos passos em `step_inner()` utilizava `std::mem::replace(&mut self.state, Failed(...))` para extrair o estado anterior. 
+
+Ao desestruturar o estado em variáveis locais (ex.: `a_secret`, `x_secret`, `salt`, `verifier`, `b_secret`):
+1. **Descarte sem Limpeza Criptográfica**: Caso qualquer expressão subsequente retornasse erro antecipado via `?` (ex.: `decode_items`, `validate_srp_public_value`, alocação de `BigNumContext` ou falha de mod_exp), as variáveis locais saíam de escopo.
+2. **Limitação do `BigNum` do OpenSSL**: O tipo `openssl::bn::BigNum` nativo implementa `Drop` invocando diretamente `BN_free`, que apenas devolve o bloco de memória para a heap do OpenSSL/glibc, **sem zerar seu conteúdo** (`BN_clear`).
+3. **Persistência de Plaintext em Buffers de Cifra**: Em `src/crypto/famatech.rs`, falhas durante `crypter.update`, `finalize` ou desempacotamento de padding podiam retornar erro sem invocar o bloco manual de zeroização nos vetores `padded` e `plaintext`.
+4. **Vazamento por `Debug` e Duplicação por `Clone`**: `FamatechCipherState` derivava `Clone` e `Debug`, expondo chaves simétricas e IVs em formatação `%?` e permitindo duplicação silenciosa de chaves sem rastreamento de destruição. Da mesma forma, os estados e sessões do handshake expunham números e credenciais em formatações de debug.
+
+---
+
+### 6.2. Arquitetura das Correções Cirúrgicas
+
+#### A. Tipo RAII `SecretBigNum` com Invocação Obrigatória de `BN_clear`
+Criou-se a estrutura `SecretBigNum(pub BigNum)` em `src/session/control_handshake.rs` que:
+- Implementa `Deref<Target = BigNum>` e `DerefMut<Target = BigNum>`, assegurando interoperabilidade ergonômica com todas as operações matemáticas do OpenSSL.
+- Implementa `Drop` com chamada explícita e prioritária a `self.0.clear()` (`BN_clear`) antes de qualquer liberação de memória heap.
+- Implementa `fmt::Debug` customizado emitindo permanentemente `[REDACTED SecretBigNum]`.
+- Implementa `PartialEq` e `PartialOrd` para validações e asserções seguras de limites ($1 < candidate < N-1$).
+
+```rust
+pub struct SecretBigNum(pub BigNum);
+
+impl Drop for SecretBigNum {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+```
+
+Todas as instâncias e variáveis secretas de SRP ($x$, $a$, $b$, $v$, $kv$, base, $ux$, $exp$, $s$, $vu$, $avu$) foram convertidas para `SecretBigNum`.
+Em `random_srp_exponent()`, candidatos fora do domínio ($1 < candidate < N - 1$) descartados durante o rejection sampling invocam imediatamente o `Drop` do `SecretBigNum`, garantindo que chaves candidatas rejeitadas sejam zeradas instantaneamente na memória.
+
+#### B. Proteção RAII com `zeroize::Zeroizing` para Slices e Vetores Criptográficos
+- As variáveis e campos sensíveis como `password`, `salt`, `s_bytes`, `k_full`, `m1_proof`, `m2_proof` e `session_key` passaram a ser protegidos pelo wrapper `zeroize::Zeroizing`.
+- Em caso de retorno antecipado (`?`), erro de tag TLV, corrupção de protocolo ou pânico, os buffers são garantidamente sobrescritos com zeros via barreira de memória de compilador no momento da destruição.
+- Em `src/crypto/famatech.rs`:
+  - `encrypt`: o vetor com padding e assinatura agora é inicializado como `Zeroizing::new(famatech_pad_and_sign(payload)?)`. Falhas de cifra ou alocação limpam o padding com zeros de forma incondicional.
+  - `decrypt`: o buffer de recepção `plaintext` é envolvido em `Zeroizing::new(vec![0u8; ciphertext.len() + BLOCK_SIZE])`. Qualquer erro de integridade ou desserialização subsequente descarta o plaintext perfeitamente zerado.
+
+#### C. Remoção de `Clone` e Redação Categórica de `Debug`
+- `FamatechCipherState`: remoção da derive `Clone` (verificado que nenhuma parte do código dependia de clonagem do estado de cifra) e implementação manual de `Debug` mascarando `enc_key`, `dec_key`, `enc_iv` e `dec_iv` com `[REDACTED]`.
+- Implementação manual de `Debug` para:
+  - `ControlClientState`: mascara chaves efêmeras, segredos $x$ e $a$, $M_1$, $K_{\text{full}}$ e `session_key`.
+  - `ControlClientNegotiator`: mascara senhas e estados com `[REDACTED]`.
+  - `ControlServerState`: mascara segredos do servidor $v$, $b$, $M_2$, $K_{\text{full}}$ e `session_key`.
+  - `ControlServerSession`: mascara senhas, salts e segredos com `[REDACTED]`.
+  - `ControlConnection`: mascara `password` com `[REDACTED]`.
+
+---
+
+### 6.3. Cobertura de Testes Específica e Rigorosa
+
+A suíte de testes foi reformulada para separar a verificação de `clear()` manual da destruição automática por `Drop`, além de adicionar testes de falha de transição e redação de debug:
+1. `test_control_session_explicit_clear`: valida o comportamento funcional da chamada explícita `.clear()` tanto no cliente quanto no servidor, comprovando que ambos zeram suas respectivas `session_key` (`[0u8; 32]`) e `k_full` (`[0u8; 40]`).
+2. `test_secret_bignum_raii_clearing`: comprova que `SecretBigNum` encapsula corretamente a representação de bits do número grande e que sua rotina de limpeza zera a quantidade de bits ativos (`num_bits() == 0`).
+3. `test_control_client_transition_failure_zeroizes_ephemeral_secrets`: induz falhas de transição no cliente no Step 2 (TLV inválido), Step 4 (chave $B$ inválida $B \bmod N = 0$) e Step 6 ($M_2$ incorreto), confirmando que o cliente transiciona de modo irrevogável para `Failed` e aciona o descarte/zeroização de seus segredos efêmeros.
+4. `test_control_server_transition_failure_zeroizes_ephemeral_secrets`: induz falhas no servidor no Step 1 (usuário inválido), Step 3 (chave $A$ inválida $A \bmod N = 0$) e Step 5 ($M_1$ incorreto), confirmando a transição fail-closed e a destruição dos segredos.
+5. `test_control_handshake_debug_redacted`: valida que senhas, chaves e bignums em múltiplos estágios do handshake nunca são expostos em saídas de rastreamento `{:?}`.
+6. `test_cipher_state_debug_redacted`: valida que as chaves AES-256 e IVs do canal de cifra do Radmin nunca são impressos no log.
+
+---
+
+### 6.4. Análise Honesta dos Limites de Segurança de Memória
+
+Em conformidade com as boas práticas de auditoria forense:
+- **O que a implementação garante**: Todas as estruturas gerenciadas pelo Rust e as alocações primárias do OpenSSL sob responsabilidade de `SecretBigNum`, `FamatechCipherState`, `ControlConnection`, `ControlClientNegotiator` e `ControlServerSession` têm garantia de zeroização incondicional via RAII (`BN_clear` e `Zeroizing`) em 100% dos fluxos de execução (sucesso, erros via `?` e interrupções de transição).
+- **Limitações reais inerentes ao ambiente**:
+  1. *OpenSSL Scratchpad Memory*: A biblioteca OpenSSL pode alocar internamente buffers temporários (ex.: durante inversões modulares e multiplicações de Karatsuba/Montgomery em `BN_CTX`) cuja limpeza final depende do ciclo do contexto C do OpenSSL.
+  2. *Paginação e Swap de SO*: Em ambientes sem mlock (`mlock(2)`/`mlockall`), páginas do processo contendo material criptográfico na heap podem ser descarregadas em disco na partição de swap pelo kernel Linux se houver pressão de memória severa.
+
+---
+
+### 6.5. Resultados Finais da Verificação Técnica
+
+- `cargo fmt --check`: **Aprovado (0 inconsistências)**
+- `cargo clippy --all-targets --all-features -- -D warnings`: **Aprovado (0 warnings, 0 erros)**
+- `cargo test --locked`:
+  - Testes Unitários (`src/lib.rs`): **111 testes** (110 aprovados, 0 falhas, 1 ignorado ambiental TAP)
+  - Testes de Integração (`tests/integration_test.rs`): **8 testes** (8 aprovados, 0 falhas)
+  - Total de testes aprovados: **118 testes**
+
+---
+
+## 7. Conclusão Final da Fase 2
+
+Com a conclusão da terceira rodada de auditoria, todas as pendências arquiteturais, criptográficas, de ciclo de vida e de segurança de memória foram sanadas com rigor cirúrgico, sem supressão de advertências nem alegações não verificáveis de segurança. A branch `fix/phase-2-srp-corrective-audit` está perfeitamente estabilizada para a PR #7.

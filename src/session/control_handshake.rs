@@ -35,9 +35,10 @@ use crate::crypto::famatech::{FamatechCipherState, AES_256_KEY_SIZE};
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::rand::rand_bytes;
 use openssl::sha::sha1;
+use std::ops::{Deref, DerefMut};
 use thiserror::Error;
 use tracing::{debug, info, warn};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Versão do protocolo de rede do SHelper (`shelper.dll!0x1006b1d0` -> `return 3`).
 pub const SHELPER_PROTOCOL_VERSION: u32 = 3;
@@ -233,6 +234,95 @@ pub fn decode_identity(payload: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Wrapper RAII Seguro para BigNum (Zeroização Garantida em Drop)
+// ---------------------------------------------------------------------------
+
+/// Wrapper RAII sobre `openssl::bn::BigNum` que executa `BN_clear` antes da desalocação (`Drop`).
+///
+/// A implementação padrão de `Drop` do OpenSSL invoca apenas `BN_free`, deixando resíduos de
+/// grandes números criptográficos na memória liberada. O `SecretBigNum` invoca `self.0.clear()`
+/// (`BN_clear`) explicitamente antes da desalocação, garantindo limpeza em todos os caminhos de erro,
+/// retornos antecipados via `?` ou panics.
+pub struct SecretBigNum(pub BigNum);
+
+impl Deref for SecretBigNum {
+    type Target = BigNum;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for SecretBigNum {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for SecretBigNum {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl std::fmt::Debug for SecretBigNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED SecretBigNum]")
+    }
+}
+
+impl PartialEq for SecretBigNum {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl Eq for SecretBigNum {}
+
+impl PartialOrd for SecretBigNum {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SecretBigNum {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl PartialEq<BigNum> for SecretBigNum {
+    fn eq(&self, other: &BigNum) -> bool {
+        &self.0 == other
+    }
+}
+
+impl PartialOrd<BigNum> for SecretBigNum {
+    fn partial_cmp(&self, other: &BigNum) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+impl SecretBigNum {
+    pub fn new() -> Result<Self, ControlHandshakeError> {
+        BigNum::new()
+            .map(SecretBigNum)
+            .map_err(|e| ControlHandshakeError::CryptoError(format!("falha ao criar BN: {e}")))
+    }
+
+    pub fn from_slice(slice: &[u8]) -> Result<Self, ControlHandshakeError> {
+        BigNum::from_slice(slice)
+            .map(SecretBigNum)
+            .map_err(|e| ControlHandshakeError::CryptoError(format!("falha ao carregar BN: {e}")))
+    }
+
+    pub fn from_u32(val: u32) -> Result<Self, ControlHandshakeError> {
+        BigNum::from_u32(val).map(SecretBigNum).map_err(|e| {
+            ControlHandshakeError::CryptoError(format!("falha ao criar BN de u32: {e}"))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Operações Criptográficas do SRP-6a (Thomas J. Wu)
 // ---------------------------------------------------------------------------
 
@@ -249,25 +339,19 @@ pub fn compute_srp_x(
     username: &str,
     password: &str,
     salt: &[u8],
-) -> Result<BigNum, ControlHandshakeError> {
-    let mut cred_buf = Vec::with_capacity(username.len() + 1 + password.len());
+) -> Result<SecretBigNum, ControlHandshakeError> {
+    let mut cred_buf = Zeroizing::new(Vec::with_capacity(username.len() + 1 + password.len()));
     cred_buf.extend_from_slice(username.as_bytes());
     cred_buf.push(b':');
     cred_buf.extend_from_slice(password.as_bytes());
-    let mut h1 = sha1(&cred_buf);
-    cred_buf.zeroize();
+    let h1 = Zeroizing::new(sha1(&cred_buf));
 
-    let mut x_buf = Vec::with_capacity(salt.len() + h1.len());
+    let mut x_buf = Zeroizing::new(Vec::with_capacity(salt.len() + h1.len()));
     x_buf.extend_from_slice(salt);
-    x_buf.extend_from_slice(&h1);
-    h1.zeroize();
-    let mut x_bytes = sha1(&x_buf);
-    x_buf.zeroize();
+    x_buf.extend_from_slice(&*h1);
+    let x_bytes = Zeroizing::new(sha1(&x_buf));
 
-    let bn = BigNum::from_slice(&x_bytes)
-        .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em BN para x: {e}")));
-    x_bytes.zeroize();
-    bn
+    SecretBigNum::from_slice(&*x_bytes)
 }
 
 /// Preenche um buffer com zeros à esquerda até atingir o comprimento especificado.
@@ -286,7 +370,7 @@ pub fn pad_bignum_bytes(bytes: &[u8], target_len: usize) -> Vec<u8> {
 /// - Garante que o expoente pertença estritamente ao intervalo válido $1 < exp < N - 1$
 ///   (isto é, $2 \le exp \le N - 2$) e não seja trivial ($0$ ou $1$).
 /// - Implementa amostragem com repetição/rejeição (rejection sampling) caso gere valor fora do domínio aceitável.
-pub fn random_srp_exponent(prime_n: &BigNum) -> Result<BigNum, ControlHandshakeError> {
+pub fn random_srp_exponent(prime_n: &BigNum) -> Result<SecretBigNum, ControlHandshakeError> {
     let one = BigNum::from_u32(1)
         .map_err(|e| ControlHandshakeError::CryptoError(format!("falha ao criar BN 1: {e}")))?;
     let mut n_minus_1 = BigNum::new().map_err(|e| {
@@ -297,19 +381,15 @@ pub fn random_srp_exponent(prime_n: &BigNum) -> Result<BigNum, ControlHandshakeE
         .map_err(|e| ControlHandshakeError::CryptoError(format!("falha ao calcular N - 1: {e}")))?;
 
     for _ in 0..128 {
-        let mut buf = [0u8; RADMIN_SRP1536_MODULUS_LEN];
-        rand_bytes(&mut buf).map_err(|e| {
+        let mut buf = Zeroizing::new([0u8; RADMIN_SRP1536_MODULUS_LEN]);
+        rand_bytes(&mut *buf).map_err(|e| {
             ControlHandshakeError::CryptoError(format!("falha no CSPRNG ao gerar expoente: {e}"))
         })?;
 
-        let candidate = BigNum::from_slice(&buf).map_err(|e| {
-            buf.zeroize();
-            ControlHandshakeError::CryptoError(format!("falha ao carregar BN candidato: {e}"))
-        })?;
-        buf.zeroize();
+        let candidate = SecretBigNum::from_slice(&*buf)?;
 
         // Garante 1 < candidate < N - 1
-        if candidate > one && candidate < n_minus_1 {
+        if *candidate > one && *candidate < n_minus_1 {
             return Ok(candidate);
         }
     }
@@ -393,22 +473,18 @@ pub fn compute_srp_u(
 pub fn compute_srp_kdf(s_bytes: &[u8]) -> [u8; RADMIN_SRP_KDF_KEY_LEN] {
     let mut out = [0u8; RADMIN_SRP_KDF_KEY_LEN];
 
-    let mut buf0 = Vec::with_capacity(s_bytes.len() + 4);
+    let mut buf0 = Zeroizing::new(Vec::with_capacity(s_bytes.len() + 4));
     buf0.extend_from_slice(s_bytes);
     buf0.extend_from_slice(&0u32.to_be_bytes());
-    let mut k0 = sha1(&buf0);
-    buf0.zeroize();
+    let k0 = Zeroizing::new(sha1(&buf0));
 
-    let mut buf1 = Vec::with_capacity(s_bytes.len() + 4);
+    let mut buf1 = Zeroizing::new(Vec::with_capacity(s_bytes.len() + 4));
     buf1.extend_from_slice(s_bytes);
     buf1.extend_from_slice(&1u32.to_be_bytes());
-    let mut k1 = sha1(&buf1);
-    buf1.zeroize();
+    let k1 = Zeroizing::new(sha1(&buf1));
 
-    out[..20].copy_from_slice(&k0);
-    out[20..40].copy_from_slice(&k1);
-    k0.zeroize();
-    k1.zeroize();
+    out[..20].copy_from_slice(&*k0);
+    out[20..40].copy_from_slice(&*k1);
     out
 }
 
@@ -433,7 +509,7 @@ pub fn compute_srp_m1(
 
     let h_i = sha1(username.as_bytes());
 
-    let mut buf = Vec::new();
+    let mut buf = Zeroizing::new(Vec::new());
     buf.extend_from_slice(&h_xor);
     buf.extend_from_slice(&h_i);
     buf.extend_from_slice(salt);
@@ -451,7 +527,7 @@ pub fn compute_srp_m2(
     m1: &[u8; RADMIN_SRP_DIGEST_LEN],
     k_full: &[u8; RADMIN_SRP_KDF_KEY_LEN],
 ) -> [u8; RADMIN_SRP_DIGEST_LEN] {
-    let mut buf = Vec::with_capacity(a_bytes.len() + m1.len() + k_full.len());
+    let mut buf = Zeroizing::new(Vec::with_capacity(a_bytes.len() + m1.len() + k_full.len()));
     buf.extend_from_slice(a_bytes);
     buf.extend_from_slice(m1);
     buf.extend_from_slice(k_full);
@@ -472,7 +548,6 @@ pub struct ControlStepOutput {
 }
 
 /// Estados internos do cliente de controle (`shelper.dll!0x10066680`).
-#[derive(Debug)]
 pub enum ControlClientState {
     /// Estado 0 inicial: pronto para emitir Step 1 (username).
     State0Initial,
@@ -480,24 +555,57 @@ pub enum ControlClientState {
     State2WaitingServerParams,
     /// Estado 4: enviou Step 3 (A), aguardando chave efêmera do servidor (Step 4: B).
     State4WaitingServerEphemeral {
-        a_secret: BigNum,
+        a_secret: SecretBigNum,
         a_public_bytes: Vec<u8>,
-        salt: Vec<u8>,
-        x_secret: BigNum,
+        salt: Zeroizing<Vec<u8>>,
+        x_secret: SecretBigNum,
     },
     /// Estado 6: enviou Step 5 (M1), aguardando prova do servidor (Step 6: M2).
     State6WaitingServerProof {
         a_public_bytes: Vec<u8>,
-        m1_proof: [u8; RADMIN_SRP_DIGEST_LEN],
-        k_full: [u8; RADMIN_SRP_KDF_KEY_LEN],
+        m1_proof: Zeroizing<[u8; RADMIN_SRP_DIGEST_LEN]>,
+        k_full: Zeroizing<[u8; RADMIN_SRP_KDF_KEY_LEN]>,
     },
     /// Handshake estabelecido com sucesso.
     Established {
-        session_key: [u8; CONTROL_SESSION_KEY_SIZE],
-        k_full: [u8; RADMIN_SRP_KDF_KEY_LEN],
+        session_key: Zeroizing<[u8; CONTROL_SESSION_KEY_SIZE]>,
+        k_full: Zeroizing<[u8; RADMIN_SRP_KDF_KEY_LEN]>,
     },
     /// Handshake falhou com erro irrecuperável.
     Failed(String),
+}
+
+impl std::fmt::Debug for ControlClientState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::State0Initial => write!(f, "ControlClientState::State0Initial"),
+            Self::State2WaitingServerParams => {
+                write!(f, "ControlClientState::State2WaitingServerParams")
+            }
+            Self::State4WaitingServerEphemeral { a_public_bytes, .. } => f
+                .debug_struct("ControlClientState::State4WaitingServerEphemeral")
+                .field("a_secret", &"[REDACTED]")
+                .field("a_public_bytes_len", &a_public_bytes.len())
+                .field("salt", &"[REDACTED]")
+                .field("x_secret", &"[REDACTED]")
+                .finish(),
+            Self::State6WaitingServerProof { a_public_bytes, .. } => f
+                .debug_struct("ControlClientState::State6WaitingServerProof")
+                .field("a_public_bytes_len", &a_public_bytes.len())
+                .field("m1_proof", &"[REDACTED]")
+                .field("k_full", &"[REDACTED]")
+                .finish(),
+            Self::Established { .. } => f
+                .debug_struct("ControlClientState::Established")
+                .field("session_key", &"[REDACTED]")
+                .field("k_full", &"[REDACTED]")
+                .finish(),
+            Self::Failed(reason) => f
+                .debug_tuple("ControlClientState::Failed")
+                .field(reason)
+                .finish(),
+        }
+    }
 }
 
 impl ControlClientState {
@@ -510,10 +618,10 @@ impl ControlClientState {
                 salt,
                 x_secret,
             } => {
-                a_secret.clear();
+                a_secret.0.clear();
                 a_public_bytes.zeroize();
                 salt.zeroize();
-                x_secret.clear();
+                x_secret.0.clear();
             }
             ControlClientState::State6WaitingServerProof {
                 a_public_bytes,
@@ -539,9 +647,20 @@ impl ControlClientState {
 /// Negociador do handshake de controle do cliente (Família `SHelper_*`).
 pub struct ControlClientNegotiator {
     username: String,
-    password: String,
+    password: Zeroizing<String>,
     state: ControlClientState,
     version_exchanged: bool,
+}
+
+impl std::fmt::Debug for ControlClientNegotiator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlClientNegotiator")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("state", &self.state)
+            .field("version_exchanged", &self.version_exchanged)
+            .finish()
+    }
 }
 
 impl Drop for ControlClientNegotiator {
@@ -555,7 +674,7 @@ impl ControlClientNegotiator {
     pub fn new(username: String, password: String) -> Self {
         Self {
             username,
-            password,
+            password: Zeroizing::new(password),
             state: ControlClientState::State0Initial,
             version_exchanged: false,
         }
@@ -610,7 +729,7 @@ impl ControlClientNegotiator {
     /// Retorna a chave de sessão derivada de 32 bytes (`0x20`) para AES-256-CBC, se estabelecido.
     pub fn session_key(&self) -> Option<[u8; CONTROL_SESSION_KEY_SIZE]> {
         match &self.state {
-            ControlClientState::Established { session_key, .. } => Some(*session_key),
+            ControlClientState::Established { session_key, .. } => Some(**session_key),
             _ => None,
         }
     }
@@ -788,7 +907,7 @@ impl ControlClientNegotiator {
                 self.state = ControlClientState::State4WaitingServerEphemeral {
                     a_secret,
                     a_public_bytes: a_public_vec,
-                    salt,
+                    salt: Zeroizing::new(salt),
                     x_secret: x,
                 };
 
@@ -800,10 +919,10 @@ impl ControlClientNegotiator {
             }
 
             ControlClientState::State4WaitingServerEphemeral {
-                mut a_secret,
+                a_secret,
                 a_public_bytes,
                 salt,
-                mut x_secret,
+                x_secret,
             } => {
                 let data = in_buf.ok_or_else(|| {
                     ControlHandshakeError::InvalidState(
@@ -860,9 +979,7 @@ impl ControlClientNegotiator {
                 let g_bn = BigNum::from_u32(RADMIN_SRP_GENERATOR as u32).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN g: {e}"))
                 })?;
-                let mut v = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN v: {e}"))
-                })?;
+                let mut v = SecretBigNum::new()?;
                 v.mod_exp(&g_bn, &x_secret, &prime_n, &mut ctx)
                     .map_err(|e| {
                         ControlHandshakeError::CryptoError(format!("falha em mod_exp v: {e}"))
@@ -871,17 +988,13 @@ impl ControlClientNegotiator {
                 let k_bn = BigNum::from_u32(RADMIN_SRP_K).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN k: {e}"))
                 })?;
-                let mut kv = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN kv: {e}"))
-                })?;
+                let mut kv = SecretBigNum::new()?;
                 kv.mod_mul(&k_bn, &v, &prime_n, &mut ctx).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em mod_mul kv: {e}"))
                 })?;
 
                 // base = (B + N - (kv mod N)) mod N
-                let mut base = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN base: {e}"))
-                })?;
+                let mut base = SecretBigNum::new()?;
                 base.mod_sub(&b_public, &kv, &prime_n, &mut ctx)
                     .map_err(|e| {
                         ControlHandshakeError::CryptoError(format!("falha em mod_sub base: {e}"))
@@ -892,40 +1005,31 @@ impl ControlClientNegotiator {
                 }
 
                 // 5. Calcular expoente: (a + u * x)
-                let mut ux = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN ux: {e}"))
-                })?;
+                let mut ux = SecretBigNum::new()?;
                 ux.checked_mul(&u_bn, &x_secret, &mut ctx).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em mul: {e}"))
                 })?;
 
-                let mut exp = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN exp: {e}"))
-                })?;
+                let mut exp = SecretBigNum::new()?;
                 exp.checked_add(&a_secret, &ux).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em add: {e}"))
                 })?;
 
                 // 6. Calcular segredo pré-mestre S = base ^ exp mod N
-                let mut s = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN S: {e}"))
-                })?;
+                let mut s = SecretBigNum::new()?;
                 s.mod_exp(&base, &exp, &prime_n, &mut ctx).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em mod_exp S: {e}"))
                 })?;
 
-                let mut s_bytes = pad_bignum_bytes(&s.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
-                s.clear();
-                a_secret.clear();
-                x_secret.clear();
+                let s_bytes =
+                    Zeroizing::new(pad_bignum_bytes(&s.to_vec(), RADMIN_SRP1536_MODULUS_LEN));
 
                 // 7. Derivar chave de 40 bytes via KDF (0x10061790)
-                let k_full = compute_srp_kdf(&s_bytes);
-                s_bytes.zeroize();
+                let k_full = Zeroizing::new(compute_srp_kdf(&s_bytes));
 
                 // 8. Calcular prova do cliente M1
                 let n_vec = prime_n.to_vec();
-                let m1 = compute_srp_m1(
+                let m1 = Zeroizing::new(compute_srp_m1(
                     &n_vec,
                     RADMIN_SRP_GENERATOR,
                     &self.username,
@@ -933,11 +1037,11 @@ impl ControlClientNegotiator {
                     &a_public_bytes,
                     b_bytes,
                     &k_full,
-                );
+                ));
 
                 // 9. Emitir Step 5 + M1
                 let item_step5 = encode_item(TAG_STEP, &5u32.to_le_bytes())?;
-                let item_m1 = encode_item(TAG_PROOF, &m1)?;
+                let item_m1 = encode_item(TAG_PROOF, &*m1)?;
 
                 let mut out_buf = Vec::with_capacity(item_step5.len() + item_m1.len());
                 out_buf.extend_from_slice(&item_step5);
@@ -1010,7 +1114,7 @@ impl ControlClientNegotiator {
                 }
 
                 // 3. Extrair chave de 32 bytes para AES-256 (0x100df250)
-                let mut session_key = [0u8; CONTROL_SESSION_KEY_SIZE];
+                let mut session_key = Zeroizing::new([0u8; CONTROL_SESSION_KEY_SIZE]);
                 session_key.copy_from_slice(&k_full[..CONTROL_SESSION_KEY_SIZE]);
 
                 self.state = ControlClientState::Established {
@@ -1041,32 +1145,69 @@ impl ControlClientNegotiator {
 // ---------------------------------------------------------------------------
 
 /// Estados internos do servidor de controle.
-#[derive(Debug)]
 pub enum ControlServerState {
     /// Estado 1: aguardando identidade do cliente (Step 1).
     State1WaitingClientIdentity,
     /// Estado 3: enviou parâmetros, aguardando efêmera do cliente (Step 3: A).
     State3WaitingClientEphemeral {
         username: String,
-        salt: Vec<u8>,
-        verifier: BigNum,
-        b_secret: BigNum,
+        salt: Zeroizing<Vec<u8>>,
+        verifier: SecretBigNum,
+        b_secret: SecretBigNum,
         b_public_bytes: Vec<u8>,
     },
     /// Estado 5: enviou B, aguardando prova do cliente (Step 5: M1).
     State5WaitingClientProof {
         a_public_bytes: Vec<u8>,
-        m1_expected: [u8; RADMIN_SRP_DIGEST_LEN],
-        m2_proof: [u8; RADMIN_SRP_DIGEST_LEN],
-        k_full: [u8; RADMIN_SRP_KDF_KEY_LEN],
+        m1_expected: Zeroizing<[u8; RADMIN_SRP_DIGEST_LEN]>,
+        m2_proof: Zeroizing<[u8; RADMIN_SRP_DIGEST_LEN]>,
+        k_full: Zeroizing<[u8; RADMIN_SRP_KDF_KEY_LEN]>,
     },
     /// Estabelecido com sucesso.
     Established {
-        session_key: [u8; CONTROL_SESSION_KEY_SIZE],
-        k_full: [u8; RADMIN_SRP_KDF_KEY_LEN],
+        session_key: Zeroizing<[u8; CONTROL_SESSION_KEY_SIZE]>,
+        k_full: Zeroizing<[u8; RADMIN_SRP_KDF_KEY_LEN]>,
     },
     /// Falhou.
     Failed(String),
+}
+
+impl std::fmt::Debug for ControlServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::State1WaitingClientIdentity => {
+                write!(f, "ControlServerState::State1WaitingClientIdentity")
+            }
+            Self::State3WaitingClientEphemeral {
+                username,
+                b_public_bytes,
+                ..
+            } => f
+                .debug_struct("ControlServerState::State3WaitingClientEphemeral")
+                .field("username", username)
+                .field("salt", &"[REDACTED]")
+                .field("verifier", &"[REDACTED]")
+                .field("b_secret", &"[REDACTED]")
+                .field("b_public_bytes_len", &b_public_bytes.len())
+                .finish(),
+            Self::State5WaitingClientProof { a_public_bytes, .. } => f
+                .debug_struct("ControlServerState::State5WaitingClientProof")
+                .field("a_public_bytes_len", &a_public_bytes.len())
+                .field("m1_expected", &"[REDACTED]")
+                .field("m2_proof", &"[REDACTED]")
+                .field("k_full", &"[REDACTED]")
+                .finish(),
+            Self::Established { .. } => f
+                .debug_struct("ControlServerState::Established")
+                .field("session_key", &"[REDACTED]")
+                .field("k_full", &"[REDACTED]")
+                .finish(),
+            Self::Failed(reason) => f
+                .debug_tuple("ControlServerState::Failed")
+                .field(reason)
+                .finish(),
+        }
+    }
 }
 
 impl ControlServerState {
@@ -1082,8 +1223,8 @@ impl ControlServerState {
             } => {
                 username.zeroize();
                 salt.zeroize();
-                verifier.clear();
-                b_secret.clear();
+                verifier.0.clear();
+                b_secret.0.clear();
                 b_public_bytes.zeroize();
             }
             ControlServerState::State5WaitingClientProof {
@@ -1112,9 +1253,20 @@ impl ControlServerState {
 /// Implementação do lado servidor do handshake de controle (usado para testes e emulação).
 pub struct ControlServerSession {
     username: String,
-    password: String,
-    salt: Vec<u8>,
+    password: Zeroizing<String>,
+    salt: Zeroizing<Vec<u8>>,
     state: ControlServerState,
+}
+
+impl std::fmt::Debug for ControlServerSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlServerSession")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("salt", &"[REDACTED]")
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 impl Drop for ControlServerSession {
@@ -1126,14 +1278,14 @@ impl Drop for ControlServerSession {
 impl ControlServerSession {
     /// Cria uma nova sessão de servidor com credenciais fixas e salt gerado.
     pub fn new(username: String, password: String) -> Result<Self, ControlHandshakeError> {
-        let mut salt = [0u8; 16];
-        rand_bytes(&mut salt)
+        let mut salt = Zeroizing::new([0u8; 16]);
+        rand_bytes(&mut *salt)
             .map_err(|e| ControlHandshakeError::CryptoError(format!("falha ao gerar salt: {e}")))?;
 
         Ok(Self {
             username,
-            password,
-            salt: salt.to_vec(),
+            password: Zeroizing::new(password),
+            salt: Zeroizing::new(salt.to_vec()),
             state: ControlServerState::State1WaitingClientIdentity,
         })
     }
@@ -1142,8 +1294,8 @@ impl ControlServerSession {
     pub fn with_salt(username: String, password: String, salt: Vec<u8>) -> Self {
         Self {
             username,
-            password,
-            salt,
+            password: Zeroizing::new(password),
+            salt: Zeroizing::new(salt),
             state: ControlServerState::State1WaitingClientIdentity,
         }
     }
@@ -1164,7 +1316,7 @@ impl ControlServerSession {
     /// Retorna a chave de sessão de 32 bytes se o handshake estiver concluído.
     pub fn session_key(&self) -> Option<[u8; CONTROL_SESSION_KEY_SIZE]> {
         match &self.state {
-            ControlServerState::Established { session_key, .. } => Some(*session_key),
+            ControlServerState::Established { session_key, .. } => Some(**session_key),
             _ => None,
         }
     }
@@ -1238,17 +1390,14 @@ impl ControlServerSession {
                     ControlHandshakeError::CryptoError(format!("falha em BN ctx: {e}"))
                 })?;
 
-                let mut x = compute_srp_x(&self.username, &self.password, &self.salt)?;
+                let x = compute_srp_x(&self.username, &self.password, &self.salt)?;
                 let g_bn = BigNum::from_u32(RADMIN_SRP_GENERATOR as u32).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN g: {e}"))
                 })?;
 
-                let mut v = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN v: {e}"))
-                })?;
+                let mut v = SecretBigNum::new()?;
                 v.mod_exp(&g_bn, &x, &prime_n, &mut ctx)
                     .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em v: {e}")))?;
-                x.clear();
 
                 // 4. Emitir Step 2 + Salt + N + g
                 let item_step2 = encode_item(TAG_STEP, &2u32.to_le_bytes())?;
@@ -1272,15 +1421,11 @@ impl ControlServerSession {
                 let k_bn = BigNum::from_u32(RADMIN_SRP_K).map_err(|e| {
                     ControlHandshakeError::CryptoError(format!("falha em BN k: {e}"))
                 })?;
-                let mut kv = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN kv: {e}"))
-                })?;
+                let mut kv = SecretBigNum::new()?;
                 kv.mod_mul(&k_bn, &v, &prime_n, &mut ctx)
                     .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em kv: {e}")))?;
 
-                let mut gb = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN gb: {e}"))
-                })?;
+                let mut gb = SecretBigNum::new()?;
                 gb.mod_exp(&g_bn, &b_secret, &prime_n, &mut ctx)
                     .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em gb: {e}")))?;
 
@@ -1295,7 +1440,7 @@ impl ControlServerSession {
 
                 self.state = ControlServerState::State3WaitingClientEphemeral {
                     username: received_user,
-                    salt: self.salt.clone(),
+                    salt: Zeroizing::new(self.salt.to_vec()),
                     verifier: v,
                     b_secret,
                     b_public_bytes: b_public_vec,
@@ -1310,8 +1455,8 @@ impl ControlServerSession {
             ControlServerState::State3WaitingClientEphemeral {
                 username,
                 salt,
-                mut verifier,
-                mut b_secret,
+                verifier,
+                b_secret,
                 b_public_bytes,
             } => {
                 let items = decode_items(in_buf)?;
@@ -1359,15 +1504,11 @@ impl ControlServerSession {
                 let (u_bn, _) = compute_srp_u(a_bytes, &b_public_bytes)?;
 
                 // 4. Calcular S = (A * v^u)^b mod N
-                let mut vu = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN vu: {e}"))
-                })?;
+                let mut vu = SecretBigNum::new()?;
                 vu.mod_exp(&verifier, &u_bn, &prime_n, &mut ctx)
                     .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em vu: {e}")))?;
 
-                let mut avu = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN avu: {e}"))
-                })?;
+                let mut avu = SecretBigNum::new()?;
                 avu.mod_mul(&a_public, &vu, &prime_n, &mut ctx)
                     .map_err(|e| {
                         ControlHandshakeError::CryptoError(format!("falha em avu: {e}"))
@@ -1377,22 +1518,17 @@ impl ControlServerSession {
                     return Err(ControlHandshakeError::InvalidPublicEphemeral);
                 }
 
-                let mut s = BigNum::new().map_err(|e| {
-                    ControlHandshakeError::CryptoError(format!("falha em BN S: {e}"))
-                })?;
+                let mut s = SecretBigNum::new()?;
                 s.mod_exp(&avu, &b_secret, &prime_n, &mut ctx)
                     .map_err(|e| ControlHandshakeError::CryptoError(format!("falha em S: {e}")))?;
 
-                let mut s_bytes = pad_bignum_bytes(&s.to_vec(), RADMIN_SRP1536_MODULUS_LEN);
-                s.clear();
-                b_secret.clear();
-                verifier.clear();
+                let s_bytes =
+                    Zeroizing::new(pad_bignum_bytes(&s.to_vec(), RADMIN_SRP1536_MODULUS_LEN));
 
-                let k_full = compute_srp_kdf(&s_bytes);
-                s_bytes.zeroize();
+                let k_full = Zeroizing::new(compute_srp_kdf(&s_bytes));
 
                 let n_vec = prime_n.to_vec();
-                let m1_expected = compute_srp_m1(
+                let m1_expected = Zeroizing::new(compute_srp_m1(
                     &n_vec,
                     RADMIN_SRP_GENERATOR,
                     &username,
@@ -1400,9 +1536,9 @@ impl ControlServerSession {
                     a_bytes,
                     &b_public_bytes,
                     &k_full,
-                );
+                ));
 
-                let m2 = compute_srp_m2(a_bytes, &m1_expected, &k_full);
+                let m2 = Zeroizing::new(compute_srp_m2(a_bytes, &m1_expected, &k_full));
 
                 // 5. Emitir Step 4 + B
                 let item_step4 = encode_item(TAG_STEP, &4u32.to_le_bytes())?;
@@ -1459,20 +1595,20 @@ impl ControlServerSession {
                 // 2. Validar M1 (Tag 0x70)
                 let m1_received = find_item(&items, TAG_PROOF)
                     .ok_or(ControlHandshakeError::MissingRequiredTag { tag: TAG_PROOF })?;
-                if m1_received != m1_expected {
+                if m1_received != *m1_expected {
                     warn!("ControlServer: prova M1 do cliente inválida");
                     return Err(ControlHandshakeError::ProofVerificationFailed);
                 }
 
                 // 3. Emitir Step 6 + M2
                 let item_step6 = encode_item(TAG_STEP, &6u32.to_le_bytes())?;
-                let item_m2 = encode_item(TAG_PROOF, &m2_proof)?;
+                let item_m2 = encode_item(TAG_PROOF, &*m2_proof)?;
 
                 let mut out_buf = Vec::new();
                 out_buf.extend_from_slice(&item_step6);
                 out_buf.extend_from_slice(&item_m2);
 
-                let mut session_key = [0u8; CONTROL_SESSION_KEY_SIZE];
+                let mut session_key = Zeroizing::new([0u8; CONTROL_SESSION_KEY_SIZE]);
                 session_key.copy_from_slice(&k_full[..CONTROL_SESSION_KEY_SIZE]);
 
                 self.state = ControlServerState::Established {
@@ -2059,7 +2195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_control_session_zeroization_on_clear_and_drop() {
+    fn test_control_session_explicit_clear() {
         let username = "alice";
         let password = "SecretPassword123";
 
@@ -2084,14 +2220,14 @@ mod tests {
         client.clear();
         server.clear();
 
-        // Após clear, chaves derivadas foram substituídas por zeros
+        // Após clear(), chaves derivadas foram substituídas por zeros
         if let ControlClientState::Established {
             session_key,
             k_full,
         } = client.state()
         {
-            assert_eq!(*session_key, [0u8; 32]);
-            assert_eq!(*k_full, [0u8; 40]);
+            assert_eq!(**session_key, [0u8; 32]);
+            assert_eq!(**k_full, [0u8; 40]);
         } else {
             panic!("client state should remain Established after clear");
         }
@@ -2101,11 +2237,215 @@ mod tests {
             k_full,
         } = server.state()
         {
-            assert_eq!(*session_key, [0u8; 32]);
-            assert_eq!(*k_full, [0u8; 40]);
+            assert_eq!(**session_key, [0u8; 32]);
+            assert_eq!(**k_full, [0u8; 40]);
         } else {
             panic!("server state should remain Established after clear");
         }
+    }
+
+    #[test]
+    fn test_secret_bignum_raii_clearing() {
+        let raw = [0x5Au8; 32];
+        let mut secret_bn = SecretBigNum::from_slice(&raw).unwrap();
+        assert_eq!(secret_bn.num_bits(), 255);
+
+        // Verificação direta da chamada a clear() que é invocada pelo Drop
+        secret_bn.0.clear();
+        assert_eq!(secret_bn.num_bits(), 0);
+
+        // Verificação de RAII: criação de SecretBigNum em escopo interno e descarte limpo
+        {
+            let _scoped = SecretBigNum::from_slice(&raw).unwrap();
+            // Ao sair do escopo, Drop invoca self.0.clear() e depois BN_free
+        }
+    }
+
+    #[test]
+    fn test_control_client_transition_failure_zeroizes_ephemeral_secrets() {
+        let username = "bob";
+        let password = "SecretPassword456";
+
+        // Falha no Step 2: Parâmetros inválidos transicionam para Failed e descartam segredos
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let _s1 = client.step(None).unwrap();
+            let bad_step2 = encode_item(TAG_STEP, &2u32.to_le_bytes()).unwrap();
+            let res = client.step(Some(&bad_step2));
+            assert!(res.is_err());
+            assert!(matches!(client.state(), ControlClientState::Failed(_)));
+        }
+
+        // Falha no Step 4: Chave pública B inválida (B mod N == 0) transiciona para Failed
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+
+            let mut server =
+                ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+            let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+            let _s3 = client.step(Some(&s2)).unwrap();
+
+            // Client está agora em State4WaitingServerEphemeral segurando a_secret e x_secret
+            assert!(matches!(
+                client.state(),
+                ControlClientState::State4WaitingServerEphemeral { .. }
+            ));
+
+            // Envia Step 4 forjando B = 0 (inválido)
+            let item_step4 = encode_item(TAG_STEP, &4u32.to_le_bytes()).unwrap();
+            let item_bad_b = encode_item(TAG_PUBLIC_EPHEMERAL, &[0u8; 192]).unwrap();
+            let mut bad_s4 = Vec::new();
+            bad_s4.extend_from_slice(&item_step4);
+            bad_s4.extend_from_slice(&item_bad_b);
+
+            let res = client.step(Some(&bad_s4));
+            assert_eq!(res, Err(ControlHandshakeError::InvalidPublicEphemeral));
+            assert!(matches!(client.state(), ControlClientState::Failed(_)));
+        }
+
+        // Falha no Step 6: Prova M2 inválida transiciona para Failed
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let mut server =
+                ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+            let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+            let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+            let s3 = client.step(Some(&s2)).unwrap().buffer_to_send.unwrap();
+            let s4 = server.step(&s3).unwrap().buffer_to_send.unwrap();
+            let _s5 = client.step(Some(&s4)).unwrap();
+
+            // Client está em State6WaitingServerProof segurando m1_proof e k_full
+            assert!(matches!(
+                client.state(),
+                ControlClientState::State6WaitingServerProof { .. }
+            ));
+
+            // Envia M2 corrompido
+            let item_step6 = encode_item(TAG_STEP, &6u32.to_le_bytes()).unwrap();
+            let item_bad_m2 = encode_item(TAG_PROOF, &[0xDE; 20]).unwrap();
+            let mut bad_s6 = Vec::new();
+            bad_s6.extend_from_slice(&item_step6);
+            bad_s6.extend_from_slice(&item_bad_m2);
+
+            let res = client.step(Some(&bad_s6));
+            assert_eq!(res, Err(ControlHandshakeError::ProofVerificationFailed));
+            assert!(matches!(client.state(), ControlClientState::Failed(_)));
+        }
+    }
+
+    #[test]
+    fn test_control_server_transition_failure_zeroizes_ephemeral_secrets() {
+        let username = "charlie";
+        let password = "SecretPassword789";
+
+        // Falha no Step 1: Usuário divergente
+        {
+            let mut server =
+                ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+            let bad_user_bytes = encode_identity("wrong_user");
+            let item_step1 = encode_item(TAG_STEP, &1u32.to_le_bytes()).unwrap();
+            let item_id = encode_item(TAG_IDENTITY, &bad_user_bytes).unwrap();
+            let mut bad_s1 = Vec::new();
+            bad_s1.extend_from_slice(&item_step1);
+            bad_s1.extend_from_slice(&item_id);
+
+            let res = server.step(&bad_s1);
+            assert_eq!(res, Err(ControlHandshakeError::ProofVerificationFailed));
+            assert!(matches!(server.state(), ControlServerState::Failed(_)));
+        }
+
+        // Falha no Step 3: Chave pública A inválida (A = 0)
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let mut server =
+                ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+            let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+            let _s2 = server.step(&s1).unwrap();
+
+            // Server está em State3WaitingClientEphemeral segurando verifier e b_secret
+            assert!(matches!(
+                server.state(),
+                ControlServerState::State3WaitingClientEphemeral { .. }
+            ));
+
+            // Envia Step 3 com A = 0
+            let item_step3 = encode_item(TAG_STEP, &3u32.to_le_bytes()).unwrap();
+            let item_bad_a = encode_item(TAG_PUBLIC_EPHEMERAL, &[0u8; 192]).unwrap();
+            let mut bad_s3 = Vec::new();
+            bad_s3.extend_from_slice(&item_step3);
+            bad_s3.extend_from_slice(&item_bad_a);
+
+            let res = server.step(&bad_s3);
+            assert_eq!(res, Err(ControlHandshakeError::InvalidPublicEphemeral));
+            assert!(matches!(server.state(), ControlServerState::Failed(_)));
+        }
+
+        // Falha no Step 5: Prova M1 inválida
+        {
+            let mut client =
+                ControlClientNegotiator::new(username.to_string(), password.to_string());
+            let mut server =
+                ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+            let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+            let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+            let s3 = client.step(Some(&s2)).unwrap().buffer_to_send.unwrap();
+            let _s4 = server.step(&s3).unwrap();
+
+            // Server está em State5WaitingClientProof segurando m1_expected, m2_proof, k_full
+            assert!(matches!(
+                server.state(),
+                ControlServerState::State5WaitingClientProof { .. }
+            ));
+
+            // Envia Step 5 com M1 adulterado
+            let item_step5 = encode_item(TAG_STEP, &5u32.to_le_bytes()).unwrap();
+            let item_bad_m1 = encode_item(TAG_PROOF, &[0xAA; 20]).unwrap();
+            let mut bad_s5 = Vec::new();
+            bad_s5.extend_from_slice(&item_step5);
+            bad_s5.extend_from_slice(&item_bad_m1);
+
+            let res = server.step(&bad_s5);
+            assert_eq!(res, Err(ControlHandshakeError::ProofVerificationFailed));
+            assert!(matches!(server.state(), ControlServerState::Failed(_)));
+        }
+    }
+
+    #[test]
+    fn test_control_handshake_debug_redacted() {
+        let username = "debug_user";
+        let password = "SuperSecretUnexposedPassword999!";
+
+        let mut client = ControlClientNegotiator::new(username.to_string(), password.to_string());
+        let mut server =
+            ControlServerSession::new(username.to_string(), password.to_string()).unwrap();
+
+        // Verifica que o password não vaza na representação Debug de client e server
+        let client_dbg = format!("{:?}", client);
+        assert!(!client_dbg.contains(password));
+        assert!(client_dbg.contains("[REDACTED]"));
+
+        let server_dbg = format!("{:?}", server);
+        assert!(!server_dbg.contains(password));
+        assert!(server_dbg.contains("[REDACTED]"));
+
+        // Avança até State4 / State3
+        let s1 = client.step(None).unwrap().buffer_to_send.unwrap();
+        let s2 = server.step(&s1).unwrap().buffer_to_send.unwrap();
+        let _s3 = client.step(Some(&s2)).unwrap();
+
+        let client_state_dbg = format!("{:?}", client.state());
+        assert!(client_state_dbg.contains("[REDACTED]"));
+
+        let server_state_dbg = format!("{:?}", server.state());
+        assert!(server_state_dbg.contains("[REDACTED]"));
     }
 
     #[test]
