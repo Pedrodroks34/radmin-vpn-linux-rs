@@ -45,7 +45,7 @@ A investigação adotou técnicas rigorosas de engenharia reversa e análise de 
    - Análise de capturas reais (`radmin_17301.pcap`, `radmin_vm.pcap`, `radmin_vm2.pcap`), reassemblagem de fluxos TCP e medição precisa de tamanhos de quadros, sequenciamento e temporização.
    - Inspeção de pacotes de coordenação transmitidos em texto claro na porta 17351 (ex.: Pacote #5486 em `radmin_vm.pcap` e #686 em `radmin_vm2.pcap`) contendo contêineres TLV primitivos antes da ativação do cipher daquele canal.
 4. **Auditoria Comparativa Cruzada:**
-   - Confrontação linha a linha das estruturas em [`src/protocol/control.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/src/protocol/control.rs) e [`src/protocol/tlv.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/src/protocol/tlv.rs) contra as tabelas oficiais e desmontagem dos binários.
+   - Confrontação linha a linha das estruturas em [`src/protocol/control.rs`](src/protocol/control.rs) e [`src/protocol/tlv.rs`](src/protocol/tlv.rs) contra as tabelas oficiais e desmontagem dos binários.
 
 ---
 
@@ -65,7 +65,7 @@ A investigação adotou técnicas rigorosas de engenharia reversa e análise de 
 
 ## 3. Auditoria Forense da Implementação Atual (`src/protocol/control.rs`)
 
-A inspeção detalhada de [`src/protocol/control.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/src/protocol/control.rs) e seus testes associados revela que a implementação atual foi construída predominantemente a partir de **hipóteses preliminares e testes unitários de round-trip**, sem respaldo nos mecanismos reais de despacho do cliente oficial.
+A inspeção detalhada de [`src/protocol/control.rs`](src/protocol/control.rs) e seus testes associados revela que a implementação atual foi construída predominantemente a partir de **hipóteses preliminares e testes unitários de round-trip**, sem respaldo nos mecanismos reais de despacho do cliente oficial.
 
 ### 3.1 O Problema dos Testes de Round-Trip como Falsa Validação
 No arquivo `src/protocol/control.rs`, os testes unitários (`test_login_message_roundtrip`, `test_login_response_roundtrip`, `test_peer_info_roundtrip`, etc.) validam exclusivamente que:
@@ -623,7 +623,7 @@ Nenhuma evidência estática adicional indica texto ou semântica específica pa
 ### 11.1 Impossibilidade de Decifração Passiva Offline do Tráfego TCP 17301
 Os dados transmitidos nos pacotes #51 (208B), #52 (2576B) e subsequentes na porta 17301 foram criptografados com uma chave AES-256-CBC derivada mutuamente via SRP-6a a partir de expoentes efêmeros $a$ e $b$ gerados aleatoriamente em memória no momento da captura.
 
-Como a chave privada efêmera do cliente e a senha mestre não foram capturadas no momento do tráfego, **é matematicamente impossível decifrar o payload bruto dessas sessões gravadas sem posse das chaves**.
+Como a chave privada efêmera do cliente e a senha mestre não foram capturadas no momento do tráfego, **é computacionalmente inviável nas condições das capturas disponíveis decifrar o payload bruto dessas sessões gravadas sem posse das chaves**.
 
 > [!IMPORTANT]
 > A engenharia reversa das estruturas e vtables em `RvROLClient.dll` suprime quase integralmente essa limitação, permitindo reconstruir as mensagens a partir do código do próprio cliente oficial, em vez de depender exclusivamente da decifração dos PCAPs gravados.
