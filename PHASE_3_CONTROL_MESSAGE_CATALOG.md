@@ -620,7 +620,7 @@ Nenhuma evidência estática adicional indica texto ou semântica específica pa
 
 ## 11. Questões Ainda Não Resolvidas e Bloqueios
 
-### 11.1 Impossibilidade de Decifração Passiva Offline do Tráfego TCP 17301
+### 11.1 Limites da Decifração Passiva Offline do Tráfego TCP 17301
 Os dados transmitidos nos pacotes #51 (208B), #52 (2576B) e subsequentes na porta 17301 foram criptografados com uma chave AES-256-CBC derivada mutuamente via SRP-6a a partir de expoentes efêmeros $a$ e $b$ gerados aleatoriamente em memória no momento da captura.
 
 Como a chave privada efêmera do cliente e a senha mestre não foram capturadas no momento do tráfego, **é computacionalmente inviável nas condições das capturas disponíveis decifrar o payload bruto dessas sessões gravadas sem posse das chaves**.
