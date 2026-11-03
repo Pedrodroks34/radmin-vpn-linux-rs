@@ -2,9 +2,9 @@
 
 **Projeto:** Radmin VPN Linux (`Pedrodroks34/radmin-vpn-linux-rs`)  
 **Branch de trabalho:** `feat/phase-3-control-message-catalog`  
-**Base:** `main` (`81cccc312861ca697518fe8952ac791a5d43b0d3`)  
-**Data da Auditoria:** 03 de novembro de 2026  
-**Status:** Concluído (Documentação e Especificação Técnica)  
+**Base:** `ccb4b4a27579fb7e25ad31e15f9908a4d8431176` (`origin/main`, após configuração de CI do GitHub Actions; base anterior do PR #7: `81cccc312861ca697518fe8952ac791a5d43b0d3`)
+**Data da Auditoria:** 03 de novembro de 2026 (Revisão Corretiva Documental)
+**Status:** Concluído (Especificação Técnica Forense e Rastreabilidade Rigorosa)
 
 ---
 
@@ -15,8 +15,8 @@
 3. [Auditoria Forense da Implementação Atual (`src/protocol/control.rs`)](#3-auditoria-forense-da-implementação-atual-srcprotocolcontrolrs)
 4. [Catálogo de Mensagens Oficiais (`RvROLClient.dll`)](#4-catálogo-de-mensagens-oficiais-rvrolclientdll)
 5. [Catálogo de Tags e Taxonomia TLV Famatech](#5-catálogo-de-tags-e-taxonomia-tlv-famatech)
-6. [Estrutura dos Campos Conhecidos e Regras de Codificação](#6-estrutura-dos-campos-conhecidos-e-regras-de-codificação)
-7. [Fluxos de Login e Troca Pós-Handshake](#7-fluxos-de-login-e-troca-pós-handshake)
+6. [Separação Arquitetural e Rastreabilidade dos Canais (Portas 17301 e 17351)](#6-separação-arquitetural-e-rastreabilidade-dos-canais-portas-17301-e-17351)
+7. [Fluxos de Login e Troca Pós-Handshake na Porta 17301](#7-fluxos-de-login-e-troca-pós-handshake-na-porta-17301)
 8. [Fluxos de Gerenciamento de Redes e Nós](#8-fluxos-de-gerenciamento-de-redes-e-nós)
 9. [Códigos de Status e Tratamento de Erros](#9-códigos-de-status-e-tratamento-de-erros)
 10. [Matriz de Confiança e Rastreabilidade](#10-matriz-de-confiança-e-rastreabilidade)
@@ -28,21 +28,22 @@
 ## 1. Escopo e Metodologia
 
 ### 1.1 Objetivo da Etapa
-Investigar, auditar e formalizar a especificação forense das mensagens trocadas no **canal de controle TCP (porta 17301)** e nos canais de coordenação secundários (porta 17351) do Radmin VPN **após o término bem-sucedido do handshake criptográfico SRP-6a**, quando o canal já se encontra cifrado sob o algoritmo Famatech AES-256-CBC com encadeamento contínuo de IV.
+Investigar, auditar e formalizar a especificação forense das mensagens trocadas no **canal de controle TCP (porta 17301)** e nos canais de coordenação secundários (porta 17351) do Radmin VPN **após o término bem-sucedido do handshake criptográfico SRP-6a**, quando o canal de controle já se encontra cifrado sob o algoritmo Famatech AES-256-CBC com encadeamento contínuo de IV.
 
-O escopo é estritamente **investigativo e documental**, com proibição expressa de implementação prematura de código de produção, de suposições arbitrárias ou de mascaramento de divergências via testes circulares de round-trip.
+O escopo desta entrega é estritamente **investigativo e documental**, com proibição expressa de implementação prematura de código de produção, de suposições arbitrárias ou de mascaramento de divergências via testes circulares de round-trip.
 
 ### 1.2 Metodologia Clean-Room
 A investigação adotou técnicas rigorosas de engenharia reversa e análise de tráfego passiva/ativa:
 1. **Engenharia Reversa Estática de Binários Oficiais:**
    - `RvROLClient.dll` (v2.1.4951, 1.686.392 bytes): módulo cliente da arquitetura ROL (*Radmin Online Service*), responsável pela instanciação de pacotes, serialização TLV, dispatching de callbacks e ciclo de vida de redes.
-   - `RvControlSvc.exe` (1.744.384 bytes): serviço central de controle do Windows, responsável pela tabela global de descritores de propriedades e estado local da VPN.
+   - `RvControlSvc.exe` (1.744.384 bytes): serviço central de controle do Windows, responsável pelo registro dinâmico dos descritores de propriedades e estado local da VPN.
+   - `RvRvpnGui.exe` (1.332.736 bytes): interface gráfica do cliente, contendo a tabela mestre de tradução de códigos de erro de rede para texto legível.
    - `shelper.dll` (978.944 bytes): biblioteca de suporte criptográfico (SRP-6a, KDF e derivação de credenciais via CryptoAPI).
 2. **Reconstrução Simbólica de RTTI e Vtables:**
    - Extração de descritores de tipo MSVC RTTI (`TypeDescriptor`, `CompleteObjectLocator`), permitindo mapear vtables, construtores, destruidores e métodos de serialização para cada pacote cliente e resposta de servidor.
 3. **Análise Forense de Tráfego de Rede (PCAP):**
    - Análise de capturas reais (`radmin_17301.pcap`, `radmin_vm.pcap`, `radmin_vm2.pcap`), reassemblagem de fluxos TCP e medição precisa de tamanhos de quadros, sequenciamento e temporização.
-   - Inspeção de pacotes de coordenação transmitidos em texto claro na porta 17351 (ex.: Pacote #5486 / #686) contendo contêineres TLV primitivos antes da ativação do cipher.
+   - Inspeção de pacotes de coordenação transmitidos em texto claro na porta 17351 (ex.: Pacote #5486 em `radmin_vm.pcap` e #686 em `radmin_vm2.pcap`) contendo contêineres TLV primitivos antes da ativação do cipher daquele canal.
 4. **Auditoria Comparativa Cruzada:**
    - Confrontação linha a linha das estruturas em [`src/protocol/control.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/src/protocol/control.rs) e [`src/protocol/tlv.rs`](file:///home/rhuan/.gemini/antigravity/scratch/radmin-re/repo/src/protocol/tlv.rs) contra as tabelas oficiais e desmontagem dos binários.
 
@@ -52,12 +53,13 @@ A investigação adotou técnicas rigorosas de engenharia reversa e análise de 
 
 | Artefato / Fonte | Tipo | Tamanho / Localização | Descrição e Relevância |
 |---|---|---|---|
-| `RvROLClient.dll` | Binário PE32 (x86) | 1.686.392 bytes | Hierarquia `CAbstractClnPacket`, `CRosPacket`, classes `CLoginPacket`, `CJoinNetworkPacket`, `CManageNetworkPacket`, tabela de salto em `0x1008bb3c`. |
-| `RvControlSvc.exe` | Binário PE32 (x86) | 1.744.384 bytes | Tabela mestre de 723 propriedades TLV em `0x00498fe0` / `0x14e408`, rotinas de atualização de rede `0x41537e`. |
+| `RvROLClient.dll` | Binário PE32 (x86) | 1.686.392 bytes | Hierarquia `CAbstractClnPacket`, `CRosPacket`, classes `CLoginPacket`, `CJoinNetworkPacket`, `CManageNetworkPacket`, tabela de salto em `0x1008bb3c`, gerador TLV de anúncio em `0x100162d0` e tratador em `0x10015bd0`. |
+| `RvControlSvc.exe` | Binário PE32 (x86) | 1.744.384 bytes | Tabela mestre de registro de 744 descritores de propriedades TLV através de `call 0x4aec20`, rotinas de atualização de rede `0x41537e`. |
+| `RvRvpnGui.exe` | Binário PE32 (x86) | 1.332.736 bytes | Tabela de salto em `0x004ed284` e tabela de tradução em `0x004ed2e0` (códigos 1002 a 1037) com strings oficiais de erro de rede. |
 | `shelper.dll` | Binário PE32 (x86) | 978.944 bytes | Rotina de hashing de senhas `0x10065790` (CryptoAPI `CALG_SHA1`), primitivas do handshake SRP-6a. |
 | `radmin_17301.pcap` | Captura PCAP-NG | 30.596 bytes (85 pacotes) | Tráfego TCP na porta 17301 (fluxos 49494 e 49493 para `148.113.190.78` e `198.244.203.247`), cobrindo handshake completo e sequência inicial de pacotes cifrados. |
-| `radmin_vm.pcap` | Captura PCAP-NG | 21.205.260 bytes (12.441 pacotes) | Captura abrangente de máquina virtual Windows executando o cliente oficial, contendo fluxos 17301, 17351, STUN e Teredo. |
-| `radmin_vm2.pcap` | Captura PCAP-NG | 196.304 bytes | Captura de validação contendo o quadro TLV desprotegido #686 (288 bytes úteis). |
+| `radmin_vm.pcap` | Captura PCAP-NG | 21.205.260 bytes (12.441 pacotes) | Captura abrangente de máquina virtual Windows, cobrindo porta 17301 (cifrada), porta 17351 (quadros #5486 e #5487 desprotegidos), STUN e Teredo. |
+| `radmin_vm2.pcap` | Captura PCAP-NG | 196.304 bytes | Captura de validação contendo o quadro TLV desprotegido #686 (288 bytes úteis na porta 17351). |
 
 ---
 
@@ -84,7 +86,7 @@ Login {
 - **Evidência no binário:**
   - `0x010001d8` (`TAG_CLIENT_VERSION`): CONFIRMADO na tabela de propriedades de `RvControlSvc.exe` (`UINT32`).
   - `0x010001db` (`TAG_MACHINE_ID`): CONFIRMADO na tabela (`UINT32`).
-  - `0x010001df` (`TAG_SESSION_TOKEN`): **INCORRETO**. No binário oficial (`RvControlSvc.exe` e `RvROLClient.dll`), a tag `0x010001df` corresponde a `PROP_NETWORK_STATUS` (código de status de rede / conexão), e **não** a um token de sessão.
+  - `0x010001df` (`TAG_SESSION_TOKEN`): **INCORRETO**. No binário oficial (`RvControlSvc.exe` e `RvROLClient.dll`), a tag `0x010001df` corresponde a `PROP_NETWORK_STATUS` (código de status operacional / conexão), e **não** a um token de sessão.
 - **Evidência no cliente oficial:** Em `RvROLClient.dll`, a classe oficial de login é `CLoginPacket` (vtable `0x1011462c`, construtor `0x10017ec0`). Ela herda de `CAbstractClnPacket`, registra explicitamente o identificador de comando `0x14` na Tag `0x0100031f` e seta as propriedades `0x1286`, `0x01000377` e `0x122f`.
 - **Ordem e Endianness:** Tag e Length em Big-Endian no wire (comprovado no PCAP).
 - **Classificação:** **PARCIAL / DIVERGENTE DO OFICIAL**.
@@ -100,7 +102,7 @@ LoginResponse {
 }
 ```
 - **Evidência no binário:**
-  - `0x010001df`: Código de status de resposta (`0x0` = Sucesso), não token de sessão.
+  - `0x010001df`: Código de status de resposta (`0x0` = Sucesso, ou `0x2` = Aprovado), não token de sessão.
   - `0x010001de`: Tag genérica interna. A propriedade oficial para o IP virtual atribuído à interface VPN (`26.x.x.x`) é **`0x010001ea`** (`PROP_VIRTUAL_IP`).
   - `0x02000008`: Tag de controle interno de engine. A propriedade oficial para o ID de nó/peer é **`0x020001e2`** (`PROP_NODE_ID`).
 - **Evidência no cliente oficial:** A resposta de login do servidor instancia `CRosPktLoginComplete` (vtable `0x101187b4`, tratador `0x1008b2f8`), identificada pelo ID de comando de servidor **`0x15`** na Tag `0x01000320`.
@@ -269,21 +271,33 @@ Conforme confirmado no Pacote #5486 (`radmin_vm.pcap`) e no Pacote #686 (`radmin
 +---------------------------------------------------------------+
 ```
 
-### 5.2 Taxonomia de Tipos (Byte Superior da Tag)
-A tabela global de 723 descritores em `RvControlSvc.exe` (`0x00498fe0` / `0x14e408`) estabelece:
+---
 
-| Prefixo da Tag | Categoria de Tipo | Qtd. Tags | Descrição e Representação |
+### 5.2 Taxonomia de Tipos e Contagem Real de Descritores
+A inspeção exaustiva do binário `RvControlSvc.exe` através de todas as chamadas à rotina estática de registro `call 0x4aec20` contabilizou **exatamente 744 descritores únicos de propriedades TLV**.
+
+A discrepância histórica observada em relatórios preliminares da rodada 2 (onde o texto mencionava "723 registros", enquanto a tabela apresentava soma de 715) foi integralmente elucidada:
+- A tabela antiga omitia 3 categorias de tipos suportadas pela arquitetura Famatech: `0x05` (Float), `0x06` (Double) e `0x0A` (DateTime).
+- As categorias inteiras `0x01` (+3), `0x02` (+1) e `0x03` (+3) estavam levemente subcontadas.
+
+A distribuição real verificada no binário `RvControlSvc.exe` é:
+
+| Prefixo da Tag | Categoria de Tipo | Qtd. Tags Únicas | Descrição e Representação Interna |
 |---|---|---|---|
-| `0x01` | **`UINT32`** | 374 | Inteiro de 4 bytes sem sinal em Big-Endian. |
-| `0x02` | **`UINT64`** | 109 | Inteiro de 8 bytes sem sinal em Big-Endian (IDs, timestamps). |
-| `0x03` | **`INT32` / ID** | 98 | Inteiro de 4 bytes com sinal (contadores, referências numéricas). |
-| `0x04` | **`BOOL`** | 35 | Booleano representado em 1 byte ou 4 bytes (`0`=falso, `1`=verdadeiro). |
+| `0x01` | **`UINT32`** | 377 | Inteiro de 4 bytes sem sinal em Big-Endian no wire. |
+| `0x02` | **`UINT64`** | 110 | Inteiro de 8 bytes sem sinal em Big-Endian (IDs de rede, carimbos Epoch). |
+| `0x03` | **`INT32` / ID** | 101 | Inteiro de 4 bytes com sinal (referências numéricas, contadores). |
+| `0x04` | **`BOOL`** | 35 | Booleano representado em 1 ou 4 bytes (`0`=falso, `1`=verdadeiro). |
+| `0x05` | **`FLOAT`** | 5 | Ponto flutuante de precisão simples (IEEE 754 de 32 bits). |
+| `0x06` | **`DOUBLE`** | 3 | Ponto flutuante de precisão dupla (IEEE 754 de 64 bits). |
 | `0x08` | **`COMPOUND`** | 4 | Estrutura binária composta / flags compactadas. |
-| `0x09` | **`BINARY / BLOB`** | 22 | Buffer binário opaco (chaves públicas RSA, hashes de senha). |
+| `0x09` | **`BINARY / BLOB`** | 22 | Buffer binário opaco (chaves públicas RSA, hashes de autenticação). |
+| `0x0A` | **`DATETIME`** | 14 | Estrutura temporal ou carimbo de data/hora estendido. |
 | `0x0B` | **`STRING_UTF8`** | 51 | Cadeia de caracteres codificada em UTF-8 (sem terminação nula no fio). |
 | `0x0C` | **`OBJECT`** | 1 | Registro aninhado serializado. |
-| `0x0D` | **`LIST / ARRAY`** | 7 | Lista sequencial homogênea de registros. |
+| `0x0D` | **`LIST / ARRAY`** | 7 | Coleção contígua de elementos homogêneos (ex.: lista de nós). |
 | `0x0E` | **`MAP / CONTAINER`**| 14 | Contêiner associativo chave-valor. |
+| **Total** | — | **744** | **Soma exata das 13 categorias ($377+110+101+35+5+3+4+22+14+51+1+7+14 = 744$).** |
 
 ---
 
@@ -293,15 +307,15 @@ A tabela global de 723 descritores em `RvControlSvc.exe` (`0x00498fe0` / `0x14e4
 |---|---|---|---|---|
 | `0x0100031f` | `PROP_CLIENT_PACKET_ID` | `UINT32` | `RvROLClient.dll` `0x10016614` | ID do pacote emitido pelo cliente (`0x04`, `0x14`, `0x27`, `0x2b`, `0x34`). |
 | `0x01000320` | `PROP_SERVER_PACKET_ID` | `UINT32` | `RvROLClient.dll` `0x1008a7d5` | ID do pacote emitido pelo servidor (`0x15`, `0x25`, `0x26`, `0x28`, `0x29`, `0x2a`). |
-| `0x010001df` | `PROP_NETWORK_STATUS` | `UINT32` | `RvControlSvc.exe` `0x498fe0`, PCAP #5486 | Código de status de rede (`0`=Sucesso, `1`=Erro de Senha, `2`=Não Encontrada). |
-| `0x0100032b` | `PROP_PROTOCOL_CAPS` | `UINT32` | `RvROLClient.dll`, PCAP #5486 | Bitmask de capacidades e extensões do protocolo Radmin. |
-| `0x010001e3` | `PROP_NET_CONN_ATTR` | `UINT32` | `RvControlSvc.exe` `0x41537e`, `RvROLClient.dll` | Atributos de conectividade e roteamento da rede (NÃO contagem de membros). |
+| `0x010001df` | `PROP_NETWORK_STATUS` | `UINT32` | `RvControlSvc.exe`, `RvROLClient.dll` `0x100162f8` / `0x10015bf9` | Código de status de conexão (`1`=Iniciando, `2`=Aprovado/Ativo). |
+| `0x0100032b` | `PROP_PROTOCOL_CAPS` | `UINT32` | `RvROLClient.dll` `0x10016311`, PCAP #5486 | Bitmask de capacidades e extensões do protocolo Radmin. |
+| `0x010001e3` | `PROP_NET_CONN_ATTR` | `UINT32` | `RvControlSvc.exe` `0x41537e`, `RvROLClient.dll` | Atributos operacionais de rede (NÃO contagem de membros). |
 | `0x010001ea` | `PROP_VIRTUAL_IP` | `UINT32` | `RvControlSvc.exe`, `RvROLClient.dll` `0x100412a0` | Endereço IPv4 virtual atribuído à interface VPN (`26.0.0.0/8`). |
 | `0x020001e1` | `PROP_NETWORK_ID` | `UINT64` | `RvControlSvc.exe`, `RvROLClient.dll` | Identificador único de 64 bits da rede virtual. |
 | `0x020001e2` | `PROP_NODE_ID` | `UINT64` | `RvControlSvc.exe`, `RvROLClient.dll` | Identificador exclusivo de 64 bits do nó/peer. |
 | `0x0200025e` | `PROP_NODE_LAST_SEEN` | `UINT64` | `RvControlSvc.exe` | Timestamp Epoch de 64 bits do último contato (*heartbeat*) do peer. |
 | `0x040001e7` | `PROP_IS_ONLINE` | `BOOL` | `RvControlSvc.exe` | Indicador booleano de presença online do nó. |
-| `0x090001ca` | `PROP_RSA_PUBKEY_BLOB`| `BLOB` | PCAP #5486 / #686, `RvControlSvc.exe` | Chave pública RSA-2048 empacotada do cliente (256 bytes). |
+| `0x090001ca` | `PROP_RSA_PUBKEY_BLOB`| `BLOB` | PCAP #5486 / #686, `RvROLClient.dll` `0x10016328` | Chave pública RSA-2048 empacotada do cliente (256 bytes). |
 | `0x090001cd` | `PROP_AUTH_HASH` | `BLOB` | `shelper.dll` `0x10065790` | Digest de 20 bytes do hash SHA-1 da senha de rede. |
 | `0x09000201` | `PROP_ENDPOINT_CANDIDATES`| `BLOB` | `RvROLClient.dll` | Tuplas serializadas de IP público/local e portas STUN para descoberta P2P. |
 | `0x0b0001dc` | `PROP_NETWORK_NAME` | `STRING_UTF8`| `RvControlSvc.exe`, `RvROLClient.dll` | Nome legível em UTF-8 da rede virtual Radmin. |
@@ -309,64 +323,112 @@ A tabela global de 723 descritores em `RvControlSvc.exe` (`0x00498fe0` / `0x14e4
 
 ---
 
-## 6. Estrutura dos Campos Conhecidos e Regras de Codificação
+## 6. Separação Arquitetural e Rastreabilidade dos Canais (Portas 17301 e 17351)
 
-### 6.1 Endianness e Alinhamento
-- **Campos de Controle TLV:** Length (32 bits) e Tag (32 bits) são codificados estritamente em **Big-Endian (Network Byte Order)**.
-- **Valores Inteiros (`UINT32` / `UINT64`):** Os valores transmitidos no payload TLV são codificados em **Big-Endian**. A arquitetura x86 Windows os converte para Little-Endian internamente após a leitura.
-- **Strings UTF-8:** Codificadas sem caractere nulo terminal no fio. O tamanho indicado no campo Length corresponde exatamente à contagem de bytes UTF-8 válidos.
-- **Blobs Binários:** Bytes opacos contíguos de tamanho idêntico ao campo Length (ex.: 256 bytes para chave RSA, 20 bytes para hash SHA-1).
-
-### 6.2 Estrutura Exata do Pacote de Registro Desprotegido (PCAP #5486 / #686)
-No fluxo de coordenação secundário (porta 17351), o cliente emite o pacote preliminar antes da ativação da cifra. O payload útil consiste exatamente em:
+Para evitar qualquer confusão de análise entre o canal de controle principal e o canal de coordenação secundário, documenta-se a separação estrita de cada fluxo:
 
 ```
-[0x00..0x03] 00 00 01 20 -> Tamanho do Frame Externo = 288 bytes
++-----------------------------------------------------------------------------------------------------+
+| CANAL DE CONTROLE PRINCIPAL (TCP 17301)                                                            |
+| Finalidade: Handshake SRP-6a mútuo, negociação de chave mestra e controle cifrado da VPN           |
+| Cifração: Plaintext durante SRP-6a (#32..#50) -> 100% Cifrado AES-256-CBC após Pacote #50          |
++-----------------------------------------------------------------------------------------------------+
+
++-----------------------------------------------------------------------------------------------------+
+| CANAL SECUNDÁRIO DE COORDENAÇÃO (TCP 17351)                                                         |
+| Finalidade: Anúncio de identidade preliminar do nó (P2P / Relay) com chave RSA pública             |
+| Cifração: Mensagem inicial em TEXTO CLARO (#5486 / #686) -> Cifração do canal secundário posterior |
++-----------------------------------------------------------------------------------------------------+
+```
+
+### 6.1 Canal A: Controle Primário (Porta 17301)
+- **Arquivo PCAP de origem:** `radmin_17301.pcap` (filtrado) e `radmin_vm.pcap` (completo).
+- **Endereços e Portas (Fluxo 1):**
+  - Origem: `192.168.122.77:49494` (Cliente Windows)
+  - Destino: `148.113.190.78:17301` (Servidor Oficial ROL)
+- **Endereços e Portas (Fluxo 2):**
+  - Origem: `192.168.122.77:49493` (Cliente Windows)
+  - Destino: `198.244.203.247:17301` (Servidor Oficial ROL Secundário)
+- **Estado Criptográfico:**
+  - Pacotes #32 a #50: Handshake SRP-6a em texto claro (versão 3, salt, $A$, $B$, $M_1$, $M_2$).
+  - Pacotes #51 em diante: **100% Cifrado sob Famatech AES-256-CBC**.
+- **Nota fundamental:** Neste canal **não existe quadro de 288 bytes em texto claro**. Todo tráfego posterior ao handshake é encapsulado com prefixo de tamanho de 4 bytes e payload estritamente cifrado (208B, 2576B, 160B, 432B, etc.).
+
+---
+
+### 6.2 Canal B: Coordenação Secundária (Porta 17351)
+- **Arquivos PCAP de origem:** `radmin_vm.pcap` (Pacotes #5486 e #5487) e `radmin_vm2.pcap` (Pacote #686).
+- **Endereços e Portas:**
+  - Origem: `192.168.122.77:49497` (Cliente Windows)
+  - Destino: `45.162.230.182:17351` (Endpoint de Coordenação / Relay)
+- **Estado Criptográfico:** **Em texto claro** (etapa de anúncio anterior à ativação da cifra neste canal secundário).
+- **Rastreabilidade no Binário:** Gerado pela função `0x100162d0` em `RvROLClient.dll` e avaliado pela função `0x10015bd0`.
+
+#### Estrutura Exata do Pacote de Anúncio (#5486 em `radmin_vm.pcap` / #686 em `radmin_vm2.pcap`):
+- Direção: Cliente $\rightarrow$ Servidor
+- Tamanho no TCP: 292 bytes (4 bytes de prefixo de comprimento + 288 bytes úteis TLV):
+```
+[0x00..0x03] 00 00 01 20 -> Comprimento do Quadro = 288 bytes (0x0120)
 
 -- Registro TLV 1 (12 bytes) --
 [0x04..0x07] 00 00 00 04 -> Length = 4 bytes
 [0x08..0x0b] 01 00 01 df -> Tag = 0x010001df (PROP_NETWORK_STATUS)
-[0x0c..0x0f] 00 00 00 01 -> Value = 1 (Status: Inicializando/Conectando)
+[0x0c..0x0f] 00 00 00 01 -> Value = 1 (Status: Solicitando / Inicializando)
 
 -- Registro TLV 2 (12 bytes) --
 [0x10..0x13] 00 00 00 04 -> Length = 4 bytes
 [0x14..0x17] 01 00 03 2b -> Tag = 0x0100032b (PROP_PROTOCOL_CAPS)
-[0x18..0x1b] 00 00 00 02 -> Value = 2 (Capacidades negociadas)
+[0x18..0x1b] 00 00 00 02 -> Value = 2 (Bitmask de capacidades do cliente)
 
 -- Registro TLV 3 (264 bytes) --
-[0x1c..0x1f] 00 00 01 00 -> Length = 256 bytes (0x100)
+[0x1c..0x1f] 00 00 01 00 -> Length = 256 bytes (0x0100)
 [0x20..0x23] 09 00 01 ca -> Tag = 0x090001ca (PROP_RSA_PUBKEY_BLOB)
 [0x24..0x123] [256 bytes da Chave Pública RSA-2048 do Nó]
 ```
 
-Essa comprovação elimina qualquer ambiguidade sobre a ordem dos campos: **Length antecede Tag, e Tag antecede Value**.
+#### Estrutura Exata da Resposta de Confirmação (#5487 em `radmin_vm.pcap`):
+- Direção: Servidor $\rightarrow$ Cliente
+- Tamanho no TCP: 16 bytes (4 bytes de prefixo de comprimento + 12 bytes úteis TLV):
+```
+[0x00..0x03] 00 00 00 0c -> Comprimento do Quadro = 12 bytes (0x000c)
+
+-- Registro TLV 1 (12 bytes) --
+[0x04..0x07] 00 00 00 04 -> Length = 4 bytes
+[0x08..0x0b] 01 00 01 df -> Tag = 0x010001df (PROP_NETWORK_STATUS)
+[0x0c..0x0f] 00 00 00 02 -> Value = 2 (Status: Confirmado / Aprovado)
+```
+
+Essa comprovação estabelece a ordem dos campos sem qualquer hipótese: **Length antecede Tag, e Tag antecede Value**.
 
 ---
 
-## 7. Fluxos de Login e Troca Pós-Handshake
+## 7. Fluxos de Login e Troca Pós-Handshake na Porta 17301
 
 ### 7.1 Sequência Temporal Observada em `radmin_17301.pcap`
-A análise temporal do fluxo TCP entre o cliente (`192.168.122.77:49494`) e o servidor de controle oficial (`148.113.190.78:17301`) documenta com precisão os quadros pós-handshake:
+A medição de comprimento de quadros TCP no fluxo principal (`192.168.122.77:49494 -> 148.113.190.78:17301`) documenta os seguintes quadros determinísticos:
 
-| Pkt # | Direção | Comprimento TCP | Payload Cifrado | Faixa Plaintext | Classificação e Correspondência Funcional |
+| Pkt # | Direção | Comprimento TCP | Payload Cifrado | Faixa Plaintext | Status de Validação e Atribuição Funcional |
 |---|---|---|---|---|---|
-| #32..#50 | C $\leftrightarrow$ S | Vários | Handshake SRP-6a | Texto claro | Conexão TCP, versão 3, salt, $A$, $B$, $M_1$, $M_2$. |
-| **#51** | **C $\rightarrow$ S** | **212 B** | **208 B** (`0x00d0`) | **184 – 200 B** | **`CLoginPacket` (Command ID `0x14`):** Registro de instalação, ID da máquina, capacidades e atributos de sessão. |
-| **#52** | **S $\rightarrow$ C** | **2580 B** | **2576 B** (`0x0a10`) | **2552 – 2568 B** | **`CRosPktLoginComplete` + `CRosPktNetworks`:** Confirmação de login e despejo completo do catálogo de redes e peers. |
-| **#53** | **S $\rightarrow$ C** | **164 B** | **160 B** (`0x00a0`) | **136 – 152 B** | **Mensagem de Estado de Conexão:** Confirmação operacional de parâmetros de roteamento. |
-| **#55** | **C $\rightarrow$ S** | **436 B** | **432 B** (`0x01b0`) | **408 – 424 B** | **Confirmação de Nós / Endpoints Locais:** Publicação de candidatos de transporte do cliente. |
-| **#58** | **S $\rightarrow$ C** | **388 B** | **384 B** (`0x0180`) | **360 – 376 B** | **Sincronização de Estado:** Atualização de peers concorrentes. |
-| **#59** | **C $\rightarrow$ S** | **388 B** | **384 B** (`0x0180`) | **360 – 376 B** | **Sincronização de Estado:** Eco de validação de estado. |
-| **#62** | **S $\rightarrow$ C** | **164 B** | **160 B** (`0x00a0`) | **136 – 152 B** | **Notificação de Keepalive / Timer:** Ajuste de intervalo. |
-| **#63** | **S $\rightarrow$ C** | **244 B** | **240 B** (`0x00f0`) | **216 – 232 B** | **Fechamento de Negociação:** Conexão estabilizada em repouso. |
+| #32..#50 | C $\leftrightarrow$ S | Vários | Handshake SRP-6a | Texto claro | **CONFIRMADO** (Handshake SRP-6a mútuo completo). |
+| **#51** | **C $\rightarrow$ S** | **212 B** | **208 B** (`0x00d0`) | **184 – 200 B** | **HIPÓTESE:** `CLoginPacket` (Command ID `0x14`). |
+| **#52** | **S $\rightarrow$ C** | **2580 B** | **2576 B** (`0x0a10`) | **2552 – 2568 B** | **HIPÓTESE:** `CRosPktLoginComplete` e/ou `CRosPktNetworks`. |
+| **#53** | **S $\rightarrow$ C** | **164 B** | **160 B** (`0x00a0`) | **136 – 152 B** | **HIPÓTESE:** Parâmetros de roteamento / ACK de estado. |
+| **#55** | **C $\rightarrow$ S** | **436 B** | **432 B** (`0x01b0`) | **408 – 424 B** | **HIPÓTESE:** Endpoints locais / candidatos STUN (`0x09000201`). |
+| **#58** | **S $\rightarrow$ C** | **388 B** | **384 B** (`0x0180`) | **360 – 376 B** | **HIPÓTESE:** Sincronização periódica de peers. |
+| **#59** | **C $\rightarrow$ S** | **388 B** | **384 B** (`0x0180`) | **360 – 376 B** | **HIPÓTESE:** Confirmação de sincronização de peers. |
+| **#62** | **S $\rightarrow$ C** | **164 B** | **160 B** (`0x00a0`) | **136 – 152 B** | **HIPÓTESE:** Notificação de intervalo de keepalive. |
+| **#63** | **S $\rightarrow$ C** | **244 B** | **240 B** (`0x00f0`) | **216 – 232 B** | **HIPÓTESE:** Fechamento de negociação de sessão. |
 
-> [!NOTE]
-> **Consistência Determinística Inter-Sessões:**
-> No segundo fluxo capturado (`radmin_17301.pcap`, porta 49493 para o servidor secundário `198.244.203.247`), a mesma sequência ocorre com **tamanhos idênticos**: Pacote #61 com 208B cifrados, Pacote #65-66 com 2576B cifrados, Pacote #67 com 160B e Pacote #69 com 432B.
+> [!IMPORTANT]
+> **Distinção entre Fato Comprovado e Inferência de Fluxo (Item 3 da Auditoria):**
+> 1. **Confirmado por Engenharia Reversa Estática:** No binário `RvROLClient.dll`, existem as classes `CLoginPacket` (vtable `0x1011462c`), `CRosPktLoginComplete` (vtable `0x101187b4`, tratador `0x1008b2f8`) e `CRosPktNetworks` (vtable `0x10118850`, tratador `0x1008b4f0`).
+> 2. **Confirmado por PCAP:** O cliente emite 208B cifrados no Pacote #51 e o servidor responde 2576B cifrados no Pacote #52.
+> 3. **Ligação entre as Classes e os Pacotes Cifrados (208B / 2576B):** **CLASSIFICADA COMO HIPÓTESE**.
+> Como o tráfego da porta 17301 encontra-se cifrado sob AES-256-CBC e não pôde ser decifrado offline sem posse das chaves efêmeras, **não é permitido afirmar categoricamente que o quadro de 2576B é `CRosPktNetworks` apenas pelo seu tamanho**. Essa atribuição é uma inferência contextual altamente plausível decorrente da máquina de estados do protocolo, mas permanece pendente de confirmação via captura dinâmica em ambiente controlado.
 
 ---
 
-### 7.2 Diagrama de Sequência do Canal de Controle
+### 7.2 Diagrama de Sequência Hipotético do Canal de Controle
 
 ```mermaid
 sequenceDiagram
@@ -374,25 +436,26 @@ sequenceDiagram
     actor C as Cliente Radmin / Rust
     participant S as Servidor de Controle ROL (17301)
 
-    Note over C,S: Handshake Famatech SRP-6a Concluído (Chave AES-256-CBC Derivada)
+    Note over C,S: Handshake Famatech SRP-6a Concluído (CONFIRMADO)
+    Note over C,S: Canal 100% Cifrado sob Famatech AES-256-CBC
     
     rect rgb(240, 248, 255)
-    Note over C,S: Fase 1: Registro e Concessão de Acesso
-    C->>S: Quadro Cifrado (208 B) — CLoginPacket<br/>- 0x0100031f: Command ID = 0x14 (Login)<br/>- 0x010001d8: ClientVersion<br/>- 0x010001db: MachineID<br/>- 0x01000377: Caps / Flags
-    S-->>C: Quadro Cifrado (2576 B) — CRosPktLoginComplete + CRosPktNetworks<br/>- 0x01000320: Command ID = 0x15 (LoginComplete) / 0x26 (Networks)<br/>- 0x010001df: StatusCode (0 = Sucesso)<br/>- 0x010001ea: AssignedVirtualIP (26.x.x.x)<br/>- 0x0d0001e4: Lista completa de Redes e Membros
-    S-->>C: Quadro Cifrado (160 B) — Parâmetros Operacionais de Rede
+    Note over C,S: Fase 1: Registro e Concessão de Acesso (HIPÓTESE de Mapeamento)
+    C->>S: Pacote #51 (208 B Cifrados) — Inferido: CLoginPacket<br/>- 0x0100031f: Command ID = 0x14 (Login)<br/>- 0x010001d8: ClientVersion<br/>- 0x010001db: MachineID
+    S-->>C: Pacote #52 (2576 B Cifrados) — Inferido: CRosPktLoginComplete + CRosPktNetworks<br/>- 0x01000320: Command ID = 0x15 / 0x26<br/>- Despejo do catálogo de redes e peers
+    S-->>C: Pacote #53 (160 B Cifrados) — Inferido: Parâmetros Operacionais
     end
 
     rect rgb(255, 250, 240)
-    Note over C,S: Fase 2: Publicação de Endpoints Locais e P2P
-    C->>S: Quadro Cifrado (432 B) — Endpoints Locais<br/>- 0x09000201: Candidatos STUN / IPs Locais
-    S-->>C: Quadro Cifrado (384 B) — Sincronização de Peers
-    C->>S: Quadro Cifrado (384 B) — ACK de Sincronização
+    Note over C,S: Fase 2: Publicação de Endpoints Locais e P2P (HIPÓTESE)
+    C->>S: Pacote #55 (432 B Cifrados) — Inferido: Candidatos de Transporte P2P
+    S-->>C: Pacote #58 (384 B Cifrados) — Inferido: Sincronização de Peers
+    C->>S: Pacote #59 (384 B Cifrados) — Inferido: ACK de Sincronização
     end
 
     rect rgb(245, 255, 250)
     Note over C,S: Fase 3: Manutenção e Keepalive Periódico
-    loop A cada intervalo configurado (Heartbeat)
+    loop A cada intervalo de Heartbeat
         C->>S: CHeartbeatPacket (Command ID = 0x04)
         S-->>C: ACK de Heartbeat
     end
@@ -403,49 +466,91 @@ sequenceDiagram
 
 ## 8. Fluxos de Gerenciamento de Redes e Nós
 
-### 8.1 Ingresso em Rede (`ROLClient_JoinNetwork`)
+### 8.1 Ingresso em Rede (`CJoinNetworkPacket`)
 Para ingressar em uma rede virtual:
-1. O usuário fornece o nome da rede (`"LAN_Gaming"`) e a senha (`"secret"`).
-2. O subsistema criptográfico calcula o hash digest de 20 bytes via SHA-1:
+1. O subsistema criptográfico calcula o hash digest de 20 bytes via SHA-1 (`CALG_SHA1 = 0x8004` em `shelper.dll` `0x10065790`):
    $$\text{Hash} = \text{SHA-1}(\text{password\_utf8})$$
-3. O cliente constrói um `CJoinNetworkPacket` (Command ID `0x27`):
-   - `0x0100031f`: `0x00000027`
+2. O cliente constrói um `CJoinNetworkPacket` (vtable `0x101145e0`, construtor `0x10017950`):
+   - `0x0100031f`: `0x00000027` (Command ID `0x27` / 39)
    - `0x0b0001dc`: String UTF-8 com o nome da rede.
    - `0x090001cd`: Digest de 20 bytes de `PROP_AUTH_HASH`.
    - `0x0100032b`: Bitmask de capacidades do cliente.
-4. O servidor avalia a credencial e responde com `CRosPktJoinNetwork` (`0x28`) ou `CRosPktJoinApproved` (`0x2a`):
-   - Se aprovado: retorna `PROP_NETWORK_STATUS = 0`, `PROP_NETWORK_ID` (uint64) e `PROP_VIRTUAL_IP` (IPv4 virtual).
-   - Se rejeitado: retorna `PROP_NETWORK_STATUS != 0` com o respectivo código de erro.
+3. O servidor avalia a credencial e responde através da tabela de despacho (`0x1008bb3c`):
+   - Confirmação preliminar: `CRosPktJoinNetwork` (Command ID `0x28` / 40, vtable `0x10118718`).
+   - Aprovação com atribuição de IP virtual: `CRosPktJoinApproved` (Command ID `0x2a` / 42, vtable `0x10118c2c`).
 
 ### 8.2 Gerenciamento Administrativo (`CManageNetworkPacket`)
-As operações de criação de rede, saída voluntária e exclusão são unificadas no pacote `CManageNetworkPacket` (Command ID `0x34`):
-- O código de sub-opção é parametrizado em campos TLV internos.
-- O servidor confirma através de `CRosPktManageNetReply` (Command ID `0x25`).
+As operações administrativas (criar rede, sair de rede ou excluir rede) são encapsuladas em `CManageNetworkPacket` (vtable `0x101146cc`, construtor `0x10018210`):
+- `0x0100031f`: `0x00000034` (Command ID `0x34` / 52)
+- O servidor confirma a operação através de `CRosPktManageNetReply` (Command ID `0x25` / 37, vtable `0x1011881c`).
 
-### 8.3 Sincronização de Peers e Descoberta P2P
-Cada membro recebido no catálogo de nós (`CRosPktNetworks`) contém:
+### 8.3 Propriedades de Peers na Sincronização de Nós (`CRosPktNetworks`)
+Cada registro de peer recebido no contêiner de nós contém:
 - **`0x020001e2` (`PROP_NODE_ID`):** Identificador exclusivo do peer (64 bits).
-- **`0x010001ea` (`PROP_VIRTUAL_IP`):** Endereço IPv4 virtual no bloco `26.0.0.0/8`.
-- **`0x0b0001eb` (`PROP_PEER_ALIAS`):** Hostname / nome de usuário em UTF-8.
+- **`0x010001ea` (`PROP_VIRTUAL_IP`):** Endereço IPv4 virtual no espaço `26.0.0.0/8`.
+- **`0x0b0001eb` (`PROP_PEER_ALIAS`):** Hostname / apelido em UTF-8.
 - **`0x040001e7` (`PROP_IS_ONLINE`):** Booleano indicando presença ativa nos servidores ROL.
 - **`0x0200025e` (`PROP_NODE_LAST_SEEN`):** Carimbo Epoch de 64 bits.
-- **`0x09000201` (`PROP_ENDPOINT_CANDIDATES`):** Lista de tuplas de transporte para tentativa de NAT hole punching direto.
+- **`0x09000201` (`PROP_ENDPOINT_CANDIDATES`):** Buffer contendo tuplas de transporte para tentativa de NAT hole punching direto.
 
 ---
 
 ## 9. Códigos de Status e Tratamento de Erros
 
-A inspeção do método de tratamento de retorno em `RvROLClient.dll` (`0x1004a115`) e das tabelas de despacho de erro em `RvControlSvc.exe` identificou os seguintes códigos padronizados para a propriedade **`0x010001df`** (`PROP_NETWORK_STATUS`):
+A investigação da engenharia reversa desmembrou os códigos de status em duas camadas distintas: **códigos de estado de protocolo** (avaliados em `RvROLClient.dll`) e **códigos de erro operacionais de rede** (despachados para a UI em `RvRvpnGui.exe`).
 
-| Código Numérico | Nome Simbólico | Significado Técnico | Ação do Cliente |
-|---|---|---|---|
-| `0` | `STATUS_SUCCESS` | Operação executada com sucesso; parâmetros aceitos. | Registra estado, atualiza interface TAP. |
-| `1` | `ERR_INVALID_PASSWORD` | Hash SHA-1 de credencial rejeitado pelo servidor. | Notifica usuário de senha inválida. |
-| `2` | `ERR_NETWORK_NOT_FOUND` | Nome de rede inexistente na base ROL. | Notifica usuário de rede não encontrada. |
-| `3` | `ERR_NETWORK_FULL` | Capacidade máxima de nós da rede atingida. | Bloqueia ingresso e alerta saturação. |
-| `4` | `ERR_ALREADY_MEMBER` | O nó solicitante já consta como membro registrado. | Recupera parâmetros vigentes de nó. |
-| `5` | `ERR_ACCESS_DENIED` | Rede restrita a administradores ou nó banido. | Aborta tentativa e exibe restrição. |
-| `6` | `ERR_SERVER_BUSY` | Sobrecarga transitória no cluster de coordenação. | Executa recuo exponencial (backoff). |
+### 9.1 Códigos de Estado do Protocolo (`PROP_NETWORK_STATUS` — `0x010001df`)
+Comprovados diretamente na desmontagem de `RvROLClient.dll`:
+- **`0x100162f8` (Emissão no Anúncio):** O cliente grava `0x010001df = 1` no contêiner TLV de 288 bytes (`STATUS_INITIALIZING` / estado de solicitação de ingresso).
+- **`0x10015c02` (Validação de Retorno):**
+  ```x86asm
+  10015bf9: call 0x10014360        ; extrai valor de 0x010001df
+  10015c02: cmpl $0x2, -0x30(%ebp) ; verifica se código == 2
+  10015c06: jne 0x10015c30         ; se != 2, aborta e executa cleanup em 0x10005c80
+  10015c08: mov dword ptr [esi + 0x78], 1 ; se == 2, marca estado ativo (APPROVED)
+  ```
+- **Conclusão:** No handshake preliminar, `1` representa estado inicial/solicitando e `2` representa estado aprovado/ativo.
+
+---
+
+### 9.2 Códigos de Erro de Rede Comprovados em `RvRvpnGui.exe`
+A interface gráfica contém a rotina central de despacho de erros em `0x004ecf00`:
+```x86asm
+4ecf00: lea -0x3ea(%esi), %eax      ; subtrai offset base 0x3ea (1002 em decimal)
+4ecf06: cmp $0x23, %eax             ; valida faixa de 36 entradas (1002 a 1037)
+4ecf09: ja 0x4ece31                 ; default: formato genérico "(%1)"
+4ecf0f: movzbl 0x4ed2e0(%eax), %eax ; consulta tabela de tradução em 0x004ed2e0
+4ecf16: jmp dword ptr [0x004ed284 + eax*4] ; salto para tratador de string oficial
+```
+
+A extração das strings literais associadas a cada manipulador comprova a semântica oficial:
+
+| Código | Handler VA | String Literal no Binário | Endereço da String | Classificação |
+|---|---|---|---|---|
+| **1002** (`0x03ea`) | `0x004ed25c` | `"Invalid network name or password"` | `0x005e87a4` | **CONFIRMADO** |
+| **1004** (`0x03ec`) | `0x004ecfba` | `"Cannot connect to ROL server"` *(emitido em `RvROLClient.dll` `0x1004a1bd`)* | `0x005e85b4` | **CONFIRMADO** |
+| **1006** (`0x03ee`) | `0x004ed11c` | `"Out of memory"` | `0x005e8704` | **CONFIRMADO** |
+| **1007** (`0x03ef`) | `0x004ecf6a` | `"Canceled"` | `0x005e8578` | **CONFIRMADO** |
+| **1008** (`0x03f0`) | `0x004ed1bc` | `"Timed out"` | `0x005e8750` | **CONFIRMADO** |
+| **1009** (`0x03f1`) | `0x004ed00a` | `"This network name has already been taken"` | `0x005e85f0` | **CONFIRMADO** |
+| **1011** (`0x03f3`) | `0x004ed16c` | `"ROL protocol error"` | `0x005e8730` | **CONFIRMADO** |
+| **1012** (`0x03f4`) | `0x004ecf92` | `"You cannot join this network without password"` | `0x005e8584` | **CONFIRMADO** |
+| **1013** (`0x03f5`)| `0x004ed234` | `"Connection prohibited"` | `0x005e878c` | **CONFIRMADO** |
+| **1014** (`0x03f6`)| `0x004ed194` | `"Service connection lost"` | `0x005dbecc` | **CONFIRMADO** |
+| **1015** (`0x03f7`)| `0x004ed144` | `"The password is too short"` | `0x005e8714` | **CONFIRMADO** |
+| **1016** (`0x03f8`)| `0x004ecf42` | `"Access denied"` | `0x005e8568` | **CONFIRMADO** |
+| **1017** (`0x03f9`)| `0x004ed032` | `"Network name should not be empty or longer than %1 characters"` | `0x005e861c` | **CONFIRMADO** |
+| **1019** (`0x03fb`)| `0x004ed07c` | `"Last administrator cannot leave the network"` | `0x005e865c` | **CONFIRMADO** |
+| **1020** (`0x03fc`)| `0x004ed0cc` | `"Network is closed to new members, joining impossible"` | `0x005e86b4` | **CONFIRMADO** |
+| **1021** (`0x03fd`)| `0x004ed0f4` | `"Network name collision"` | `0x005e86ec` | **CONFIRMADO** |
+| **1024** (`0x0400`)| `0x004ed0a4` | `"The virtual network limit has been reached"` | `0x005e8688` | **CONFIRMADO** |
+| **1032** (`0x0408`)| `0x004ed1e4` | `"User ignores you"` | `0x005e875c` | **CONFIRMADO** |
+| **1033** (`0x0409`)| `0x004ed20c` | `"You are muted in this chat"` | `0x005e8770` | **CONFIRMADO** |
+| **1037** (`0x040d`)| `0x004ecfe2` | `"Chat is under maintenance"` | `0x005e85d4` | **CONFIRMADO** |
+
+> [!NOTE]
+> **Esclarecimento sobre a Numeração Antiga (0..4):**
+> A lista anterior simplificada (0=Sucesso, 1=Senha Inválida, 2=Não Encontrada, 3=Rede Cheia, 4=Já Membro) consistia em uma abstração preliminar de notas conceituais. A evidência binária real demonstra que os erros operacionais trafegam na faixa numérica 1002..1037.
 
 ---
 
@@ -453,7 +558,7 @@ A inspeção do método de tratamento de retorno em `RvROLClient.dll` (`0x1004a1
 
 | Entidade / Descoberta | Classificação | Evidência Primária | Justificativa Forense |
 |---|---|---|---|
-| **Formato Framing TLV (Length antes de Tag)** | **CONFIRMADO** | PCAP #5486 (`radmin_vm.pcap`), #686 (`radmin_vm2.pcap`), `src/protocol/tlv.rs` | Observado diretamente em bytes não cifrados do fio e validado contra código Rust existente. |
+| **Formato TLV no Wire (Length antes de Tag)** | **CONFIRMADO** | PCAP #5486 (`radmin_vm.pcap`), #686 (`radmin_vm2.pcap`), `RvROLClient.dll` `0x100162d0` | Observado diretamente em bytes não cifrados do fio e em código gerador do binário. |
 | **Identificador de Comando Cliente `0x0100031f`** | **CONFIRMADO** | `RvROLClient.dll` (`0x10016614`) | Desmontagem do construtor base `CAbstractClnPacket::CAbstractClnPacket`. |
 | **Identificador de Resposta Servidor `0x01000320`** | **CONFIRMADO** | `RvROLClient.dll` (`0x1008a7d5`, tabela `0x1008bb3c`) | Desmontagem da rotina de extração e tabela de salto do despachador central. |
 | **IDs de Pacotes Cliente (`0x04`, `0x14`, `0x27`, `0x34`)** | **CONFIRMADO** | `RvROLClient.dll` (`0x10017706`, `0x10017ece`, `0x1001795b`, `0x10018221`) | Parâmetro literal empacotado em `push $id` nos construtores especializados. |
@@ -461,11 +566,13 @@ A inspeção do método de tratamento de retorno em `RvROLClient.dll` (`0x1004a1
 | **Hashing de Senha SHA-1 (`CALG_SHA1`)** | **CONFIRMADO** | `shelper.dll` (`0x10065790`) | Chamada explícita à CryptoAPI do Windows (`CryptCreateHash` com `0x8004`). |
 | **Tag de Hash de Autenticação `0x090001cd`** | **CONFIRMADO** | `shelper.dll`, `RvROLClient.dll` | Atribuição de digest SHA-1 de 20 bytes à propriedade `0x090001cd`. |
 | **Incompatibilidade da Tag `0x010001e3` (Atributo vs Membros)** | **CONFIRMADO** | `RvControlSvc.exe` (`0x41537e`), `RvROLClient.dll` (`0x1004ef1c`) | Operações bit a bit em flags operacionais; contagem de membros refutada. |
-| **Incompatibilidade da Tag `0x0100032b` (Capacidades vs Status)** | **CONFIRMADO** | `RvControlSvc.exe`, PCAP #5486 | Bitmask de capacidades do cliente; presença online é tag `0x040001e7`. |
-| **Sequência Cifrada Pós-Handshake (208B $\rightarrow$ 2576B)** | **CONFIRMADO** | `radmin_17301.pcap` (#51, #52, #61, #65) | Registro determinístico idêntico em fluxos distintos para servidores independentes. |
-| **Decifração Integral do Tráfego Cifrado TCP 17301** | **DESCONHECIDO** | Capturas de tráfego de produção sem dump de RAM do Windows | Chave de sessão AES-256 é efêmera gerada por CSPRNG na VM; inviável decifrar passivamente. |
-| **Subcampos Internos de `PROP_ENDPOINT_CANDIDATES`** | **PARCIAL** | `RvROLClient.dll`, análise de buffers | Conhecida a presença de tuplas IP/Porta; formato de compactação exato pendente de testes. |
-| **Estruturas Aninhadas de Tipo `0x0C` (OBJECT) e `0x08`** | **HIPÓTESE** | Catálogo de 723 propriedades | Raras no protocolo de controle básico; sem instâncias observadas em texto claro. |
+| **Incompatibilidade da Tag `0x0100032b` (Capacidades vs Status)** | **CONFIRMADO** | `RvControlSvc.exe`, PCAP #5486, `RvROLClient.dll` `0x10016311` | Bitmask de capacidades do cliente; presença online é tag `0x040001e7`. |
+| **Contagem Total de 744 Descritores TLV Únicos** | **CONFIRMADO** | `RvControlSvc.exe` (`call 0x4aec20`) | Mapeamento exaustivo de todas as chamadas de registro no binário. |
+| **Tabela de Erros de Rede Oficiais (1002 a 1037)** | **CONFIRMADO** | `RvRvpnGui.exe` (`0x004ecf00`, `0x004ed284`, `0x004ed2e0`) | Tabela de salto e strings extraídas da desmontagem oficial. |
+| **Sequência de Tamanhos Pós-Handshake na Porta 17301 (208B, 2576B, etc.)** | **CONFIRMADO** | `radmin_17301.pcap` (#51, #52, #61, #65) | Registro determinístico idêntico em fluxos distintos para servidores independentes. |
+| **Atribuição das Classes aos Pacotes Cifrados (208B / 2576B)** | **HIPÓTESE** | Correlação de temporização de fluxo | Pacotes estão cifrados sob AES-256-CBC e não foram decifrados offline. |
+| **Decifração Integral do Tráfego Cifrado TCP 17301 nos PCAPs** | **DESCONHECIDO** | Capturas de tráfego de produção sem dump de RAM do Windows | Chave de sessão AES-256 é efêmera gerada por CSPRNG na VM; inviável decifrar passivamente. |
+| **Subcampos Internos de `PROP_ENDPOINT_CANDIDATES`** | **PARCIAL** | `RvROLClient.dll`, análise de buffers | Conhecida a presença de tuplas IP/Porta; formato de compactação pendente de testes. |
 
 ---
 
@@ -475,6 +582,7 @@ A inspeção do método de tratamento de retorno em `RvROLClient.dll` (`0x1004a1
 Os dados transmitidos nos pacotes #51 (208B), #52 (2576B) e subsequentes na porta 17301 foram criptografados com uma chave AES-256-CBC derivada mutuamente via SRP-6a a partir de expoentes efêmeros $a$ e $b$ gerados aleatoriamente em memória no momento da captura.
 
 Como a chave privada efêmera do cliente e a senha mestre não foram capturadas no momento do tráfego, **é matematicamente impossível decifrar o payload bruto dessas sessões gravadas sem posse das chaves**.
+
 > [!IMPORTANT]
 > A engenharia reversa das estruturas e vtables em `RvROLClient.dll` suprime quase integralmente essa limitação, permitindo reconstruir as mensagens a partir do código do próprio cliente oficial, em vez de depender exclusivamente da decifração dos PCAPs gravados.
 
