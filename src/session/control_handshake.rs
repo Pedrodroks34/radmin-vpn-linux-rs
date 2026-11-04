@@ -1175,6 +1175,7 @@ impl ControlClientNegotiator {
 // ---------------------------------------------------------------------------
 
 /// Estados internos do servidor de controle.
+#[cfg(any(test, feature = "srp-test-emulator"))]
 pub enum ControlServerState {
     /// Estado 1: aguardando identidade do cliente (Step 1).
     State1WaitingClientIdentity,
@@ -1202,6 +1203,7 @@ pub enum ControlServerState {
     Failed(String),
 }
 
+#[cfg(any(test, feature = "srp-test-emulator"))]
 impl std::fmt::Debug for ControlServerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1240,6 +1242,7 @@ impl std::fmt::Debug for ControlServerState {
     }
 }
 
+#[cfg(any(test, feature = "srp-test-emulator"))]
 impl ControlServerState {
     /// Zera material criptográfico e segredos em memória.
     pub fn clear(&mut self) {
@@ -1281,6 +1284,7 @@ impl ControlServerState {
 }
 
 /// Implementação do lado servidor do handshake de controle (usado para testes e emulação).
+#[cfg(any(test, feature = "srp-test-emulator"))]
 pub struct ControlServerSession {
     username: String,
     password: Zeroizing<String>,
@@ -1288,6 +1292,7 @@ pub struct ControlServerSession {
     state: ControlServerState,
 }
 
+#[cfg(any(test, feature = "srp-test-emulator"))]
 impl std::fmt::Debug for ControlServerSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControlServerSession")
@@ -1299,12 +1304,14 @@ impl std::fmt::Debug for ControlServerSession {
     }
 }
 
+#[cfg(any(test, feature = "srp-test-emulator"))]
 impl Drop for ControlServerSession {
     fn drop(&mut self) {
         self.clear();
     }
 }
 
+#[cfg(any(test, feature = "srp-test-emulator"))]
 impl ControlServerSession {
     /// Cria uma nova sessão de servidor com credenciais fixas e salt gerado.
     pub fn new(username: String, password: String) -> Result<Self, ControlHandshakeError> {
@@ -1838,6 +1845,86 @@ mod tests {
         let encrypted = client_cipher.encrypt(plaintext).unwrap();
         let decrypted = server_cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn attacker_without_password_is_rejected_at_proof_verification() {
+        let username = "alice";
+        let n = get_srp_prime_n().unwrap();
+        let n_bytes = n.to_vec();
+        let a_forged = pad_bignum_bytes(
+            &BigNum::from_u32(1).unwrap().to_vec(),
+            RADMIN_SRP1536_MODULUS_LEN,
+        );
+
+        let mut server =
+            ControlServerSession::new(username.into(), "real-password".into()).unwrap();
+        let mut attacker = ControlClientNegotiator::new(username.into(), "guess".into());
+        let s1 = attacker
+            .step(None)
+            .expect("etapa 1 do atacante")
+            .buffer_to_send
+            .unwrap();
+        let s2 = server.step(&s1).expect("etapa 2").buffer_to_send.unwrap();
+        let salt = find_item(&decode_items(&s2).unwrap(), TAG_SALT)
+            .unwrap()
+            .to_vec();
+
+        let mut s3 = encode_item(TAG_STEP, &3u32.to_le_bytes()).unwrap();
+        s3.extend(encode_item(TAG_PUBLIC_EPHEMERAL, &a_forged).unwrap());
+        let s4 = server
+            .step(&s3)
+            .expect("etapa 3: A = 1 em 192 bytes está em (0, N) e deve ser aceito")
+            .buffer_to_send
+            .unwrap();
+        let b = find_item(&decode_items(&s4).unwrap(), TAG_PUBLIC_EPHEMERAL)
+            .unwrap()
+            .to_vec();
+
+        let s_forged = a_forged.clone();
+        let k_forged = compute_srp_kdf(&s_forged);
+        let m1 = compute_srp_m1(
+            &n_bytes,
+            RADMIN_SRP_GENERATOR,
+            username,
+            &salt,
+            &a_forged,
+            &b,
+            &k_forged,
+        );
+        let mut s5 = encode_item(TAG_STEP, &5u32.to_le_bytes()).unwrap();
+        s5.extend(encode_item(TAG_PROOF, &m1).unwrap());
+
+        assert!(
+            matches!(
+                server.step(&s5),
+                Err(ControlHandshakeError::ProofVerificationFailed)
+            ),
+            "etapa 5: prova forjada com S = 1 deve falhar em ProofVerificationFailed"
+        );
+    }
+
+    #[test]
+    fn honest_proof_is_accepted_on_same_server_path() {
+        let mut client = ControlClientNegotiator::new("alice".into(), "real-password".into());
+        let mut server = ControlServerSession::new("alice".into(), "real-password".into()).unwrap();
+        let s1 = client.step(None).expect("etapa 1").buffer_to_send.unwrap();
+        let s2 = server.step(&s1).expect("etapa 2").buffer_to_send.unwrap();
+        let s3 = client
+            .step(Some(&s2))
+            .expect("etapa 3")
+            .buffer_to_send
+            .unwrap();
+        let s4 = server.step(&s3).expect("etapa 4").buffer_to_send.unwrap();
+        let s5 = client
+            .step(Some(&s4))
+            .expect("etapa 5 do cliente honesto")
+            .buffer_to_send
+            .unwrap();
+        assert!(
+            server.step(&s5).is_ok(),
+            "controle: prova honesta deve ser aceita"
+        );
     }
 
     #[test]

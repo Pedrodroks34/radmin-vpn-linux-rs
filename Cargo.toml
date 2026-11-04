@@ -36,6 +36,10 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 zeroize = { version = "1.9.1", features = ["zeroize_derive"] }
 
+[features]
+# Servidor SRP emulado (ControlServerSession). Apenas para testes; nao e o servidor oficial.
+srp-test-emulator = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 anyhow = "1"

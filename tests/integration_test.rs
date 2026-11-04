@@ -224,6 +224,7 @@ async fn test_e2e_phase1_rsession_handshake_and_cchannel_continuity() {
 
 /// Teste de integração ponta a ponta da Fase 2:
 /// Handshake de controle SRP-6a (`SHelper_*`) com negociação de versão e canal seguro AES-256.
+#[cfg(feature = "srp-test-emulator")]
 #[tokio::test]
 async fn test_e2e_phase2_control_channel_srp_handshake_and_continuity() {
     use radmin_vpn::session::control::{ControlConnection, ControlConnectionState};
@@ -341,6 +342,7 @@ async fn test_e2e_phase2_control_channel_srp_handshake_and_continuity() {
 /// 3. O servidor encerra a conexão sem `panic`.
 /// 4. O cliente detecta a desconexão e falha em modo fechado (fail-closed, `ControlConnectionState::Failed`).
 /// 5. O `server_task` é aguardado com `.expect("server task completed successfully without panic")`.
+#[cfg(feature = "srp-test-emulator")]
 #[tokio::test]
 async fn test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed() {
     use radmin_vpn::session::control::{ControlConnection, ControlConnectionState};
@@ -443,6 +445,7 @@ async fn test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed() {
 /// 4. O cliente transiciona para `ControlConnectionState::Failed`.
 /// 5. O servidor percebe o fechamento da conexão pelo cliente e termina sem pânico.
 /// 6. O `server_task` é aguardado com `.expect("server task completed successfully without panic")`.
+#[cfg(feature = "srp-test-emulator")]
 #[tokio::test]
 async fn test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed() {
     use radmin_vpn::session::control::{ControlConnection, ControlConnectionState};
