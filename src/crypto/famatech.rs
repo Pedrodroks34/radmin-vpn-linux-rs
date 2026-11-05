@@ -23,7 +23,7 @@
 //!   - Em seguida (`0x10069cb2`), chama `shelper.dll!0x100638f0` passando esses 8 bytes da soma,
 //!     calcula o MD5 de 16 bytes e dobra-o em 8 bytes (`digest[i].wrapping_add(digest[i + 8])`),
 //!     sobrescrevendo `buf[total_len - 9 .. total_len - 1]` (`0x10069cbd..0x10069cc5`).
-//!   - Nota forense: o relatório `reverse-engineering/round-02/02-cryptography.md` interrompeu a
+//!   - Nota forense: o relatório `docs/reverse-engineering/round-02/02-cryptography.md` interrompeu a
 //!     leitura em `0x10069ca6` e afirmou incorretamente que o trailer seria a soma bruta de 64 bits;
 //!     a desmontagem completa de `0x10069ca2..0x10069cc5` e do verificador `0x10069f90`
 //!     (`0x1006a026..0x1006a06c`) comprova que o trailer no fio é o MD5 dobrado de 8 bytes.
