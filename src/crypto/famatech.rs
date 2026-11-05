@@ -1,4 +1,3 @@
-
 use openssl::hash::{hash, MessageDigest};
 use openssl::symm::{Cipher, Crypter, Mode};
 use thiserror::Error;

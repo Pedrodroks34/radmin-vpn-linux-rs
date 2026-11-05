@@ -1,4 +1,3 @@
-
 use crate::protocol::tlv::{TlvMessage, TlvTag};
 use crate::Result;
 use serde::{Deserialize, Serialize};

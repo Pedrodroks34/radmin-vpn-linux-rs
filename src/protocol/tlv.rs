@@ -735,7 +735,6 @@ impl TlvMessage {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_tlv_type_extraction() {
         assert_eq!(TlvTag::TAG_SESSION_TOKEN.tlv_type(), TlvType::U32);
@@ -765,7 +764,6 @@ mod tests {
         assert_eq!(custom.tlv_type(), TlvType::Unknown(0x77));
         assert_eq!(custom.field_id(), 123);
     }
-
 
     #[test]
     fn test_synthetic_parse_i32_endianness_and_signs() {
@@ -1047,7 +1045,6 @@ mod tests {
         assert_eq!(parsed.to_bytes(), bytes);
     }
 
-
     #[test]
     fn test_parse_real_captured_packet_686() {
         let pcap_hex = "0000012000000004010001df00000001000000040100032b0000000200000100090001ca705f461c05ec79e7a71b736ceacefb245c31906b29a6d686397b5efc8eaba571884ad7615dbf80ccefd5bdc26a33c22c2f77930a555dec9fd8398550f258edbb876e3832bae01d6db3e88095a91662c95b9e0c282e603682471a46a0c68c37f9204364b580468995edaea45d77bc591f3fd288b74162fd5d282bcf87dafbce10865f8afa57ef60abfd407d2c300435fb576960afc30b86fb4688e20dbc9f4f8bd30b130f9957ddd52603bdda9983ec8867caee864b055649df6532b7400b76bbf8f93789bbb4c785d07768db835241d990b8b40c2ec91d369faa0997e768183d75252b7a35937b63842631e860dafbb19036d38b67d5da90df92283ecc7add65";
@@ -1096,7 +1093,6 @@ mod tests {
         assert_eq!(msg.get_u32(TlvTag(0x010001df)), Some(2));
         assert_eq!(msg.try_to_bytes().unwrap().as_slice(), tlv_payload);
     }
-
 
     #[test]
     fn test_security_truncated_header_rejected() {
@@ -1224,7 +1220,6 @@ mod tests {
             Err(TlvError::TooManyRecords(1024))
         );
     }
-
 
     #[test]
     fn test_security_serialization_individual_record_limit_rejected() {
@@ -1501,7 +1496,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_repeated_tags_get_all() {
         let mut msg = TlvMessage::new();
@@ -1560,7 +1554,6 @@ mod tests {
 
         assert_eq!(parsed.to_bytes(), bytes);
     }
-
 
     #[test]
     fn test_security_type_mismatch_all_valid_combinations() {

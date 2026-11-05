@@ -1,4 +1,3 @@
-
 use crate::crypto::famatech::{FamatechCipherState, AES_256_KEY_SIZE, RSESSION_KEY_BUFFER_SIZE};
 use openssl::bn::BigNum;
 use openssl::pkey::{Private, Public};
@@ -837,7 +836,6 @@ mod tests {
 
             server.clear();
             assert!(!server.is_established());
-
         }
         let final_count = RSessionServer::test_cleanup_count();
         assert_eq!(final_count, initial_count + 3);

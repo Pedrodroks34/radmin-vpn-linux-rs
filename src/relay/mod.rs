@@ -1,4 +1,3 @@
-
 use crate::nat::{attempt_tcp_simultaneous_open, UdpHolePuncher};
 use crate::transport::{ChannelConfig, ChannelType, TcpChannel};
 use crate::Result;

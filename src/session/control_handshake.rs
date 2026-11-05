@@ -1,4 +1,3 @@
-
 use crate::crypto::famatech::{FamatechCipherState, AES_256_KEY_SIZE};
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::rand::rand_bytes;
@@ -22,7 +21,6 @@ pub const RADMIN_SRP_KDF_KEY_LEN: usize = 40;
 
 pub const CONTROL_SESSION_KEY_SIZE: usize = AES_256_KEY_SIZE;
 
-
 pub const TAG_STEP: u32 = 0x10000000;
 
 pub const TAG_IDENTITY: u32 = 0x20000000;
@@ -44,7 +42,6 @@ a20f3dad37af019518f45b6dde76b2bfdfb140f379cc15383b304b7975b90796\
 7553cd6fdaf08d68832b603120430a501067d21beb2ce2275a20036a2dc80f1c\
 9d3ab9221afd5baceda5c2a31077c54fc6f274aaeba17ddd0b5c68f4f8e751a8\
 90a58648147a82e6f4f532ccdc939a12942799a713500e17dd4f6ff216cd54c7";
-
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ControlHandshakeError {
@@ -85,7 +82,6 @@ pub enum ControlHandshakeError {
     #[error("falha no cálculo criptográfico com OpenSSL BigNum: {0}")]
     CryptoError(String),
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlItem {
@@ -167,7 +163,6 @@ pub fn decode_identity(payload: &[u8]) -> String {
         .collect();
     String::from_utf16_lossy(&u16_chars)
 }
-
 
 pub struct SecretBigNum(pub BigNum);
 
@@ -265,7 +260,6 @@ impl SecretBigNum {
         self.0.clear();
     }
 }
-
 
 pub fn get_srp_prime_n() -> Result<BigNum, ControlHandshakeError> {
     BigNum::from_hex_str(RADMIN_SRP1536_PRIME_HEX)
@@ -446,7 +440,6 @@ pub fn compute_srp_m2(
     buf.extend_from_slice(k_full);
     sha1(&buf)
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlStepOutput {
@@ -1010,7 +1003,6 @@ impl ControlClientNegotiator {
         }
     }
 }
-
 
 #[cfg(any(test, feature = "srp-test-emulator"))]
 pub enum ControlServerState {
