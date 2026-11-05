@@ -1,25 +1,3 @@
-//! Módulo de Relay TCP (TcpRelay) e seleção de caminhos P2P / Relay.
-//!
-//! Engenharia reversa dos binários RvROLClient.dll / RvUESClient.dll e capturas
-//! radmin_vm2.pcap (pacotes #686 a #713):
-//!
-//! Descobertas comprovadas:
-//! 1. A porta TCP 17351 executa o protocolo TcpRelay da Famatech.
-//! 2. NÃO utiliza cabeçalho fixo sintético de 8 bytes; utiliza framing Famatech
-//!    de 4 bytes big-endian e registros TLV no formato `[Tag: 4 bytes BE][Value]`,
-//!    onde Tag codifica `(tipo << 24) | tamanho`:
-//!    - 0x10000004: Contador de sequência (uint32)
-//!    - 0x20000008: Node ID do peer (uint64)
-//!    - 0x300000c0: Bloco de chave pública / autenticação do servidor (192 bytes = 0xc0)
-//!    - 0x40000001: Flag de protocolo/cifra (1 byte, ex: 0x05)
-//!    - 0x50000020: Nonce / token de sessão aleatório (32 bytes = 0x20)
-//!    - 0x600000c0: Bloco de troca de chaves do cliente (192 bytes = 0xc0)
-//!    - 0x70000014: Digest de autenticação / HMAC-SHA1 (20 bytes = 0x14)
-//! 3. Após a etapa de autenticação (sequências 5 e 6), a comunicação é 100% cifrada
-//!    com AES-256-CBC em múltiplos estritos de 16 bytes.
-//! 4. Conexão P2P direta: o cliente tenta UDP com encapsulamento Teredo (RFC 4380,
-//!    prefixo 2001:0000::/32) e STUN (RFC 3489) / TCP simultaneous open. Se falhar
-//!    ou sofrer timeout, faz fallback automático para o TcpRelay na porta 17351.
 
 use crate::nat::{attempt_tcp_simultaneous_open, UdpHolePuncher};
 use crate::transport::{ChannelConfig, ChannelType, TcpChannel};
@@ -57,7 +35,6 @@ pub enum RelayError {
     Io(String),
 }
 
-/// Registro TLV do protocolo TcpRelay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpRelayRecord {
     pub tag: u32,
@@ -112,7 +89,6 @@ impl TcpRelayRecord {
     }
 }
 
-/// Mensagem do protocolo TcpRelay contendo registros TLV.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TcpRelayMessage {
     pub records: Vec<TcpRelayRecord>,
@@ -214,7 +190,6 @@ impl RelayServer {
     }
 }
 
-/// Cliente de conexão e encaminhamento via TcpRelay.
 pub struct RelayClient {
     server: RelayServer,
     channel: Option<TcpChannel>,
@@ -258,7 +233,6 @@ impl RelayClient {
         Ok(())
     }
 
-    /// Executa o handshake de sessão de relay (pacotes #688 a #710).
     pub async fn initiate_relay_session(&mut self, peer_node_id: u64) -> Result<()> {
         self.peer_node_id = Some(peer_node_id);
         let channel = self
@@ -266,7 +240,6 @@ impl RelayClient {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Relay não conectado"))?;
 
-        // 1. Enviar mensagem inicial com Sequence e Node ID (conforme pacote #688)
         let mut init_msg = TcpRelayMessage::new();
         init_msg.add_seq(self.sequence);
         self.sequence += 1;
@@ -279,7 +252,6 @@ impl RelayClient {
             peer_node_id
         );
 
-        // 2. Aguarda resposta com sequência do servidor (pacote #691)
         let resp_frame = channel.receive().await?;
         let resp_msg = TcpRelayMessage::parse(&resp_frame.payload)?;
         let seq = resp_msg
@@ -298,7 +270,6 @@ impl RelayClient {
         Ok(())
     }
 
-    /// Habilita criptografia AES-256-CBC negociada na conexão de relay.
     pub fn enable_encryption(&mut self, key: [u8; 32]) {
         if let Some(ch) = self.channel.as_mut() {
             ch.enable_encryption(key);
@@ -306,7 +277,6 @@ impl RelayClient {
         }
     }
 
-    /// Encaminha quadro Ethernet ou pacote através do canal seguro do relay.
     pub async fn send_frame(&mut self, data: &[u8]) -> Result<()> {
         let channel = self
             .channel
@@ -320,7 +290,6 @@ impl RelayClient {
         }
     }
 
-    /// Recebe quadro despachado pelo canal de relay.
     pub async fn receive_frame(&mut self) -> Result<Vec<u8>> {
         let channel = self
             .channel
@@ -343,20 +312,12 @@ impl RelayClient {
     }
 }
 
-/// Caminho de conexão P2P estabelecido.
 pub enum PathConnection {
-    /// Rota P2P direta via UDP Hole Punching / Teredo RFC 4380
     UdpDirect(Arc<UdpSocket>, SocketAddr),
-    /// Rota P2P direta via TCP Simultaneous-Open
     TcpDirect(TcpChannel),
-    /// Fallback para Relay via TcpRelay na porta 17351
     Relay(RelayClient),
 }
 
-/// Seletor inteligente de caminho com NAT Traversal completo:
-/// 1. Tenta UDP Hole Punching / Teredo RFC 4380
-/// 2. Tenta TCP Simultaneous-Open com SO_REUSEADDR/SO_REUSEPORT
-/// 3. Fallback automático para TcpRelay (porta 17351)
 pub struct PathSelector {
     direct_timeout: Duration,
     udp_hole_puncher: Option<Arc<UdpHolePuncher>>,
@@ -384,10 +345,6 @@ impl PathSelector {
         self
     }
 
-    /// Executa o fluxo de seleção de rota resiliente:
-    /// 1. Se configurado, dispara sondas UDP Hole Punching para `peer_udp_addr`
-    /// 2. Se falhar, tenta TCP Simultaneous-Open para `peer_tcp_addr`
-    /// 3. Se ambos falharem, aciona fallback transparente para `relay_server`
     pub async fn select_path(
         &self,
         peer_udp_addr: Option<SocketAddr>,
@@ -396,7 +353,6 @@ impl PathSelector {
         peer_node_id: u64,
         local_tcp_port: u16,
     ) -> Result<PathConnection> {
-        // 1. Tentar UDP Hole Punching direto (Teredo / NAT traversal)
         if let (Some(udp_addr), Some(puncher)) = (peer_udp_addr, &self.udp_hole_puncher) {
             info!("Tentando caminho direto P2P UDP com {}", udp_addr);
             if let Ok(true) = puncher.punch_hole(udp_addr, self.direct_timeout, 2).await {
@@ -410,7 +366,6 @@ impl PathSelector {
             warn!("UDP Hole Punching falhou com {}", udp_addr);
         }
 
-        // 2. Tentar TCP Simultaneous-Open
         info!("Tentando TCP Simultaneous-Open com {}", peer_tcp_addr);
         if let Ok(tcp_stream) =
             attempt_tcp_simultaneous_open(local_tcp_port, peer_tcp_addr, self.direct_timeout).await
@@ -424,7 +379,6 @@ impl PathSelector {
             return Ok(PathConnection::TcpDirect(direct_channel));
         }
 
-        // 3. Fallback para TcpRelay
         warn!(
             "Caminhos diretos P2P falharam. Acionando fallback para TcpRelay em {}",
             relay_server.address
@@ -435,7 +389,6 @@ impl PathSelector {
         Ok(PathConnection::Relay(relay))
     }
 
-    /// Método simplificado mantendo compatibilidade com testes existentes.
     pub async fn connect_with_fallback(
         &self,
         direct_addr: SocketAddr,
@@ -454,7 +407,6 @@ mod tests {
 
     #[test]
     fn test_parse_real_captured_packet_688() {
-        // Pacote #688 payload: 10000004 00000001 20000008 1876590b00000000
         let payload = [
             0x10, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, // Tag 0x10000004, val=1
             0x20, 0x00, 0x00, 0x08, 0x18, 0x76, 0x59, 0x0b, 0x00, 0x00, 0x00,
@@ -469,7 +421,6 @@ mod tests {
 
     #[test]
     fn test_parse_real_captured_packet_691_multi_tlv() {
-        // Pacote #691 extraído diretamente de radmin_vm2.pcap
         let payload_hex = concat!(
             "1000000400000002",
             "300000c0",
@@ -510,12 +461,10 @@ mod tests {
             let mut server_ch = listener.accept().await.unwrap();
             let frame = server_ch.receive().await.unwrap();
 
-            // Valida a mensagem inicial de relay (Seq 1)
             let msg = TcpRelayMessage::parse(&frame.payload).unwrap();
             assert_eq!(msg.get_seq(), Some(1));
             assert_eq!(msg.get_node_id(), Some(target_node_id));
 
-            // Simula resposta do relay com confirmação de sequência 2
             let mut resp = TcpRelayMessage::new();
             resp.add_seq(2);
             resp.add_record(TcpRelayRecord::new(TAG_RELAY_FLAG, vec![0x05]));

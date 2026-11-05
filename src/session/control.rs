@@ -1,10 +1,3 @@
-//! Gerenciador da Conexão de Controle do Radmin VPN (`SHelper_*` + `SHelper_CChannel`).
-//!
-//! Coordena o ciclo de vida da conexão de controle na porta 17301:
-//! 1. Conexão TCP bruta e validação de versão de protocolo (`version = 3`).
-//! 2. Negociação de autenticação e acordo de chaves mútuo via SRP-6a (`ControlClientNegotiator`).
-//! 3. Instalação e ativação da cifra AES-256-CBC (`FamatechCipherState`) no canal de transporte.
-//! 4. Troca segura de comandos de controle criptografados (gerenciamento de rede, login, etc.).
 
 use crate::session::control_handshake::{
     ControlClientNegotiator, ControlHandshakeError, SHELPER_PROTOCOL_VERSION,
@@ -15,10 +8,8 @@ use thiserror::Error;
 use tracing::{debug, error, info};
 use zeroize::{Zeroize, Zeroizing};
 
-/// Timeout padrão para as etapas do handshake de controle.
 pub const DEFAULT_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Porta padrão da infraestrutura de controle oficial do Radmin VPN.
 pub const RADMIN_CONTROL_PORT: u16 = 17301;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -45,7 +36,6 @@ pub enum ControlSessionError {
     Io(String),
 }
 
-/// Estados operacionais da conexão de controle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlConnectionState {
     Disconnected,
@@ -58,7 +48,6 @@ pub enum ControlConnectionState {
     Closed,
 }
 
-/// Estatísticas de tráfego da conexão de controle.
 #[derive(Debug, Clone, Default)]
 pub struct ControlStats {
     pub tx_bytes: u64,
@@ -68,7 +57,6 @@ pub struct ControlStats {
     pub last_activity: Option<Instant>,
 }
 
-/// Gerenciador de uma conexão de controle segura com a infraestrutura oficial do Radmin VPN.
 pub struct ControlConnection {
     username: String,
     password: Zeroizing<String>,
@@ -94,7 +82,6 @@ impl std::fmt::Debug for ControlConnection {
 }
 
 impl ControlConnection {
-    /// Cria uma nova conexão de controle com as credenciais especificadas.
     pub fn new(username: String, password: String) -> Self {
         Self {
             username,
@@ -108,30 +95,22 @@ impl ControlConnection {
         }
     }
 
-    /// Retorna o estado operacional atual da conexão.
     pub fn state(&self) -> &ControlConnectionState {
         &self.state
     }
 
-    /// Retorna `true` se a conexão está autenticada e cifrada (`SessionActive`).
     pub fn is_active(&self) -> bool {
         self.state == ControlConnectionState::SessionActive
     }
 
-    /// Retorna uma referência às estatísticas de tráfego.
     pub fn stats(&self) -> &ControlStats {
         &self.stats
     }
 
-    /// Configura o tempo limite de operações da conexão.
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
     }
 
-    /// Conecta ao servidor especificado e executa o handshake completo de controle:
-    /// - Negociação de versão de protocolo (3)
-    /// - Handshake SRP-6a de 6 passos
-    /// - Instalação de chave AES-256 no transporte TCP
     pub async fn connect(&mut self, addr: &str) -> Result<(), ControlSessionError> {
         if self.state == ControlConnectionState::Closed {
             return Err(ControlSessionError::Closed);
@@ -141,7 +120,6 @@ impl ControlConnection {
         self.state = ControlConnectionState::Connecting;
         info!(server = %addr, user = %self.username, "Conectando ao canal de controle...");
 
-        // 1. Estabelecer canal TCP
         let config = ChannelConfig {
             connect_timeout: self.timeout,
             keepalive_interval: Duration::from_secs(15),
@@ -161,7 +139,6 @@ impl ControlConnection {
         self.channel = Some(channel);
         self.state = ControlConnectionState::ConnectedUnencrypted;
 
-        // 2. Executar validação de versão e handshake SRP-6a
         if let Err(e) = self.perform_control_handshake().await {
             self.fail_session(format!("Falha no handshake de controle: {e}"))
                 .await;
@@ -175,16 +152,12 @@ impl ControlConnection {
         Ok(())
     }
 
-    /// Executa o fluxo de handshake completo de ponta a ponta sobre o transporte TCP.
     async fn perform_control_handshake(&mut self) -> Result<(), ControlSessionError> {
         let channel = self
             .channel
             .as_mut()
             .ok_or(ControlSessionError::NoTransport)?;
 
-        // -------------------------------------------------------------------
-        // Fase 0: Negociação de Versão (03 00 00 00)
-        // -------------------------------------------------------------------
         self.state = ControlConnectionState::VersionExchange;
         let version_pkt = ControlClientNegotiator::create_version_packet();
         debug!("Enviando pacote de versão de protocolo ({SHELPER_PROTOCOL_VERSION})...");
@@ -207,9 +180,6 @@ impl ControlConnection {
             ControlClientNegotiator::new(self.username.clone(), (*self.password).clone());
         negotiator.process_version_response(&version_frame.payload)?;
 
-        // -------------------------------------------------------------------
-        // Fase 1: Step 1 (Cliente -> Servidor: Identidade)
-        // -------------------------------------------------------------------
         self.state = ControlConnectionState::SrpHandshake;
         let step1_out = negotiator.step(None)?;
         let step1_buf = step1_out
@@ -223,9 +193,6 @@ impl ControlConnection {
         self.stats.tx_bytes += step1_buf.len() as u64;
         self.stats.tx_packets += 1;
 
-        // -------------------------------------------------------------------
-        // Fase 2: Step 2 (Servidor -> Cliente: Salt, N, g) e Step 3 (Cliente -> Servidor: A)
-        // -------------------------------------------------------------------
         let step2_frame = tokio::time::timeout(self.timeout, channel.receive())
             .await
             .map_err(|_| ControlSessionError::Timeout)?
@@ -245,9 +212,6 @@ impl ControlConnection {
         self.stats.tx_bytes += step3_buf.len() as u64;
         self.stats.tx_packets += 1;
 
-        // -------------------------------------------------------------------
-        // Fase 3: Step 4 (Servidor -> Cliente: B) e Step 5 (Cliente -> Servidor: M1)
-        // -------------------------------------------------------------------
         let step4_frame = tokio::time::timeout(self.timeout, channel.receive())
             .await
             .map_err(|_| ControlSessionError::Timeout)?
@@ -267,9 +231,6 @@ impl ControlConnection {
         self.stats.tx_bytes += step5_buf.len() as u64;
         self.stats.tx_packets += 1;
 
-        // -------------------------------------------------------------------
-        // Fase 4: Step 6 (Servidor -> Cliente: M2) e Finalização
-        // -------------------------------------------------------------------
         let step6_frame = tokio::time::timeout(self.timeout, channel.receive())
             .await
             .map_err(|_| ControlSessionError::Timeout)?
@@ -284,9 +245,6 @@ impl ControlConnection {
             ));
         }
 
-        // -------------------------------------------------------------------
-        // Fase 5: Ativação da Cifra de Sessão AES-256 no Canal
-        // -------------------------------------------------------------------
         let cipher_state = negotiator.create_cipher_state()?;
         channel.enable_cipher(cipher_state);
 
@@ -296,7 +254,6 @@ impl ControlConnection {
         Ok(())
     }
 
-    /// Envia uma mensagem de controle cifrada pela conexão ativa.
     pub async fn send_message(&mut self, payload: &[u8]) -> Result<(), ControlSessionError> {
         if !self.is_active() {
             return Err(ControlSessionError::NotActive {
@@ -318,7 +275,6 @@ impl ControlConnection {
         Ok(())
     }
 
-    /// Recebe uma mensagem de controle cifrada pela conexão ativa.
     pub async fn recv_message(&mut self) -> Result<Vec<u8>, ControlSessionError> {
         if !self.is_active() {
             return Err(ControlSessionError::NotActive {
@@ -343,7 +299,6 @@ impl ControlConnection {
         Ok(plaintext)
     }
 
-    /// Encerra a conexão de forma limpa, destruindo material de chave e fechando o transporte.
     pub async fn close(&mut self) {
         self.password.zeroize();
         if let Some(mut neg) = self.negotiator.take() {
@@ -357,7 +312,6 @@ impl ControlConnection {
         info!("Conexão de controle encerrada e material criptográfico destruído.");
     }
 
-    /// Falha a conexão com a mensagem de erro fornecida, descartando chaves.
     async fn fail_session(&mut self, reason: String) {
         self.password.zeroize();
         if let Some(mut neg) = self.negotiator.take() {

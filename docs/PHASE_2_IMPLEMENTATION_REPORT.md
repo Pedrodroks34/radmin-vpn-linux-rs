@@ -1,116 +1,116 @@
-# Relatório de Implementação da Fase 2 — Handshake SHelper da Conexão de Controle (`PHASE_2_IMPLEMENTATION_REPORT.md`)
+# Phase 2 Implementation Report — SHelper Handshake of the Control Connection (`PHASE_2_IMPLEMENTATION_REPORT.md`)
 
-> **Repositório**: https://github.com/Pedrodroks34/radmin-vpn-linux-rs  
-> **Branch de Origem**: `feature/control-channel-handshake`  
-> **Branch de Destino**: `main` (commit base: `8d6f09c`, merge do PR #5)  
-> **Status**: Concluído — Testes Executados Aprovados (126 aprovados, 1 ignorado por requisitos ambientais, 0 falhas)
-
----
-
-## 1. Resumo Executivo
-
-A Fase 2 concluiu com sucesso a engenharia reversa e a implementação em Rust da segunda família de handshakes exportada por `shelper.dll` (Família B: `SHelper_*`), correspondente ao **handshake da conexão de controle e gerenciamento de rede** operando na porta TCP `17301`.
-
-Diferente da Família A (`SHelper_RSession_*`, implementada na Fase 1), que utiliza RSA-2048 com `RSA_PKCS1_PADDING`, a Família B foi comprovada como uma implementação estrita do protocolo **SRP-6a** (Secure Remote Password, variante de Thomas J. Wu) com primo modular de 1536 bits ($g = 5, k = 3$) e SHA-1, acoplada a um sistema de framing TLV compacto (tags de 5 bits e comprimentos de 27 bits).
-
-Toda a lógica foi implementada em Rust de forma limpa, modular e testável nos novos arquivos `src/session/control_handshake.rs` e `src/session/control.rs`, integrada ao canal criptográfico Famatech existente (`FamatechCipherState`, AES-256-CBC) e reexportada em `src/session/mod.rs`.
+> **Repository**: https://github.com/Pedrodroks34/radmin-vpn-linux-rs  
+> **Source branch**: `feature/control-channel-handshake`  
+> **Target branch**: `main` (base commit: `8d6f09c`, merge of PR #5)  
+> **Status**: Completed — Tests Run and Passed (126 passed, 1 ignored due to environmental requirements, 0 failures)
 
 ---
 
-## 2. Arquivos Modificados e Criados
+## 1. Executive Summary
 
-| Arquivo | Natureza da Alteração |
+Phase 2 successfully completed the reverse engineering and the Rust implementation of the second family of handshakes exported by `shelper.dll` (Family B: `SHelper_*`), corresponding to the **handshake of the control connection and network management** operating on TCP port `17301`.
+
+Unlike Family A (`SHelper_RSession_*`, implemented in Phase 1), which uses RSA-2048 with `RSA_PKCS1_PADDING`, Family B was proven to be a strict implementation of the **SRP-6a** protocol (Secure Remote Password, variant by Thomas J. Wu) with a 1536-bit modular prime ($g = 5, k = 3$) and SHA-1, coupled with a compact TLV framing system (5-bit tags and 27-bit lengths).
+
+All of the logic was implemented in Rust in a clean, modular and testable way in the new files `src/session/control_handshake.rs` and `src/session/control.rs`, integrated with the existing Famatech cryptographic channel (`FamatechCipherState`, AES-256-CBC) and re-exported in `src/session/mod.rs`.
+
+---
+
+## 2. Modified and Created Files
+
+| File | Nature of the Change |
 |---|---|
-| [`CONTROL_HANDSHAKE_SPEC.md`](CONTROL_HANDSHAKE_SPEC.md) | **Novo**: Especificação técnica formal forense do protocolo de controle SRP-6a, matriz de confiança, parâmetros do grupo 1536-bit, diagrama de sequência, framing TLV e KDF. |
-| [`src/session/control_handshake.rs`](src/session/control_handshake.rs) | **Novo**: Implementação completa das rotinas `SHelper_*`: codificação/decodificação de itens TLV, cálculos matemáticos SRP-6a com OpenSSL BigNum, KDF de 40 bytes, prova $M_1$/$M_2$, cliente (`ControlClientNegotiator`), servidor de teste (`ControlServerSession`) e 10 testes unitários. |
-| [`src/session/control.rs`](src/session/control.rs) | **Novo**: Gerenciador da conexão de controle (`ControlConnection`), validação da versão de protocolo (3), execução do fluxo SRP sobre `TcpChannel`, instalação da chave AES-256 e troca de mensagens cifradas. |
-| [`src/session/mod.rs`](src/session/mod.rs) | **Modificado**: Exposição dos submódulos `control` e `control_handshake` e reexportação dos tipos públicos correspondentes. |
-| [`tests/integration_test.rs`](tests/integration_test.rs) | **Modificado**: Adição dos testes de integração `test_e2e_phase2_control_channel_srp_handshake_and_continuity` e `test_pcap_radmin_17301_control_frames_validation`. |
-| [`PHASE_2_IMPLEMENTATION_REPORT.md`](PHASE_2_IMPLEMENTATION_REPORT.md) | **Novo**: Este relatório consolidado. |
-| [`PHASE_2_UNRESOLVED.md`](PHASE_2_UNRESOLVED.md) | **Novo**: Registro formal de pendências e próximos passos (Fase 3: catálogo TLV de login e gerenciamento de redes). |
+| [`CONTROL_HANDSHAKE_SPEC.md`](CONTROL_HANDSHAKE_SPEC.md) | **New**: Formal forensic technical specification of the SRP-6a control protocol, confidence matrix, 1536-bit group parameters, sequence diagram, TLV framing and KDF. |
+| [`src/session/control_handshake.rs`](src/session/control_handshake.rs) | **New**: Complete implementation of the `SHelper_*` routines: encoding/decoding of TLV items, SRP-6a mathematical computations with OpenSSL BigNum, 40-byte KDF, $M_1$/$M_2$ proof, client (`ControlClientNegotiator`), test server (`ControlServerSession`) and 10 unit tests. |
+| [`src/session/control.rs`](src/session/control.rs) | **New**: Manager of the control connection (`ControlConnection`), validation of the protocol version (3), execution of the SRP flow over `TcpChannel`, installation of the AES-256 key and exchange of encrypted messages. |
+| [`src/session/mod.rs`](src/session/mod.rs) | **Modified**: Exposure of the `control` and `control_handshake` submodules and re-export of the corresponding public types. |
+| [`tests/integration_test.rs`](tests/integration_test.rs) | **Modified**: Addition of the integration tests `test_e2e_phase2_control_channel_srp_handshake_and_continuity` and `test_pcap_radmin_17301_control_frames_validation`. |
+| [`PHASE_2_IMPLEMENTATION_REPORT.md`](PHASE_2_IMPLEMENTATION_REPORT.md) | **New**: This consolidated report. |
+| [`PHASE_2_UNRESOLVED.md`](PHASE_2_UNRESOLVED.md) | **New**: Formal record of open items and next steps (Phase 3: TLV catalog for login and network management). |
 
 ---
 
-## 3. Evidências de Engenharia Reversa
+## 3. Reverse Engineering Evidence
 
-### 3.1 Funções Analisadas em `shelper.dll`
-- `0x1006ab90` (`SHelper_CreateClient`): inicialização da instância de cliente SRP-6a (`0x21d4` bytes) e instalação do validador de parâmetros de grupo em `0x100699e0`.
-- `0x1006ad20` (`SHelper_CreateServer`): inicialização da instância de servidor SRP-6a.
-- `0x1006b1d0` (`SHelper_GetNetworkProtocolVersion`): retorna constante `3`.
-- `0x1006ab80` (`SHelper_CheckNetworkProtocolVersion`): valida se `param_1 == 3`.
-- `0x1006b1e0` (`SHelper_GetNextBuffer`): despacha para `0x10066680` (cliente) ou `0x100670d0` (servidor).
-- `0x10066680` (Máquina de estados do cliente SRP):
-  - `case 0`: monta Step 1 (`Tag 0x10000000`) + Identidade UTF-16BE (`Tag 0x20000000`).
-  - `case 2`: processa Step 2 (Salt `Tag 0x30`, $N$ `Tag 0x40`, $g$ `Tag 0x50`), gera expoente $a$, emite Step 3 + efêmera $A$ (`Tag 0x60`, 192 bytes).
-  - `case 4`: processa Step 4 (efêmera $B$ `Tag 0x60`, 192 bytes), calcula $u = \text{SHA1}(\text{PAD}(A) \ || \ \text{PAD}(B))$, $S$, $K_{\text{full}}$ via KDF e emite Step 5 + prova $M_1$ (`Tag 0x70`, 20 bytes).
-  - `case 6`: processa Step 6 (prova $M_2$ `Tag 0x70`, 20 bytes), valida contra $M_2$ calculado e marca handshake estabelecido.
-- `0x10061790` (KDF): derivação de 40 bytes ($0x28$) via SHA-1 iterativo sobre $S \ || \ \text{counter}_{\text{be32}}$.
-- `0x100626e0` e `0x10062900`: montagem e desmontagem dos itens TLV com tag em 5 bits (`0xF8000000`) e comprimento em 27 bits (`0x07FFFFFF`).
-- `0x100ac280`: módulo primo $N$ de 1536 bits hardcoded (192 bytes).
-- `0x100ac279`: gerador $g = 5$.
-- `0x100607d0`: multiplicador $k = 3$.
+### 3.1 Functions Analyzed in `shelper.dll`
+- `0x1006ab90` (`SHelper_CreateClient`): initialization of the SRP-6a client instance (`0x21d4` bytes) and installation of the group-parameter validator at `0x100699e0`.
+- `0x1006ad20` (`SHelper_CreateServer`): initialization of the SRP-6a server instance.
+- `0x1006b1d0` (`SHelper_GetNetworkProtocolVersion`): returns the constant `3`.
+- `0x1006ab80` (`SHelper_CheckNetworkProtocolVersion`): checks whether `param_1 == 3`.
+- `0x1006b1e0` (`SHelper_GetNextBuffer`): dispatches to `0x10066680` (client) or `0x100670d0` (server).
+- `0x10066680` (client SRP state machine):
+  - `case 0`: builds Step 1 (`Tag 0x10000000`) + UTF-16BE identity (`Tag 0x20000000`).
+  - `case 2`: processes Step 2 (Salt `Tag 0x30`, $N$ `Tag 0x40`, $g$ `Tag 0x50`), generates exponent $a$, emits Step 3 + ephemeral $A$ (`Tag 0x60`, 192 bytes).
+  - `case 4`: processes Step 4 (ephemeral $B$ `Tag 0x60`, 192 bytes), computes $u = \text{SHA1}(\text{PAD}(A) \ || \ \text{PAD}(B))$, $S$, $K_{\text{full}}$ via KDF and emits Step 5 + proof $M_1$ (`Tag 0x70`, 20 bytes).
+  - `case 6`: processes Step 6 (proof $M_2$ `Tag 0x70`, 20 bytes), validates it against the computed $M_2$ and marks the handshake as established.
+- `0x10061790` (KDF): derivation of 40 bytes ($0x28$) via iterative SHA-1 over $S \ || \ \text{counter}_{\text{be32}}$.
+- `0x100626e0` and `0x10062900`: assembly and disassembly of TLV items with a 5-bit tag (`0xF8000000`) and a 27-bit length (`0x07FFFFFF`).
+- `0x100ac280`: hardcoded 1536-bit prime modulus $N$ (192 bytes).
+- `0x100ac279`: generator $g = 5$.
+- `0x100607d0`: multiplier $k = 3$.
 
-### 3.2 Funções Analisadas em `RvROLClient.dll`
-- `0x1003fbd0`: carregador de símbolos de `shelper.dll` em `CSRPHelperLoader`.
-- `0x100dc6e0` e `0x100dd160`: instanciação e invocações do `CSRPHelperInstance` e `CSRPClient`.
-- `0x1003f0f0`: executor do loop de handshake do cliente via chamadas sucessivas a `SHelper_GetNextBuffer` até `bFinished == true`.
-- `0x1003dd40` e `0x100df250`: extração dos 32 primeiros bytes da chave via `SHelper_GetKey` e instalação no `CChannel` com AES-256-CBC.
+### 3.2 Functions Analyzed in `RvROLClient.dll`
+- `0x1003fbd0`: loader of the `shelper.dll` symbols in `CSRPHelperLoader`.
+- `0x100dc6e0` and `0x100dd160`: instantiation and invocations of `CSRPHelperInstance` and `CSRPClient`.
+- `0x1003f0f0`: executor of the client handshake loop, through successive calls to `SHelper_GetNextBuffer` until `bFinished == true`.
+- `0x1003dd40` and `0x100df250`: extraction of the first 32 bytes of the key via `SHelper_GetKey` and installation in the `CChannel` with AES-256-CBC.
 
-### 3.3 Correlação com Capturas PCAP
-- `radmin_17301.pcap` (fluxos TCP `49494` e `49493` para `148.113.190.78:17301` e `198.244.203.247:17301`):
-  - Pkt #32 / #40: `00 00 00 04 03 00 00 00` (Version exchange).
-  - Pkt #37: Frame com comprimento `0xc0` (192 bytes) contendo efêmera do cliente $A$.
-  - Pkt #42: Frame com comprimento `0x100` (256 bytes) do servidor.
-  - Pkt #43 / #46: Frames de `0xe0` (224 bytes).
-  - Pkt #47 / #50: Frames de `0x30` (48 bytes) contendo as provas $M_1$ e $M_2$.
-- `radmin_vm2.pcap` (fluxos TCP `49526`, `49537`, `49538` para `17301`):
-  - Reproduzem com exatidão matemática a mesma sequência de tamanhos e etapas do handshake de controle.
+### 3.3 Correlation with PCAP Captures
+- `radmin_17301.pcap` (TCP flows `49494` and `49493` to `148.113.190.78:17301` and `198.244.203.247:17301`):
+  - Pkt #32 / #40: `00 00 00 04 03 00 00 00` (version exchange).
+  - Pkt #37: frame with length `0xc0` (192 bytes) containing the client's ephemeral $A$.
+  - Pkt #42: frame with length `0x100` (256 bytes) from the server.
+  - Pkt #43 / #46: frames of `0xe0` (224 bytes).
+  - Pkt #47 / #50: frames of `0x30` (48 bytes) containing the proofs $M_1$ and $M_2$.
+- `radmin_vm2.pcap` (TCP flows `49526`, `49537`, `49538` to `17301`):
+  - They reproduce, with mathematical exactness, the same sequence of sizes and steps of the control handshake.
 
 ---
 
-## 4. Testes Executados e Resultados
+## 4. Tests Performed and Results
 
-1. **Testes Unitários (`cargo test --lib`)**:
-   - `test_version_packet`: valida geração e validação de versão de protocolo (3).
-   - `test_item_tlv_encode_decode`: valida codificação e decodificação de múltiplos itens TLV e tags.
-   - `test_item_tlv_truncated`: valida rejeição de buffers corrompidos ou incompletos.
-   - `test_identity_utf16_byte_swapping`: valida codificação e decodificação UTF-16BE.
-   - `test_srp_group_parameters`: valida módulo de 1536 bits, gerador 5 e multiplicador 3.
-   - `test_srp_kdf_40_bytes`: valida KDF de 40 bytes.
-   - `test_full_srp_handshake_success`: negociação ponta a ponta em memória entre `ControlClientNegotiator` e `ControlServerSession`, com concordância mútua da chave de 32 bytes e cifragem Famatech bem-sucedida.
-   - `test_srp_handshake_wrong_password_fails`: valida rejeição estrita quando a senha está incorreta.
-   - `test_srp_handshake_tampered_m2_fails`: valida detecção de prova $M_2$ adulterada.
-   - `test_srp_handshake_unexpected_step`: valida rejeição de transição fora de ordem.
-   - `test_random_srp_exponent_bounds_and_bit_length`: valida que expoentes gerados estão estritamente em $1 < exp < N - 1$, comprimento de bits $\ge 1500$ e distinção entre amostras geradas pelo CSPRNG.
-   - `test_validate_srp_public_value_strict_checks`: valida rejeição estrita de comprimentos não canônicos ($!= 192$ bytes), valor 0, valor $N$, valor $N+1$.
-   - `test_srp_handshake_bad_username_fails_closed`: valida rejeição de usuário incorreto pelo servidor com transição fail-closed.
-   - `test_srp_handshake_tampered_m1_fails_closed`: valida detecção de prova $M_1$ adulterada com transição fail-closed.
-   - `test_srp_handshake_invalid_client_a_rejected_by_server`: valida rejeição de $A$ fora dos limites ($A = 0$) pelo servidor com transição fail-closed.
-   - `test_srp_handshake_invalid_server_b_rejected_by_client`: valida rejeição de $B$ truncado pelo cliente com transição fail-closed.
-   - `test_srp_handshake_divergent_group_parameters_rejected`: valida rejeição de parâmetros $g$ ou $N$ divergentes (valor divergente, multi-byte, vazio, truncado a 191B, expandido a 193B, valor adulterado) com transição fail-closed.
-   - `test_control_session_explicit_clear`: valida que a chamada explícita a `clear()` sobrescreve chaves derivadas e segredos com zeros.
-   - `test_control_sessions_raii_drop`: valida o ciclo de vida e descarte seguro por RAII de `ControlClientNegotiator` e `ControlServerSession` nos estados inicial, intermediário e estabelecido.
-   - `test_secret_bignum_explicit_clear`: valida a limpeza isolada dos limbs do BigNum (`num_bits() == 0`).
-   - `test_secret_bignum_drop_executes_clear`: valida o descarte automático por `Drop` com `BN_clear` via instrumentação thread-local determinística sem concorrência entre threads.
-   - `test_rsession_server_drop_*`: conjunto de 5 testes cobrindo descarte de `RSessionServer` em estado inicial, após processamento de bloco válido, sessão estabelecida, chamada de `clear()` idempotente seguida de drop e após falha de processamento.
-   - `test_control_client_transition_failure_zeroizes_ephemeral_secrets`: valida que falhas no Step 2, 4 e 6 transicionam para `Failed` e descartam segredos efêmeros.
-   - `test_control_server_transition_failure_zeroizes_ephemeral_secrets`: valida que falhas no Step 1, 3 e 5 transicionam para `Failed` e descartam segredos efêmeros.
-   - `test_control_handshake_debug_redacted` e `test_cipher_state_debug_redacted`: comprovam que credenciais, chaves e bignums são mascarados com `[REDACTED]`.
-   - `test_failed_session_cannot_be_reused`: garante que sessões em estado `Failed` rejeitem qualquer invocação subsequente de `step()`.
-2. **Testes de Integração (`tests/integration_test.rs`)**:
-   - `test_e2e_phase2_control_channel_srp_handshake_and_continuity`: servidor TCP local simulado + cliente `ControlConnection`, handshake completo (versão + SRP-6a) e troca bidirecional de múltiplos comandos cifrados via AES-256-CBC.
-   - `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`: loopback TCP com injeção de prova $M_1$ adulterada, validando rejeição com `ProofVerificationFailed`, estado de servidor `Failed`, encerramento fail-closed do transporte e ausência de panics (com task do servidor aguardada explicitamente).
-   - `test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed`: loopback TCP com injeção de prova $M_2$ adulterada, validando rejeição pelo cliente com fail-closed e término limpo do servidor sem panics.
-   - `test_pcap_radmin_17301_control_frames_validation`: validação contra vetores de framing reais de `radmin_17301.pcap`.
-3. **Métricas Finais Consolidadas da Quinta Rodada de Auditoria**:
-   - `cargo fmt --check`: **Aprovado** (zero diferenças).
-   - `cargo clippy --all-targets --all-features -- -D warnings`: **Aprovado** (zero advertências em toda a árvore).
-   - `cargo test --locked`: **127 testes avaliados** (118 unitários aprovados + 1 ignorado ambiental TAP; 8 testes de integração aprovados; 0 falhas). Total de **126 testes aprovados**.
-4. **Garantias de Ciclo de Vida e Segurança de Memória**:
-   - Endurecimento do ciclo de vida das chaves AES de 32 bytes: `session_key()` retorna `Option<Zeroizing<[u8; 32]>>`, `session_key_ref()` permite acesso por referência direta `&[u8; 32]`, e `create_cipher_state()` inicializa o canal diretamente via `from_key_ref` sem alocação de buffers temporários intermediários não-zeroizados.
-   - Construtores de `FamatechCipherState` (`from_key_ref`, `from_separate_keys_ref`, `from_rsession_key`) eliminam cópias redundantes e asseguram que quaisquer argumentos passados por valor sejam protegidos e limpos via `Zeroizing`.
-   - Implementação de `Drop` com rotina idempotente em `RSessionServer` e `HandshakeNegotiator` para limpeza explícita de `key_material` via `Zeroize::zeroize()`.
-   - Wrapper RAII `SecretBigNum` em todos os expoentes, verifiers e segredos intermediários com chamada incondicional a `BN_clear` antes da desalocação heap (`BN_free`).
-   - Zeroização via `Zeroizing` para buffers de cifra, senhas, salts, digest de provas $M_1$/$M_2$ e chaves KDF.
-   - Redação total de `Debug` e eliminação de `Clone` indevido no estado de cifra.
-   - **Fronteiras e Limitações Técnicas Documentadas**: A aplicação aplica zeroização determinística sobre as estruturas e buffers sob controle do Rust e sobre os limbs sob `SecretBigNum`. Limitações físicas e do ecossistema externo incluem buffers scratch efêmeros internos alocados em `BN_CTX` pela biblioteca C do OpenSSL (cuja reciclagem depende do contexto C) e potencial paginação em partição de swap pelo kernel do sistema operacional na ausência de privilégios de `mlock(2)`.
+1. **Unit tests (`cargo test --lib`)**:
+   - `test_version_packet`: validates generation and validation of the protocol version (3).
+   - `test_item_tlv_encode_decode`: validates encoding and decoding of multiple TLV items and tags.
+   - `test_item_tlv_truncated`: validates rejection of corrupted or incomplete buffers.
+   - `test_identity_utf16_byte_swapping`: validates UTF-16BE encoding and decoding.
+   - `test_srp_group_parameters`: validates the 1536-bit modulus, generator 5 and multiplier 3.
+   - `test_srp_kdf_40_bytes`: validates the 40-byte KDF.
+   - `test_full_srp_handshake_success`: end-to-end in-memory negotiation between `ControlClientNegotiator` and `ControlServerSession`, with mutual agreement on the 32-byte key and successful Famatech encryption.
+   - `test_srp_handshake_wrong_password_fails`: validates strict rejection when the password is incorrect.
+   - `test_srp_handshake_tampered_m2_fails`: validates detection of a tampered $M_2$ proof.
+   - `test_srp_handshake_unexpected_step`: validates rejection of an out-of-order transition.
+   - `test_random_srp_exponent_bounds_and_bit_length`: validates that the generated exponents lie strictly in $1 < exp < N - 1$, bit length $\ge 1500$, and distinctness between samples generated by the CSPRNG.
+   - `test_validate_srp_public_value_strict_checks`: validates strict rejection of non-canonical lengths ($!= 192$ bytes), value 0, value $N$ and value $N+1$.
+   - `test_srp_handshake_bad_username_fails_closed`: validates rejection of an incorrect user by the server, with a fail-closed transition.
+   - `test_srp_handshake_tampered_m1_fails_closed`: validates detection of a tampered $M_1$ proof, with a fail-closed transition.
+   - `test_srp_handshake_invalid_client_a_rejected_by_server`: validates rejection of $A$ out of bounds ($A = 0$) by the server, with a fail-closed transition.
+   - `test_srp_handshake_invalid_server_b_rejected_by_client`: validates rejection of a truncated $B$ by the client, with a fail-closed transition.
+   - `test_srp_handshake_divergent_group_parameters_rejected`: validates rejection of divergent $g$ or $N$ parameters (divergent value, multi-byte, empty, truncated to 191B, expanded to 193B, tampered value), with a fail-closed transition.
+   - `test_control_session_explicit_clear`: validates that the explicit call to `clear()` overwrites derived keys and secrets with zeros.
+   - `test_control_sessions_raii_drop`: validates the lifecycle and secure disposal by RAII of `ControlClientNegotiator` and `ControlServerSession` in the initial, intermediate and established states.
+   - `test_secret_bignum_explicit_clear`: validates the isolated clearing of the BigNum limbs (`num_bits() == 0`).
+   - `test_secret_bignum_drop_executes_clear`: validates automatic disposal by `Drop` with `BN_clear`, via deterministic thread-local instrumentation without concurrency between threads.
+   - `test_rsession_server_drop_*`: a set of 5 tests covering disposal of `RSessionServer` in the initial state, after processing a valid block, in the established session, after an idempotent `clear()` call followed by drop, and after a processing failure.
+   - `test_control_client_transition_failure_zeroizes_ephemeral_secrets`: validates that failures in Steps 2, 4 and 6 transition to `Failed` and discard the ephemeral secrets.
+   - `test_control_server_transition_failure_zeroizes_ephemeral_secrets`: validates that failures in Steps 1, 3 and 5 transition to `Failed` and discard the ephemeral secrets.
+   - `test_control_handshake_debug_redacted` and `test_cipher_state_debug_redacted`: confirm that credentials, keys and bignums are masked as `[REDACTED]`.
+   - `test_failed_session_cannot_be_reused`: ensures that sessions in the `Failed` state reject any subsequent invocation of `step()`.
+2. **Integration tests (`tests/integration_test.rs`)**:
+   - `test_e2e_phase2_control_channel_srp_handshake_and_continuity`: simulated local TCP server + `ControlConnection` client, complete handshake (version + SRP-6a) and bidirectional exchange of multiple encrypted commands via AES-256-CBC.
+   - `test_e2e_phase2_control_channel_srp_tampered_proof_fails_closed`: TCP loopback with injection of a tampered $M_1$ proof, validating rejection with `ProofVerificationFailed`, server state `Failed`, fail-closed shutdown of the transport and absence of panics (with the server task explicitly awaited).
+   - `test_e2e_phase2_control_channel_srp_tampered_m2_fails_closed`: TCP loopback with injection of a tampered $M_2$ proof, validating rejection by the client with fail-closed behavior and a clean server termination without panics.
+   - `test_pcap_radmin_17301_control_frames_validation`: validation against real framing vectors from `radmin_17301.pcap`.
+3. **Consolidated final metrics of the fifth audit round**:
+   - `cargo fmt --check`: **Passed** (zero differences).
+   - `cargo clippy --all-targets --all-features -- -D warnings`: **Passed** (zero warnings across the entire tree).
+   - `cargo test --locked`: **127 tests evaluated** (118 unit tests passed + 1 environmental TAP ignored; 8 integration tests passed; 0 failures). Total of **126 tests passed**.
+4. **Lifecycle and memory safety guarantees**:
+   - Hardening of the lifecycle of the 32-byte AES keys: `session_key()` returns `Option<Zeroizing<[u8; 32]>>`, `session_key_ref()` allows direct access by reference `&[u8; 32]`, and `create_cipher_state()` initializes the channel directly via `from_key_ref` without allocating intermediate temporary buffers that are not zeroized.
+   - The constructors of `FamatechCipherState` (`from_key_ref`, `from_separate_keys_ref`, `from_rsession_key`) eliminate redundant copies and ensure that any arguments passed by value are protected and cleared via `Zeroizing`.
+   - `Drop` implementation with an idempotent routine in `RSessionServer` and `HandshakeNegotiator` for explicit clearing of `key_material` via `Zeroize::zeroize()`.
+   - `SecretBigNum` RAII wrapper on all exponents, verifiers and intermediate secrets, with an unconditional call to `BN_clear` before heap deallocation (`BN_free`).
+   - Zeroization via `Zeroizing` for cipher buffers, passwords, salts, the digest of the $M_1$/$M_2$ proofs and the KDF keys.
+   - Full `Debug` redaction and removal of improper `Clone` on the cipher state.
+   - **Documented boundaries and technical limitations**: the application applies deterministic zeroization to the structures and buffers under Rust's control and to the limbs under `SecretBigNum`. Physical and external-ecosystem limitations include ephemeral scratch buffers internal to `BN_CTX` allocated by the OpenSSL C library (whose recycling depends on the C context), and potential paging to a swap partition by the operating system kernel in the absence of `mlock(2)` privileges.

@@ -44,7 +44,6 @@ pub struct StunMessage {
 impl StunMessage {
     pub fn new_binding_request() -> Self {
         let mut tid = [0u8; 16];
-        // Coloca o Magic Cookie nos primeiros 4 bytes para compatibilidade RFC 5389 / 3489
         tid[0..4].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
         let _ = rand_bytes(&mut tid[4..16]);
 
@@ -89,7 +88,6 @@ impl StunMessage {
             let attr_val = &buf[offset..offset + attr_len];
             offset += attr_len;
 
-            // STUN attributes are padded to 4-byte boundaries
             let padding = (4 - (attr_len % 4)) % 4;
             offset += padding;
 
@@ -188,7 +186,6 @@ mod tests {
         let tid = [0x55u8; 16];
         resp.extend_from_slice(&tid);
 
-        // Atributo MAPPED_ADDRESS (0x0001)
         resp.extend_from_slice(&ATTR_MAPPED_ADDRESS.to_be_bytes());
         resp.extend_from_slice(&8u16.to_be_bytes()); // len = 8
         resp.extend_from_slice(&[0x00, 0x01]); // 0x01 = IPv4
@@ -217,7 +214,6 @@ mod tests {
         let xor_port = target_port ^ (STUN_MAGIC_COOKIE >> 16) as u16;
         let xor_ip = u32::from(target_ip) ^ STUN_MAGIC_COOKIE;
 
-        // Atributo XOR_MAPPED_ADDRESS (0x0020)
         resp.extend_from_slice(&ATTR_XOR_MAPPED_ADDRESS.to_be_bytes());
         resp.extend_from_slice(&8u16.to_be_bytes());
         resp.extend_from_slice(&[0x00, 0x01]); // IPv4

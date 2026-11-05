@@ -1,47 +1,47 @@
-# Questões Pendentes e Limitações Conhecidas — Pós-Fase 1 (`PHASE_1_UNRESOLVED.md`)
+# Unresolved Questions and Known Limitations — After Phase 1 (`PHASE_1_UNRESOLVED.md`)
 
-> **Nota sobre item resolvido nesta Fase 1:**  
-> A questão levantada na auditoria anterior sobre como os **64 bytes (`0x40`)** retornados por `SHelper_RSession_GetKey` (`shelper.dll!0x1006ba80` -> `0x1006a270`) são convertidos na chave AES-256 de **32 bytes (`0x20`)** do `SHelper_CChannel` foi **100% resolvida** por desmontagem de `RvROLClient.dll!0x100df250` (`CChannelWrapper::Create`), `0x100df470` (`CChannelWrapper::SetKey`), `0x10096f0d..0x10096f21` e `0x100969de..0x10096a16`: o cliente oficial valida `key_len >= 0x20` e passa `&key_buf[0..32]` tanto para `SHelper_CChannel_SetKeyEnc` (`0x10062e00`) quanto para `SHelper_CChannel_SetKeyDec` (`0x10062d60`).
-
----
-
-## 1. Máquina de Estados `SHelper_*` da Conexão Central na Porta `17301` (`radmin_17301.pcap` #32..#50)
-
-- **O que está indefinido**:
-  - O formato interno exato e as operações criptográficas de cada um dos pacotes intermediários (`192B`, `32B`, `256B`, `224B`, `224B`, `48B`, `48B`) trocados após o frame de versão `[03 00 00 00]` na porta TCP `17301`.
-- **O que já foi investigado**:
-  - Identificamos em `RvROLClient.dll!0x100dc6e0` e `0x1003dd40..0x1003f530` que `shelper.dll` exporta duas famílias distintas:
-    1. `SHelper_RSession_*` (`0x1006b860` / `0x1006a2b0`: `256B` `C->S` RSA PKCS#1 v1.5 com `76B` plaintext -> `4B` `S->C` token), usada por `RvROLClient.dll!0x10096660..0x10096ff2` e implementada integralmente nesta Fase 1.
-    2. `SHelper_*` (`0x1006ab90` `SHelper_CreateClient`, `0x1006ad20` `SHelper_CreateServer`, `0x1006b1e0` `SHelper_GetNextBuffer`, `0x1006b010` `SHelper_GetKey`, `0x1006b1d0` `SHelper_GetNetworkProtocolVersion = 3`), usada por `RvROLClient.dll!0x1003eb30` na porta `17301`.
-  - Correlacionamos os pacotes de `radmin_17301.pcap` separando os dois fluxos TCP concorrentes (`49494` e `49493`), demonstrando que o pacote #44 (`S->C`, `4B` `03000000` em `49493`), #35/#46 (`S->C`, `192B`) e #39/#48 (`S->C`, `256B`) pertencem à máquina `SHelper_*` (`0x1006b1e0`) e não à máquina `SHelper_RSession_*` (`0x1006a2b0`).
-- **Qual evidência está faltando**:
-  - A desmontagem completa das sub-rotinas internas chamadas por `shelper.dll!0x1006b1e0` (no intervalo `0x10066800..0x10069b00`) e a extração dos parâmetros de chave pública do servidor central passados a `SHelper_CreateClient` (`0x1006ab90`).
-- **Qual análise adicional resolveria a dúvida**:
-  - Desmontar estaticamente `shelper.dll!0x10066800..0x10069b00` e `RvROLClient.dll!0x1003eb30..0x1003f530` para documentar cada estado de `SHelper_GetNextBuffer` (`0x1006b1e0`) e extrair do segmento `.rdata` de `RvROLClient.dll` / `RvControlSvc.exe` o módulo RSA do servidor central.
+> **Note on the item resolved in Phase 1:**  
+> The question raised in the previous audit about how the **64 bytes (`0x40`)** returned by `SHelper_RSession_GetKey` (`shelper.dll!0x1006ba80` -> `0x1006a270`) are converted into the **32-byte (`0x20`)** AES-256 key of `SHelper_CChannel` was **100% resolved** by disassembly of `RvROLClient.dll!0x100df250` (`CChannelWrapper::Create`), `0x100df470` (`CChannelWrapper::SetKey`), `0x10096f0d..0x10096f21` and `0x100969de..0x10096a16`: the official client checks `key_len >= 0x20` and passes `&key_buf[0..32]` to both `SHelper_CChannel_SetKeyEnc` (`0x10062e00`) and `SHelper_CChannel_SetKeyDec` (`0x10062d60`).
 
 ---
 
-## 2. Semântica dos 3 DWORDs de Cabeçalho (`client_params: [u32; 3]`) e do `server_token` (`u32`) em `SHelper_RSession`
+## 1. `SHelper_*` State Machine of the Central Connection on Port `17301` (`radmin_17301.pcap` #32..#50)
 
-- **O que está indefinido**:
-  - O significado semântico de camada superior dos 3 DWORDs (`[esi+0x04..+0x0c]`, bytes `0..12` do plaintext RSA de 76 bytes) passados a `SHelper_RSession_CreateClient` e do `server_token` de 4 bytes passado a `SHelper_RSession_CreateServer`.
-- **O que já foi investigado**:
-  - Em `shelper.dll!0x1006b860` (`0x1006a690`), `0x1006a512`, `0x1006a30c`, `0x1006a4cc`, `0x1006bbb0` e `0x1006bc30`, confirmamos que `shelper.dll` trata esses valores como inteiros opacos de 32 bits transportados dentro do handshake e disponibilizados ao par remoto após `is_established == 1`.
-  - Em `RvROLClient.dll!0x10096bf0..0x10097060`, verificamos que após `RSession::GetNextBuffer` concluir, o servidor chama `0x100dd090` (`GetClientDataOnServer`) e valida o valor em `0x100dc890`.
-- **Qual evidência está faltando**:
-  - Identificar os valores exatos passados pelos chamadores de `RvROLClient.dll!0x10096660` e validados em `0x100dc890`.
-- **Qual análise adicional resolveria a dúvida**:
-  - Desmontar `RvROLClient.dll!0x10096660..0x10096800` e `0x100dc890` para mapear os campos do objeto chamador que alimentam `d0, d1, d2` e `server_token`.
+- **What is undefined**:
+  - The exact internal format and the cryptographic operations of each of the intermediate packets (`192B`, `32B`, `256B`, `224B`, `224B`, `48B`, `48B`) exchanged after the version frame `[03 00 00 00]` on TCP port `17301`.
+- **What has already been investigated**:
+  - We identified in `RvROLClient.dll!0x100dc6e0` and `0x1003dd40..0x1003f530` that `shelper.dll` exports two distinct families:
+    1. `SHelper_RSession_*` (`0x1006b860` / `0x1006a2b0`: `256B` `C->S` RSA PKCS#1 v1.5 with `76B` plaintext -> `4B` `S->C` token), used by `RvROLClient.dll!0x10096660..0x10096ff2` and fully implemented in this Phase 1.
+    2. `SHelper_*` (`0x1006ab90` `SHelper_CreateClient`, `0x1006ad20` `SHelper_CreateServer`, `0x1006b1e0` `SHelper_GetNextBuffer`, `0x1006b010` `SHelper_GetKey`, `0x1006b1d0` `SHelper_GetNetworkProtocolVersion = 3`), used by `RvROLClient.dll!0x1003eb30` on port `17301`.
+  - We correlated the packets of `radmin_17301.pcap` by separating the two concurrent TCP flows (`49494` and `49493`), showing that packet #44 (`S->C`, `4B` `03000000` on `49493`), #35/#46 (`S->C`, `192B`) and #39/#48 (`S->C`, `256B`) belong to the `SHelper_*` machine (`0x1006b1e0`) and not to the `SHelper_RSession_*` machine (`0x1006a2b0`).
+- **What evidence is missing**:
+  - The complete disassembly of the internal subroutines called by `shelper.dll!0x1006b1e0` (in the range `0x10066800..0x10069b00`) and the extraction of the central server's public-key parameters passed to `SHelper_CreateClient` (`0x1006ab90`).
+- **What additional analysis would resolve the question**:
+  - Statically disassemble `shelper.dll!0x10066800..0x10069b00` and `RvROLClient.dll!0x1003eb30..0x1003f530` to document each state of `SHelper_GetNextBuffer` (`0x1006b1e0`) and extract the central server's RSA modulus from the `.rdata` segment of `RvROLClient.dll` / `RvControlSvc.exe`.
 
 ---
 
-## 3. Conteúdo Decifrado dos Pacotes de Controle Pós-Handshake (Fases 2 e 3)
+## 2. Meaning of the 3 Header DWORDs (`client_params: [u32; 3]`) and of the `server_token` (`u32`) in `SHelper_RSession`
 
-- **O que está indefinido**:
-  - Os payloads em texto claro dos pacotes cifrados trocados após a ativação do `SHelper_CChannel` nas capturas `radmin_17301.pcap`, `radmin_vm.pcap` e `radmin_vm2.pcap`.
-- **O que já foi investigado**:
-  - Comprovamos que a chave AES-256 de cada sessão é gerada dinamicamente via `RAND_bytes` (`0x10063530`) no momento do handshake e cifrada com RSA-2048 PKCS#1 v1.5.
-- **Qual evidência está faltando**:
-  - Como os PCAPs históricos não vieram acompanhados de dump de memória das chaves efêmeras daquelas sessões, os pacotes pós-handshake dos PCAPs não podem ser decifrados offline sem a chave privada do servidor ou o buffer de `SHelper_GetKey` / `SHelper_RSession_GetKey`.
-- **Qual análise adicional resolveria a dúvida**:
-  - Para a Fase 2 e Fase 3, combinar a análise estática dos serializadores/parsers TLV em `RvROLClient.dll` (`0x10029aa0`, `0x1002b2c0`) com instrumentação dinâmica (Frida/x64dbg em `shelper.dll!0x10063000` `CChannel_Encrypt` e `0x100630f0` `CChannel_Decrypt`) caso uma VM Windows com o cliente oficial esteja disponível.
+- **What is undefined**:
+  - The higher-level semantic meaning of the 3 DWORDs (`[esi+0x04..+0x0c]`, bytes `0..12` of the 76-byte RSA plaintext) passed to `SHelper_RSession_CreateClient`, and of the 4-byte `server_token` passed to `SHelper_RSession_CreateServer`.
+- **What has already been investigated**:
+  - In `shelper.dll!0x1006b860` (`0x1006a690`), `0x1006a512`, `0x1006a30c`, `0x1006a4cc`, `0x1006bbb0` and `0x1006bc30`, we confirmed that `shelper.dll` treats these values as opaque 32-bit integers carried inside the handshake and made available to the remote peer after `is_established == 1`.
+  - In `RvROLClient.dll!0x10096bf0..0x10097060`, we verified that after `RSession::GetNextBuffer` completes, the server calls `0x100dd090` (`GetClientDataOnServer`) and validates the value in `0x100dc890`.
+- **What evidence is missing**:
+  - Identify the exact values passed by the callers of `RvROLClient.dll!0x10096660` and validated in `0x100dc890`.
+- **What additional analysis would resolve the question**:
+  - Disassemble `RvROLClient.dll!0x10096660..0x10096800` and `0x100dc890` to map the fields of the calling object that feed `d0, d1, d2` and `server_token`.
+
+---
+
+## 3. Decrypted Content of the Post-Handshake Control Packets (Phases 2 and 3)
+
+- **What is undefined**:
+  - The plaintext payloads of the encrypted packets exchanged after activation of `SHelper_CChannel` in the captures `radmin_17301.pcap`, `radmin_vm.pcap` and `radmin_vm2.pcap`.
+- **What has already been investigated**:
+  - We established that the AES-256 key of each session is generated dynamically via `RAND_bytes` (`0x10063530`) at the time of the handshake and encrypted with RSA-2048 PKCS#1 v1.5.
+- **What evidence is missing**:
+  - Because the historical PCAPs did not come with a memory dump of the ephemeral keys of those sessions, the post-handshake packets in the PCAPs cannot be decrypted offline without the server's private key or the buffer of `SHelper_GetKey` / `SHelper_RSession_GetKey`.
+- **What additional analysis would resolve the question**:
+  - For Phases 2 and 3, combine the static analysis of the TLV serializers/parsers in `RvROLClient.dll` (`0x10029aa0`, `0x1002b2c0`) with dynamic instrumentation (Frida/x64dbg at `shelper.dll!0x10063000` `CChannel_Encrypt` and `0x100630f0` `CChannel_Decrypt`), if a Windows VM with the official client is available.

@@ -1,8 +1,3 @@
-//! Configuração programática de interfaces de rede Linux via ioctl / Netlink.
-//!
-//! Equivalente no Linux às operações de inicialização e parametrização do
-//! driver Windows NetMP60_1_1_64.sys (atribuição de IP virtual 26.x.x.x,
-//! máscara de sub-rede /8, MTU 1500 e ativação IFF_UP).
 
 use std::net::Ipv4Addr;
 use thiserror::Error;
@@ -20,11 +15,9 @@ pub enum NetlinkError {
     Io(#[from] std::io::Error),
 }
 
-/// Configurador de interfaces de rede de baixo nível no Linux.
 pub struct InterfaceConfigurator;
 
 impl InterfaceConfigurator {
-    /// Configura o endereço IPv4 e máscara de rede na interface especificada.
     pub fn set_ip_and_netmask(
         ifname: &str,
         ip: Ipv4Addr,
@@ -43,7 +36,6 @@ impl InterfaceConfigurator {
         }
         let _guard = SockCloser(sock);
 
-        // 1. Configurar IP (SIOCSIFADDR)
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         Self::copy_ifname(ifname, &mut ifr.ifr_name)?;
 
@@ -80,7 +72,6 @@ impl InterfaceConfigurator {
             )));
         }
 
-        // 2. Configurar Máscara de Sub-rede (SIOCSIFNETMASK)
         let mut ifr_mask: libc::ifreq = unsafe { std::mem::zeroed() };
         Self::copy_ifname(ifname, &mut ifr_mask.ifr_name)?;
 
@@ -116,7 +107,6 @@ impl InterfaceConfigurator {
         Ok(())
     }
 
-    /// Configura o MTU da interface.
     pub fn set_mtu(ifname: &str, mtu: u16) -> std::result::Result<(), NetlinkError> {
         let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if sock < 0 {
@@ -156,7 +146,6 @@ impl InterfaceConfigurator {
         Ok(())
     }
 
-    /// Ativa o estado da interface (equivalente a `ip link set <ifname> up`).
     pub fn set_up(ifname: &str) -> std::result::Result<(), NetlinkError> {
         let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if sock < 0 {
@@ -174,7 +163,6 @@ impl InterfaceConfigurator {
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         Self::copy_ifname(ifname, &mut ifr.ifr_name)?;
 
-        // Lê flags atuais
         let res = unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &ifr) };
         if res < 0 {
             let last_err = std::io::Error::last_os_error();
@@ -206,7 +194,6 @@ impl InterfaceConfigurator {
         Ok(())
     }
 
-    /// Configura o endereço MAC físico da interface (SIOCSIFHWADDR).
     pub fn set_mac_address(ifname: &str, mac: [u8; 6]) -> std::result::Result<(), NetlinkError> {
         let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if sock < 0 {
@@ -280,14 +267,12 @@ mod tests {
 
     #[test]
     fn test_nonexistent_interface_error_classification() {
-        // Tentar configurar interface que não existe no sistema de teste
         let res = InterfaceConfigurator::set_ip_and_netmask(
             "nonexistent999",
             Ipv4Addr::new(26, 0, 0, 1),
             Ipv4Addr::new(255, 0, 0, 0),
         );
 
-        // Deve retornar erro de permissão ou interface não encontrada
         assert!(res.is_err());
         match res.unwrap_err() {
             NetlinkError::PermissionDenied(_) | NetlinkError::InterfaceNotFound(_) => {}

@@ -316,7 +316,6 @@ impl TlvRecord {
             }
     }
 
-    /// Valida se o registro cumpre todas as restrições estruturais, compatibilidade de tipos e limites de tamanho.
     pub fn validate(&self) -> Result<(), TlvError> {
         let expected_type = self.tag.tlv_type();
         let compatible = matches!(
@@ -382,7 +381,6 @@ impl TlvRecord {
         }
     }
 
-    /// Serialização segura que valida limites antes de alocar ou escrever bytes.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>, TlvError> {
         self.validate()?;
         let encoded_len = self.encoded_len();
@@ -435,11 +433,6 @@ impl TlvRecord {
         Ok(buf.to_vec())
     }
 
-    /// Serializa para bytes.
-    ///
-    /// # Panics
-    /// Dispara panic somente se o registro violar limites estruturais (ex.: `wire_len` inválido ou buffer excessivo).
-    /// Para caminhos com dados não confiáveis, utilize [`try_to_bytes`](Self::try_to_bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
         self.try_to_bytes()
             .expect("falha ao serializar TlvRecord: restrições de formato ou tamanho violadas")
@@ -545,20 +538,12 @@ impl TlvMessage {
         }
     }
 
-    /// Retorna o tamanho total codificado da mensagem em bytes acumulados.
     pub fn encoded_len(&self) -> usize {
         self.records
             .iter()
             .fold(0usize, |acc, r| acc.saturating_add(r.encoded_len()))
     }
 
-    /// Tenta adicionar um registro, validando limites de quantidade, tamanho individual e tamanho acumulado.
-    ///
-    /// Garante que:
-    /// - A quantidade de registros não exceda [`MAX_TLV_RECORDS_PER_MESSAGE`].
-    /// - O registro cumpra suas restrições individuais via [`validate`](TlvRecord::validate).
-    /// - O tamanho acumulado não ultrapasse [`MAX_TLV_MESSAGE_SIZE`], prevenindo overflow com `checked_add`.
-    /// - Em caso de erro, nenhum registro seja inserido, mantendo o estado da mensagem inalterado.
     pub fn try_add(&mut self, record: TlvRecord) -> Result<(), TlvError> {
         if self.records.len() >= MAX_TLV_RECORDS_PER_MESSAGE {
             return Err(TlvError::TooManyRecords(self.records.len()));
@@ -588,11 +573,6 @@ impl TlvMessage {
         Ok(())
     }
 
-    /// Adiciona um registro na mensagem TLV.
-    ///
-    /// # Panics
-    /// Dispara panic se a mensagem exceder [`MAX_TLV_RECORDS_PER_MESSAGE`] ou [`MAX_TLV_MESSAGE_SIZE`],
-    /// ou se o registro violar restrições estruturais. Para tratamento fallible sem pânico, utilize [`try_add`](Self::try_add).
     pub fn add(&mut self, record: TlvRecord) {
         self.try_add(record)
             .expect("falha ao adicionar registro na mensagem TLV: limites de tamanho ou quantidade excedidos");
@@ -630,68 +610,34 @@ impl TlvMessage {
         self.try_add(TlvRecord::new_string(tag, val))
     }
 
-    /// Adiciona um valor `U32` à mensagem.
-    ///
-    /// # Panics
-    /// Dispara panic se os limites da mensagem forem excedidos. Para tratamento sem pânico, utilize [`try_add_u32`](Self::try_add_u32).
     pub fn add_u32(&mut self, tag: TlvTag, val: u32) {
         self.add(TlvRecord::new_u32(tag, val));
     }
 
-    /// Adiciona um valor `U64` à mensagem.
-    ///
-    /// # Panics
-    /// Dispara panic se os limites da mensagem forem excedidos. Para tratamento sem pânico, utilize [`try_add_u64`](Self::try_add_u64).
     pub fn add_u64(&mut self, tag: TlvTag, val: u64) {
         self.add(TlvRecord::new_u64(tag, val));
     }
 
-    /// Adiciona um valor `I32` à mensagem.
-    ///
-    /// # Panics
-    /// Dispara panic se os limites da mensagem forem excedidos. Para tratamento sem pânico, utilize [`try_add_i32`](Self::try_add_i32).
     pub fn add_i32(&mut self, tag: TlvTag, val: i32) {
         self.add(TlvRecord::new_i32(tag, val));
     }
 
-    /// Adiciona um valor `BOOL` com representação wire de 1 byte.
-    ///
-    /// # Panics
-    /// Dispara panic se os limites da mensagem forem excedidos. Para tratamento sem pânico, utilize [`try_add_bool_1`](Self::try_add_bool_1).
     pub fn add_bool_1(&mut self, tag: TlvTag, val: bool) {
         self.add(TlvRecord::new_bool_1(tag, val));
     }
 
-    /// Adiciona um valor `BOOL` com representação wire de 4 bytes.
-    ///
-    /// # Panics
-    /// Dispara panic se os limites da mensagem forem excedidos. Para tratamento sem pânico, utilize [`try_add_bool_4`](Self::try_add_bool_4).
     pub fn add_bool_4(&mut self, tag: TlvTag, val: bool) {
         self.add(TlvRecord::new_bool_4(tag, val));
     }
 
-    /// Adiciona um valor `BOOL` preservando bytes brutos customizados.
-    ///
-    /// # Panics
-    /// Dispara panic se os bytes não tiverem tamanho 1 ou 4, ou se os limites da mensagem forem excedidos.
     pub fn add_bool_raw(&mut self, tag: TlvTag, raw: Vec<u8>) {
         self.add(TlvRecord::new_bool_raw(tag, raw));
     }
 
-    /// Adiciona um buffer binário (`TlvType::Buffer` / `0x09`) à mensagem.
-    ///
-    /// # Panics
-    /// Dispara panic se o buffer exceder [`MAX_TLV_VALUE_SIZE`] ou os limites da mensagem forem violados.
-    /// Para tratamento sem pânico, utilize [`try_add_buffer`](Self::try_add_buffer).
     pub fn add_buffer(&mut self, tag: TlvTag, val: Vec<u8>) {
         self.add(TlvRecord::new_buffer(tag, val));
     }
 
-    /// Adiciona uma string UTF-8 (`TlvType::StringUtf8` / `0x0B`) à mensagem.
-    ///
-    /// # Panics
-    /// Dispara panic se a string exceder [`MAX_STRING_LEN`] ou os limites da mensagem forem violados.
-    /// Para tratamento sem pânico, utilize [`try_add_string`](Self::try_add_string).
     pub fn add_string(&mut self, tag: TlvTag, val: String) {
         self.add(TlvRecord::new_string(tag, val));
     }
@@ -732,7 +678,6 @@ impl TlvMessage {
         self.get(tag).map(|r| r.as_bytes())
     }
 
-    /// Serialização segura que valida limites estruturais e impede mensagens maiores que 65.535 bytes.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>, TlvError> {
         if self.records.len() > MAX_TLV_RECORDS_PER_MESSAGE {
             return Err(TlvError::TooManyRecords(self.records.len()));
@@ -760,11 +705,6 @@ impl TlvMessage {
         Ok(buf)
     }
 
-    /// Serializa para bytes no framing TLV.
-    ///
-    /// # Panics
-    /// Dispara panic se a mensagem exceder 65.535 bytes ou violar limites estruturais.
-    /// Para caminhos com dados dinâmicos não confiáveis, utilize [`try_to_bytes`](Self::try_to_bytes).
     pub fn to_bytes(&self) -> Vec<u8> {
         self.try_to_bytes()
             .expect("falha ao serializar TlvMessage: mensagem excede limites permitidos")
@@ -795,9 +735,6 @@ impl TlvMessage {
 mod tests {
     use super::*;
 
-    // -----------------------------------------------------------------------
-    // 1. Extração de Tipos e Compatibilidade Básica
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_tlv_type_extraction() {
@@ -813,7 +750,6 @@ mod tests {
         assert_eq!(TlvTag::TAG_TIMESTAMP.tlv_type(), TlvType::U64);
         assert_eq!(TlvTag::TAG_TIMESTAMP.field_id(), 481);
 
-        // Validar novos tipos catalogados da taxonomia Famatech
         assert_eq!(TlvTag::new(0x03, 100).tlv_type(), TlvType::I32);
         assert_eq!(TlvTag::new(0x04, 200).tlv_type(), TlvType::Bool);
         assert_eq!(TlvTag::new(0x05, 300).tlv_type(), TlvType::Float);
@@ -825,19 +761,14 @@ mod tests {
         assert_eq!(TlvTag::new(0x0D, 900).tlv_type(), TlvType::List);
         assert_eq!(TlvTag::new(0x0E, 950).tlv_type(), TlvType::Map);
 
-        // Tipos não catalogados mapeiam para Unknown
         let custom = TlvTag::new(0x77, 123);
         assert_eq!(custom.tlv_type(), TlvType::Unknown(0x77));
         assert_eq!(custom.field_id(), 123);
     }
 
-    // -----------------------------------------------------------------------
-    // 2. Testes com Vetores Binários Independentes Sintéticos
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_synthetic_parse_i32_endianness_and_signs() {
-        // Tag 0x03000001, valor +10000 (0x00002710)
         let pos_bytes = [
             0x00, 0x00, 0x00, 0x04, // Length = 4
             0x03, 0x00, 0x00, 0x01, // Tag
@@ -847,7 +778,6 @@ mod tests {
         assert_eq!(consumed, 12);
         assert_eq!(rec_pos.as_i32(), Some(10000));
 
-        // Tag 0x03000002, valor -512 (0xFFFFFE00)
         let neg_bytes = [
             0x00, 0x00, 0x00, 0x04, // Length = 4
             0x03, 0x00, 0x00, 0x02, // Tag
@@ -860,7 +790,6 @@ mod tests {
 
     #[test]
     fn test_synthetic_parse_bool_1_and_4_bytes() {
-        // BOOL com wire_len = 1 (true)
         let bool1_true = [
             0x00, 0x00, 0x00, 0x01, // Length = 1
             0x04, 0x00, 0x01, 0xe7, // Tag (PROP_IS_ONLINE)
@@ -877,7 +806,6 @@ mod tests {
             }
         );
 
-        // BOOL com wire_len = 1 (false)
         let bool1_false = [
             0x00, 0x00, 0x00, 0x01, // Length = 1
             0x04, 0x00, 0x01, 0xe7, // Tag
@@ -893,7 +821,6 @@ mod tests {
             }
         );
 
-        // BOOL com wire_len = 4 (true)
         let bool4_true = [
             0x00, 0x00, 0x00, 0x04, // Length = 4
             0x04, 0x00, 0x01, 0xe7, // Tag
@@ -910,7 +837,6 @@ mod tests {
             }
         );
 
-        // BOOL com wire_len = 4 (false)
         let bool4_false = [
             0x00, 0x00, 0x00, 0x04, // Length = 4
             0x04, 0x00, 0x01, 0xe7, // Tag
@@ -931,7 +857,6 @@ mod tests {
     fn test_bool_non_canonical_1_byte_roundtrip() {
         let tag = TlvTag::new(0x04, 20);
 
-        // Canônico: 0x01 (true)
         let rec_can_t = TlvRecord::new_bool_1(tag, true);
         let bytes_can_t = rec_can_t.to_bytes();
         assert_eq!(bytes_can_t.len(), 9);
@@ -948,7 +873,6 @@ mod tests {
         );
         assert_eq!(parsed_can_t.to_bytes(), bytes_can_t);
 
-        // Canônico: 0x00 (false)
         let rec_can_f = TlvRecord::new_bool_1(tag, false);
         let bytes_can_f = rec_can_f.to_bytes();
         assert_eq!(bytes_can_f[8], 0x00);
@@ -963,7 +887,6 @@ mod tests {
         );
         assert_eq!(parsed_can_f.to_bytes(), bytes_can_f);
 
-        // Valores não canônicos diferentes de zero em 1 byte (ex.: 0x02, 0x42, 0x7F, 0xFF)
         for non_canonical_byte in [0x02u8, 0x42, 0x7F, 0xFF] {
             let raw_wire = [
                 0x00,
@@ -987,7 +910,6 @@ mod tests {
                     raw: vec![non_canonical_byte],
                 }
             );
-            // Preservação exata bit a bit na re-serialização (não converte para 0x01!)
             let re_serialized = parsed.to_bytes();
             assert_eq!(re_serialized, raw_wire);
             assert_eq!(re_serialized[8], non_canonical_byte);
@@ -998,7 +920,6 @@ mod tests {
     fn test_bool_non_canonical_4_bytes_roundtrip() {
         let tag = TlvTag::new(0x04, 21);
 
-        // Canônico: 0x00000001 (true)
         let rec_can_t = TlvRecord::new_bool_4(tag, true);
         let bytes_can_t = rec_can_t.to_bytes();
         assert_eq!(bytes_can_t.len(), 12);
@@ -1015,7 +936,6 @@ mod tests {
         );
         assert_eq!(parsed_can_t.to_bytes(), bytes_can_t);
 
-        // Canônico: 0x00000000 (false)
         let rec_can_f = TlvRecord::new_bool_4(tag, false);
         let bytes_can_f = rec_can_f.to_bytes();
         assert_eq!(&bytes_can_f[8..12], &[0x00, 0x00, 0x00, 0x00]);
@@ -1030,7 +950,6 @@ mod tests {
         );
         assert_eq!(parsed_can_f.to_bytes(), bytes_can_f);
 
-        // Não canônico diferente de zero em 4 bytes (ex: 0x000000FF, 0x00010000, 0x12345678, 0xFFFFFFFF)
         let non_canonical_samples = [
             [0x00u8, 0x00, 0x00, 0xFF],
             [0x00, 0x01, 0x00, 0x00],
@@ -1053,7 +972,6 @@ mod tests {
                     raw: sample.to_vec(),
                 }
             );
-            // Preservação exata bit a bit na re-serialização (não converte para 0x00000001!)
             let re_serialized = parsed.to_bytes();
             assert_eq!(re_serialized, raw_wire);
             assert_eq!(&re_serialized[8..12], &sample);
@@ -1062,7 +980,6 @@ mod tests {
 
     #[test]
     fn test_synthetic_parse_string_utf8() {
-        // Tag 0x0B0001DC (PROP_NETWORK_NAME), "RadminNet" (9 bytes)
         let str_bytes = [
             0x00, 0x00, 0x00, 0x09, // Length = 9
             0x0B, 0x00, 0x01, 0xDC, // Tag
@@ -1077,7 +994,6 @@ mod tests {
 
     #[test]
     fn test_synthetic_parse_float_and_double_opaque() {
-        // FLOAT (0x05): 4 bytes opacos
         let float_bytes = [
             0x00, 0x00, 0x00, 0x04, 0x05, 0x00, 0x00, 0x10, 0x3F, 0x80, 0x00,
             0x00, // 1.0f em IEEE 754
@@ -1087,7 +1003,6 @@ mod tests {
         assert_eq!(rec_f.value, TlvValue::Float([0x3F, 0x80, 0x00, 0x00]));
         assert_eq!(rec_f.as_bytes(), &[0x3F, 0x80, 0x00, 0x00]);
 
-        // DOUBLE (0x06): 8 bytes opacos
         let double_bytes = [
             0x00, 0x00, 0x00, 0x08, 0x06, 0x00, 0x00, 0x20, 0x40, 0x09, 0x21, 0xFB, 0x54, 0x44,
             0x2D, 0x18, // ~pi em IEEE 754 double
@@ -1129,39 +1044,29 @@ mod tests {
         assert_eq!(parsed.as_bytes(), payload.as_slice());
         assert_eq!(parsed.value, TlvValue::Raw(payload));
 
-        // Confirma round-trip idêntico bit a bit
         assert_eq!(parsed.to_bytes(), bytes);
     }
 
-    // -----------------------------------------------------------------------
-    // 3. Validação com Capturas Reais de Tráfego PCAP (Testes Forenses)
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_parse_real_captured_packet_686() {
-        // Hexadecimal completo extraído diretamente de radmin_vm2.pcap, Pacote #686
         let pcap_hex = "0000012000000004010001df00000001000000040100032b0000000200000100090001ca705f461c05ec79e7a71b736ceacefb245c31906b29a6d686397b5efc8eaba571884ad7615dbf80ccefd5bdc26a33c22c2f77930a555dec9fd8398550f258edbb876e3832bae01d6db3e88095a91662c95b9e0c282e603682471a46a0c68c37f9204364b580468995edaea45d77bc591f3fd288b74162fd5d282bcf87dafbce10865f8afa57ef60abfd407d2c300435fb576960afc30b86fb4688e20dbc9f4f8bd30b130f9957ddd52603bdda9983ec8867caee864b055649df6532b7400b76bbf8f93789bbb4c785d07768db835241d990b8b40c2ec91d369faa0997e768183d75252b7a35937b63842631e860dafbb19036d38b67d5da90df92283ecc7add65";
         let raw_bytes = hex_to_bytes(pcap_hex);
 
-        // 1. Validar framing externo
         assert_eq!(raw_bytes.len(), 292);
         let frame_len = u32::from_be_bytes(raw_bytes[0..4].try_into().unwrap()) as usize;
         assert_eq!(frame_len, 288);
 
-        // 2. Extrair e validar mensagens TLV internas
         let inner_payload = &raw_bytes[4..4 + frame_len];
         let tlv_msg =
             TlvMessage::parse(inner_payload).expect("TLV parse de pacote #686 deve ter sucesso");
 
         assert_eq!(tlv_msg.records.len(), 3);
 
-        // Campo 1: 0x010001df (TAG_SESSION_TOKEN) == 1
         assert_eq!(tlv_msg.get_u32(TlvTag::TAG_SESSION_TOKEN), Some(1));
 
-        // Campo 2: 0x0100032b (TAG_PEER_STATUS) == 2
         assert_eq!(tlv_msg.get_u32(TlvTag::TAG_PEER_STATUS), Some(2));
 
-        // Campo 3: 0x090001ca (TAG_RSA_PUBLIC_KEY), 256 bytes (RSA-2048)
         let rsa_pub = tlv_msg
             .get_buffer(TlvTag::TAG_RSA_PUBLIC_KEY)
             .expect("campo RSA deve existir");
@@ -1169,15 +1074,12 @@ mod tests {
         assert_eq!(&rsa_pub[0..4], &[0x70, 0x5f, 0x46, 0x1c]);
         assert_eq!(&rsa_pub[252..256], &[0xcc, 0x7a, 0xdd, 0x65]);
 
-        // 3. Validar round-trip idêntico bit a bit
         let reserialized = tlv_msg.to_bytes();
         assert_eq!(reserialized.as_slice(), inner_payload);
     }
 
     #[test]
     fn test_forensic_packet_5487_reply_radmin_vm_pcap() {
-        // Hexadecimal comprovado diretamente em radmin_vm.pcap quadro #5487 (porta 17351 -> cliente):
-        // Frame TCP total = 16 bytes: 00 00 00 0c (framing 12B) + 12B TLV payload
         let pcap_hex_reply = "0000000c00000004010001df00000002";
         let raw_bytes = hex_to_bytes(pcap_hex_reply);
         assert_eq!(raw_bytes.len(), 16);
@@ -1191,14 +1093,10 @@ mod tests {
         let msg = TlvMessage::parse(tlv_payload).expect("parsing do payload TLV do pacote #5487");
         assert_eq!(msg.records.len(), 1);
 
-        // Tag 0x010001df com status = 2 (Aprovado / Confirmado)
         assert_eq!(msg.get_u32(TlvTag(0x010001df)), Some(2));
         assert_eq!(msg.try_to_bytes().unwrap().as_slice(), tlv_payload);
     }
 
-    // -----------------------------------------------------------------------
-    // 4. Testes de Limites de Segurança, Borda e Rejeição Defensiva
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_security_truncated_header_rejected() {
@@ -1213,7 +1111,6 @@ mod tests {
 
     #[test]
     fn test_security_truncated_value_rejected() {
-        // Cabeçalho declara 10 bytes de valor, mas apenas 4 fornecidos
         let mut buf = vec![0x00, 0x00, 0x00, 0x0A, 0x01, 0x00, 0x00, 0x01];
         buf.extend_from_slice(&[1, 2, 3, 4]);
         assert_eq!(
@@ -1227,28 +1124,24 @@ mod tests {
 
     #[test]
     fn test_security_scalar_length_mismatch_rejected() {
-        // U32 com 3 bytes
         let bad_u32 = [0, 0, 0, 3, 0x01, 0, 0, 1, 1, 2, 3];
         assert_eq!(
             TlvRecord::parse(&bad_u32),
             Err(TlvError::InvalidU32Length(3))
         );
 
-        // U64 com 7 bytes
         let bad_u64 = [0, 0, 0, 7, 0x02, 0, 0, 1, 1, 2, 3, 4, 5, 6, 7];
         assert_eq!(
             TlvRecord::parse(&bad_u64),
             Err(TlvError::InvalidU64Length(7))
         );
 
-        // I32 com 5 bytes
         let bad_i32 = [0, 0, 0, 5, 0x03, 0, 0, 1, 1, 2, 3, 4, 5];
         assert_eq!(
             TlvRecord::parse(&bad_i32),
             Err(TlvError::InvalidI32Length(5))
         );
 
-        // BOOL com 0 bytes ou 2 bytes
         let bad_bool_0 = [0, 0, 0, 0, 0x04, 0, 0, 1];
         assert_eq!(
             TlvRecord::parse(&bad_bool_0),
@@ -1261,14 +1154,12 @@ mod tests {
             Err(TlvError::InvalidBoolLength(2))
         );
 
-        // FLOAT com 3 bytes
         let bad_float = [0, 0, 0, 3, 0x05, 0, 0, 1, 1, 2, 3];
         assert_eq!(
             TlvRecord::parse(&bad_float),
             Err(TlvError::InvalidFloatLength(3))
         );
 
-        // DOUBLE com 7 bytes
         let bad_double = [0, 0, 0, 7, 0x06, 0, 0, 1, 1, 2, 3, 4, 5, 6, 7];
         assert_eq!(
             TlvRecord::parse(&bad_double),
@@ -1278,7 +1169,6 @@ mod tests {
 
     #[test]
     fn test_security_invalid_utf8_rejected() {
-        // Tag 0x0B com bytes inválidos para UTF-8
         let bad_utf8 = [
             0x00, 0x00, 0x00, 0x02, 0x0B, 0x00, 0x00, 0x01, 0xC3, 0x28, // Sequência truncada
         ];
@@ -1290,7 +1180,6 @@ mod tests {
 
     #[test]
     fn test_security_string_length_limit_enforced() {
-        // String declarando mais de MAX_STRING_LEN (4096)
         let mut big_str_hdr = vec![0x00, 0x00, 0x10, 0x01, 0x0B, 0x00, 0x00, 0x01]; // len = 4097
         big_str_hdr.resize(8 + 4097, b'A');
         assert_eq!(
@@ -1304,7 +1193,6 @@ mod tests {
 
     #[test]
     fn test_security_allocation_bomb_rejected_without_alloc() {
-        // Cabeçalho declarando tamanho maior que MAX_TLV_VALUE_SIZE
         let huge_hdr = [0x00, 0x01, 0x00, 0x00, 0x09, 0x00, 0x00, 0x01]; // len = 65536
         assert_eq!(
             TlvRecord::parse(&huge_hdr),
@@ -1326,26 +1214,20 @@ mod tests {
 
     #[test]
     fn test_security_max_records_limit_enforced() {
-        // 1025 micro-registros válidos de U32
         let single_rec = [0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 1]; // 12 bytes
         let mut msg_bytes = Vec::with_capacity(12 * 1025);
         for _ in 0..1025 {
             msg_bytes.extend_from_slice(&single_rec);
         }
-        // Deve falhar com TooManyRecords(1024)
         assert_eq!(
             TlvMessage::parse(&msg_bytes),
             Err(TlvError::TooManyRecords(1024))
         );
     }
 
-    // -----------------------------------------------------------------------
-    // 5. Testes de Limites do Serializador e Construção de Mensagens
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_security_serialization_individual_record_limit_rejected() {
-        // Buffer maior que MAX_TLV_VALUE_SIZE (65527)
         let huge_buf = vec![0xAA; MAX_TLV_VALUE_SIZE + 1];
         let rec = TlvRecord::new_buffer(TlvTag::new(0x09, 1), huge_buf);
         assert_eq!(
@@ -1356,7 +1238,6 @@ mod tests {
 
     #[test]
     fn test_security_serialization_string_length_limit_rejected() {
-        // String maior que MAX_STRING_LEN (4096)
         let long_str = "x".repeat(MAX_STRING_LEN + 1);
         let rec = TlvRecord::new_string(TlvTag::new(0x0B, 1), long_str.clone());
         assert_eq!(
@@ -1380,9 +1261,6 @@ mod tests {
     #[test]
     fn test_security_serialization_message_size_limit_rejected() {
         let mut msg = TlvMessage::new();
-        // Adiciona buffers válidos individualmente cuja soma ultrapassa MAX_TLV_MESSAGE_SIZE (65535)
-        // Cada registro com 30.000 bytes úteis ocupa 30.008 bytes encodado
-        // 3 registros ocupariam 90.024 bytes > 65.535
         let part1 = vec![0x11; 30000];
         let part2 = vec![0x22; 30000];
         let part3 = vec![0x33; 30000];
@@ -1392,7 +1270,6 @@ mod tests {
         msg.try_add(TlvRecord::new_buffer(TlvTag::new(0x09, 2), part2))
             .unwrap();
 
-        // A 3ª adição via try_add deve ser rejeitada pelo limite acumulado
         assert_eq!(
             msg.try_add(TlvRecord::new_buffer(TlvTag::new(0x09, 3), part3.clone())),
             Err(TlvError::MessageTooLarge {
@@ -1400,10 +1277,8 @@ mod tests {
                 max: MAX_TLV_MESSAGE_SIZE
             })
         );
-        // Nenhum registro foi inserido após a falha
         assert_eq!(msg.records.len(), 2);
 
-        // Se injetado diretamente no Vec público contornando try_add, try_to_bytes() também rejeita
         msg.records
             .push(TlvRecord::new_buffer(TlvTag::new(0x09, 3), part3));
         assert_eq!(
@@ -1419,10 +1294,6 @@ mod tests {
     fn test_security_try_add_accumulated_size_limit() {
         let mut msg = TlvMessage::new();
 
-        // Adiciona 2 registros de 32.000 bytes cada:
-        // Registro 1: 8 bytes cabeçalho + 32.000 bytes = 32.008 bytes
-        // Registro 2: 8 bytes cabeçalho + 32.000 bytes = 32.008 bytes
-        // Total acumulado: 64.016 bytes (<= 65.535) -> Ok
         msg.try_add(TlvRecord::new_buffer(
             TlvTag::new(0x09, 1),
             vec![0xAA; 32000],
@@ -1439,8 +1310,6 @@ mod tests {
         assert_eq!(msg.encoded_len(), 64016);
         assert_eq!(msg.records.len(), 2);
 
-        // Registro 3: tenta adicionar 2.000 bytes (2.008 encodado)
-        // Novo total seria: 64.016 + 2.008 = 66.024 bytes > 65.535 -> Rejeitado
         let err = msg
             .try_add(TlvRecord::new_buffer(
                 TlvTag::new(0x09, 3),
@@ -1456,11 +1325,9 @@ mod tests {
             }
         );
 
-        // Confirma que nenhum registro foi inserido após a falha
         assert_eq!(msg.records.len(), 2);
         assert_eq!(msg.encoded_len(), 64016);
 
-        // Confirma que a mensagem permanece consistente e serializável
         let serialized = msg
             .try_to_bytes()
             .expect("mensagem válida deve serializar com sucesso");
@@ -1471,10 +1338,7 @@ mod tests {
     #[should_panic(expected = "limites de tamanho ou quantidade excedidos")]
     fn test_security_legacy_add_panics_on_size_limit_overflow() {
         let mut msg = TlvMessage::new();
-        // Adiciona registro de 60.000 bytes (60.008 encodado)
         msg.add_buffer(TlvTag::new(0x09, 1), vec![0xAA; 60000]);
-        // Tenta adicionar outro registro de 10.000 bytes via API legada add_buffer
-        // Total seria 70.016 > 65.535 -> Deve entrar em panic em vez de corromper silenciosamente
         msg.add_buffer(TlvTag::new(0x09, 2), vec![0xBB; 10000]);
     }
 
@@ -1485,7 +1349,6 @@ mod tests {
         for i in 0..1024 {
             msg.add_u32(TlvTag::new(0x01, i), i);
         }
-        // O 1025º registro deve causar panic
         msg.add_u32(TlvTag::new(0x01, 1024), 1024);
     }
 
@@ -1496,13 +1359,11 @@ mod tests {
             msg.try_add(TlvRecord::new_u32(TlvTag::new(0x01, i), i))
                 .unwrap();
         }
-        // A tentativa de adicionar o 1025º registro é rejeitada
         assert_eq!(
             msg.try_add(TlvRecord::new_u32(TlvTag::new(0x01, 1024), 1024)),
             Err(TlvError::TooManyRecords(1024))
         );
 
-        // Se injetado diretamente no Vec público, try_to_bytes() também rejeita
         msg.records
             .push(TlvRecord::new_u32(TlvTag::new(0x01, 1024), 1024));
         assert_eq!(msg.try_to_bytes(), Err(TlvError::TooManyRecords(1025)));
@@ -1510,7 +1371,6 @@ mod tests {
 
     #[test]
     fn test_security_bool_invalid_wire_len_safe_rejection() {
-        // TlvValue::Bool instanciado com tamanho de raw inválido (nem 1 nem 4)
         for invalid_len in [0usize, 2, 3, 5, 8, 16] {
             let rec = TlvRecord {
                 tag: TlvTag::new(0x04, 1),
@@ -1542,7 +1402,6 @@ mod tests {
     fn test_security_bool_value_raw_mismatch_rejected() {
         let tag = TlvTag::new(0x04, 10);
 
-        // 1. value: true com raw: [0x00] (1 byte falso)
         let rec1 = TlvRecord {
             tag,
             value: TlvValue::Bool {
@@ -1555,7 +1414,6 @@ mod tests {
         let mut msg1 = TlvMessage::new();
         assert_eq!(msg1.try_add(rec1), Err(TlvError::BoolValueMismatch));
 
-        // 2. value: false com raw: [0x01] (1 byte verdadeiro)
         let rec2 = TlvRecord {
             tag,
             value: TlvValue::Bool {
@@ -1568,7 +1426,6 @@ mod tests {
         let mut msg2 = TlvMessage::new();
         assert_eq!(msg2.try_add(rec2), Err(TlvError::BoolValueMismatch));
 
-        // 3. value: true com raw: [0x00, 0x00, 0x00, 0x00] (4 bytes falso)
         let rec3 = TlvRecord {
             tag,
             value: TlvValue::Bool {
@@ -1581,7 +1438,6 @@ mod tests {
         let mut msg3 = TlvMessage::new();
         assert_eq!(msg3.try_add(rec3), Err(TlvError::BoolValueMismatch));
 
-        // 4. value: false com raw: [0x00, 0x00, 0x00, 0xFF] (4 bytes verdadeiro)
         let rec4 = TlvRecord {
             tag,
             value: TlvValue::Bool {
@@ -1594,8 +1450,6 @@ mod tests {
         let mut msg4 = TlvMessage::new();
         assert_eq!(msg4.try_add(rec4), Err(TlvError::BoolValueMismatch));
 
-        // 5. Representações válidas não canônicas continuam passando e mantendo round-trip
-        // 1 byte não-canônico: value: true com raw: [0x42]
         let valid_non_can_1 = TlvRecord {
             tag,
             value: TlvValue::Bool {
@@ -1611,7 +1465,6 @@ mod tests {
         assert_eq!(parsed1.as_bool(), Some(true));
         assert_eq!(parsed1.to_bytes(), bytes1);
 
-        // 4 bytes não-canônico: value: true com raw: [0x00, 0x00, 0x00, 0xFF]
         let valid_non_can_4 = TlvRecord {
             tag,
             value: TlvValue::Bool {
@@ -1630,7 +1483,6 @@ mod tests {
 
     #[test]
     fn test_legacy_to_bytes_compatibility() {
-        // Comprova que os métodos existentes to_bytes() continuam funcionando normalmente
         let mut msg = TlvMessage::new();
         msg.add_u32(TlvTag::TAG_SESSION_TOKEN, 10);
         msg.add_u64(TlvTag::TAG_TIMESTAMP, 20);
@@ -1649,9 +1501,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // 6. Registros Repetidos e Round-Trip Simétrico
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_repeated_tags_get_all() {
@@ -1694,7 +1543,6 @@ mod tests {
             Some([1u8, 2, 3, 4, 5].as_slice())
         );
 
-        // Preservação exata dos bytes do BOOL
         assert_eq!(
             parsed.get(TlvTag::new(0x04, 4)).unwrap().value,
             TlvValue::Bool {
@@ -1710,17 +1558,12 @@ mod tests {
             }
         );
 
-        // Serialização simétrica bit a bit
         assert_eq!(parsed.to_bytes(), bytes);
     }
 
-    // -----------------------------------------------------------------------
-    // 7. Validação de Compatibilidade entre TlvTag e TlvValue
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_security_type_mismatch_all_valid_combinations() {
-        // Verifica que todas as combinações válidas passam na validação, serializam e são aceitas por try_add
         let valid_records = vec![
             TlvRecord::new_u32(TlvTag::new(0x01, 1), 42),
             TlvRecord::new_u64(TlvTag::new(0x02, 2), 123456789),
@@ -1760,7 +1603,6 @@ mod tests {
 
     #[test]
     fn test_security_type_mismatch_invalid_primitive_cases() {
-        // Pelo menos um caso inválido para cada tipo primitivo
         let invalid_cases = vec![
             (
                 TlvRecord {
@@ -1859,7 +1701,6 @@ mod tests {
 
     #[test]
     fn test_security_type_mismatch_raw_rules() {
-        // Raw com tipos desconhecidos e não primitivos DEVE ser aceito
         let valid_raw_types = [
             (0x08, TlvType::Compound),
             (0x0A, TlvType::DateTime),
@@ -1874,7 +1715,6 @@ mod tests {
             assert!(rec.try_to_bytes().is_ok());
         }
 
-        // Raw com tipos primitivos DEVE ser rejeitado
         let primitive_types = [
             (0x01, TlvType::U32),
             (0x02, TlvType::U64),
@@ -1906,22 +1746,18 @@ mod tests {
 
     #[test]
     fn test_security_type_mismatch_try_add_and_try_to_bytes_rejected() {
-        // Mensagem com tipo incompatível (ex.: tag Buffer 0x09 com valor U32)
         let mismatched = TlvRecord::new_u32(TlvTag::new(0x09, 1), 42);
         let expected_err = TlvError::TypeMismatch {
             expected: TlvType::Buffer,
             actual: "U32",
         };
 
-        // 1. try_to_bytes no registro individual
         assert_eq!(mismatched.try_to_bytes(), Err(expected_err.clone()));
 
-        // 2. try_add na mensagem
         let mut msg = TlvMessage::new();
         assert_eq!(msg.try_add(mismatched.clone()), Err(expected_err.clone()));
         assert!(msg.records.is_empty(), "nenhum registro deve ser inserido");
 
-        // 3. try_to_bytes na mensagem contendo registro inválido
         msg.records.push(mismatched);
         assert_eq!(msg.try_to_bytes(), Err(expected_err));
     }

@@ -1,19 +1,3 @@
-//! Comunicação Inter-Processos (IPC) entre GUI/CLI e o serviço daemon Radmin VPN.
-//!
-//! Protocolo IPC no Linux:
-//! - Unix Domain Socket com permissões restritas (0600 para o socket, 0700 para o diretório).
-//! - Caminho padrão: `/run/radmin-vpn/gui.sock` (com fallback para `~/.config/radmin-vpn/gui.sock` ou temporário).
-//! - Handshake inicial: Estrutura binária de 25 bytes (`0x19` bytes):
-//!   `[u32 magic=4][u32 flags=1][u32 pid][u32 reserved=0][u32 buf_size=0x80][u32 version=1][u8 status=1]`
-//! - Despacho de Comandos:
-//!   - 0x03ec (1004): SwitchPower (conectar/ligar túnel)
-//!   - 0x03ed (1005): JoinNetwork (entrar em rede)
-//!   - 0x03ee (1006): CreateNetwork (criar nova rede)
-//!   - 0x03ef (1007): Disconnect (desconectar/desligar túnel)
-//!   - 0x03f0 (1008): LeaveNetwork (sair de rede)
-//!   - 0x03f1 (1009): EnumNetworks (listar redes)
-//!   - 0x03f2 (1010): GetNodeInfo (consultar informações do nó)
-//!   - 0x03f6 (1014): QueryStatus / Handshake check
 
 use crate::Result;
 use bytes::BufMut;
@@ -34,7 +18,6 @@ pub const IPC_DEFAULT_BUF_SIZE: u32 = 0x00000080;
 pub const IPC_DEFAULT_VERSION: u32 = 0x00000001;
 pub const IPC_STATUS_READY: u8 = 0x01;
 
-/// Resolve o caminho padrão do socket IPC, verificando /run e /tmp com base no usuário e existência.
 pub fn resolve_socket_path() -> PathBuf {
     let system_path = PathBuf::from(crate::GUI_CHANNEL_PATH);
     if system_path.exists() {
@@ -68,7 +51,6 @@ pub enum IpcError {
     Serialization(String),
 }
 
-/// Cabeçalho de handshake inicial de 25 bytes enviado ao conectar no socket/pipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IpcHandshake {
     pub magic: u32,
@@ -146,7 +128,6 @@ impl IpcHandshake {
     }
 }
 
-/// Identificadores numéricos dos comandos IPC do Radmin VPN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum IpcCommandId {
@@ -176,7 +157,6 @@ impl IpcCommandId {
     }
 }
 
-/// Comandos de alto nível transmitidos via IPC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcCommand {
     SwitchPower {
@@ -215,8 +195,6 @@ impl IpcCommand {
         }
     }
 
-    /// Serializa o comando em framing binário:
-    /// `[u16 command_id][u32 payload_len][json payload]`
     pub fn serialize(&self) -> Result<Vec<u8>> {
         let payload = serde_json::to_vec(self)?;
         let mut buf = Vec::with_capacity(6 + payload.len());
@@ -226,7 +204,6 @@ impl IpcCommand {
         Ok(buf)
     }
 
-    /// Desserializa o comando a partir do buffer estruturado.
     pub fn deserialize(buf: &[u8]) -> Result<Self> {
         if buf.len() < 6 {
             return Err(anyhow::anyhow!("Buffer IPC truncado (< 6 bytes)"));
@@ -246,7 +223,6 @@ impl IpcCommand {
     }
 }
 
-/// Resposta do serviço para o cliente IPC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpcResponse {
     Success {
@@ -300,7 +276,6 @@ impl IpcResponse {
     }
 }
 
-/// Handler abstrato para processar comandos do daemon.
 pub trait IpcHandler: Send + Sync + 'static {
     fn handle(
         &self,
@@ -308,7 +283,6 @@ pub trait IpcHandler: Send + Sync + 'static {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = IpcResponse> + Send + '_>>;
 }
 
-/// Servidor IPC que escuta requisições de controle da GUI ou CLI via Unix Domain Socket.
 pub struct IpcServer {
     socket_path: PathBuf,
     listener: Option<UnixListener>,
@@ -326,12 +300,9 @@ impl IpcServer {
         &self.socket_path
     }
 
-    /// Inicia o listener garantindo permissões seguras (0700 dir, 0600 socket)
-    /// e removendo sockets órfãos anteriores se existirem.
     pub fn bind(&mut self) -> Result<()> {
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent)?;
-            // Permissão restrita no diretório pai: 0700
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
         if self.socket_path.exists() {
@@ -340,7 +311,6 @@ impl IpcServer {
 
         let listener = UnixListener::bind(&self.socket_path)?;
 
-        // Permissão restrita no arquivo do socket: 0600
         let _ = std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600));
 
         self.listener = Some(listener);
@@ -348,7 +318,6 @@ impl IpcServer {
         Ok(())
     }
 
-    /// Aceita uma conexão e valida o handshake inicial de 25 bytes.
     pub async fn accept_client(&self) -> Result<(UnixStream, IpcHandshake)> {
         let listener = self
             .listener
@@ -357,7 +326,6 @@ impl IpcServer {
 
         let (mut stream, _addr) = listener.accept().await?;
 
-        // 1. Receber handshake do cliente (25 bytes)
         let mut handshake_buf = [0u8; IPC_HANDSHAKE_SIZE];
         stream.read_exact(&mut handshake_buf).await?;
         let client_handshake = IpcHandshake::parse(&handshake_buf)?;
@@ -366,15 +334,12 @@ impl IpcServer {
             client_handshake.client_pid
         );
 
-        // 2. Responder com handshake do servidor
         let server_handshake = IpcHandshake::new(std::process::id());
         stream.write_all(&server_handshake.to_bytes()).await?;
 
         Ok((stream, client_handshake))
     }
 
-    /// Executa o loop assíncrono do servidor atendendo múltiplos clientes concorrentes
-    /// com despacho real de comandos e encerramento gracioso via shutdown channel.
     pub async fn run_loop<H: IpcHandler>(
         mut self,
         handler: Arc<H>,
@@ -392,7 +357,6 @@ impl IpcServer {
                         Ok((mut stream, _addr)) => {
                             let handler_clone = handler.clone();
                             tokio::spawn(async move {
-                                // 1. Handshake do cliente
                                 let mut handshake_buf = [0u8; IPC_HANDSHAKE_SIZE];
                                 if let Err(e) = stream.read_exact(&mut handshake_buf).await {
                                     warn!("Falha ao ler handshake IPC do cliente: {}", e);
@@ -402,14 +366,12 @@ impl IpcServer {
                                     warn!("Handshake IPC inválido do cliente: {}", e);
                                     return;
                                 }
-                                // Responde com handshake do servidor
                                 let server_hs = IpcHandshake::new(std::process::id());
                                 if let Err(e) = stream.write_all(&server_hs.to_bytes()).await {
                                     warn!("Falha ao responder handshake IPC: {}", e);
                                     return;
                                 }
 
-                                // 2. Loop de leitura de comandos deste cliente
                                 loop {
                                     let mut cmd_header = [0u8; 6];
                                     match stream.read_exact(&mut cmd_header).await {
@@ -493,7 +455,6 @@ impl Drop for IpcServer {
     }
 }
 
-/// Cliente IPC para comunicação com o daemon em execução.
 pub struct IpcClient {
     stream: UnixStream,
     server_handshake: IpcHandshake,
@@ -503,11 +464,9 @@ impl IpcClient {
     pub async fn connect<P: AsRef<Path>>(socket_path: P) -> Result<Self> {
         let mut stream = UnixStream::connect(socket_path).await?;
 
-        // 1. Enviar handshake do cliente (25 bytes)
         let my_handshake = IpcHandshake::new(std::process::id());
         stream.write_all(&my_handshake.to_bytes()).await?;
 
-        // 2. Receber handshake de confirmação do servidor (25 bytes)
         let mut server_buf = [0u8; IPC_HANDSHAKE_SIZE];
         stream.read_exact(&mut server_buf).await?;
         let server_handshake = IpcHandshake::parse(&server_buf)?;
@@ -651,10 +610,8 @@ mod tests {
             server.run_loop(handler, shutdown_rx).await.unwrap();
         });
 
-        // Aguarda inicialização do socket
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Cliente 1
         let mut client1 = IpcClient::connect(&srv_sock_path).await.unwrap();
         assert_eq!(client1.server_pid(), std::process::id());
 
@@ -674,7 +631,6 @@ mod tests {
             _ => panic!("Resposta inesperada"),
         }
 
-        // Cliente 2 concorrente
         let mut client2 = IpcClient::connect(&srv_sock_path).await.unwrap();
         let resp2 = client2
             .send_command(&IpcCommand::JoinNetwork {
@@ -689,7 +645,6 @@ mod tests {
             _ => panic!("Resposta inesperada"),
         }
 
-        // Encerramento gracioso
         shutdown_tx.send(()).unwrap();
         server_handle.await.unwrap();
 

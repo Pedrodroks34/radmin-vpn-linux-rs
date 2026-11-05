@@ -1,56 +1,56 @@
-# Matriz de Prontidão para Implementação no Cliente Rust (Round 02)
+# Readiness Matrix for the Rust Client Implementation (Round 02)
 
-Este documento avalia a viabilidade e prontidão técnica para a implementação de cada subsistema no cliente nativo Linux em Rust (`radmin-vpn-linux-rs`), baseando-se estritamente nas evidências confirmadas durante esta rodada de engenharia reversa.
+This document assesses the feasibility and technical readiness of implementing each subsystem in the native Linux Rust client (`radmin-vpn-linux-rs`), based strictly on the evidence confirmed during this round of reverse engineering.
 
 ---
 
-## 1. Matriz de Prontidão Técnica
+## 1. Technical Readiness Matrix
 
-| Módulo / Subsistema | Status de Prontidão | Dependência Externa / Bloqueios | Arquivos Rust de Destino |
+| Module / Subsystem | Readiness Status | External Dependency / Blockers | Target Rust Files |
 |---|---|---|---|
-| **Framing TCP & Magic (0x03000000)** | **PRONTO (READY)** | Nenhuma | `src/transport/framing.rs` |
-| **Handshake RSA-2048 / AES-256 (`HandshakeNegotiator`)** | **PRONTO (READY)** | Chave pública do servidor | `src/session/handshake.rs` |
-| **Cifra Simétrica & Trailer Proprietário (`CryptoChannel`)** | **PRONTO (READY)** | Crate `aes`, `cbc` | `src/crypto/famatech.rs` |
-| **Serialização e Parser TLV Famatech** | **PRONTO (READY)** | Nenhuma | `src/protocol/tlv.rs` |
-| **Autenticação de Rede e Hashing SHA-1** | **PRONTO (READY)** | Crate `sha1` | `src/session/auth.rs` |
-| **Camada TAP Linux (`/dev/net/tun`) & Packet Pump** | **PRONTO (READY)** | Privilégio `CAP_NET_ADMIN` | `src/adapter/tap.rs` |
-| **Cliente STUN RFC 3489 (Descoberta de NAT)** | **PRONTO (READY)** | Sockets UDP assíncronos | `src/p2p/stun.rs` |
-| **Cliente de Retransmissão TcpRelay (Porta 17351)** | **PRONTO (READY)** | Nenhuma | `src/transport/relay.rs` |
-| **Camada IPC (UNIX Domain Socket)** | **PRONTO (READY)** | Nenhuma | `src/ipc/server.rs` |
-| **Tunelamento Teredo (RFC 4380)** | **OPCIONAL (NEEDS RESEARCH)** | Suporte IPv6 local | `src/p2p/teredo.rs` |
+| **TCP Framing & Magic (0x03000000)** | **READY** | None | `src/transport/framing.rs` |
+| **RSA-2048 / AES-256 Handshake (`HandshakeNegotiator`)** | **READY** | Server public key | `src/session/handshake.rs` |
+| **Symmetric Cipher & Proprietary Trailer (`CryptoChannel`)** | **READY** | `aes`, `cbc` crates | `src/crypto/famatech.rs` |
+| **Famatech TLV Serialization and Parser** | **READY** | None | `src/protocol/tlv.rs` |
+| **Network Authentication and SHA-1 Hashing** | **READY** | `sha1` crate | `src/session/auth.rs` |
+| **Linux TAP Layer (`/dev/net/tun`) & Packet Pump** | **READY** | `CAP_NET_ADMIN` privilege | `src/adapter/tap.rs` |
+| **STUN RFC 3489 Client (NAT Discovery)** | **READY** | Asynchronous UDP sockets | `src/p2p/stun.rs` |
+| **TcpRelay Forwarding Client (Port 17351)** | **READY** | None | `src/transport/relay.rs` |
+| **IPC Layer (UNIX Domain Socket)** | **READY** | None | `src/ipc/server.rs` |
+| **Teredo Tunneling (RFC 4380)** | **OPTIONAL (NEEDS RESEARCH)** | Local IPv6 support | `src/p2p/teredo.rs` |
 
 ---
 
-## 2. Especificações de Implementação Prontas para o Rust
+## 2. Implementation Specifications Ready for Rust
 
-### 2.1 Cifra Simétrica e Trailer (`src/crypto/famatech.rs`)
-A implementação do trailer e validação de padding deve seguir rigorosamente a especificação extraída de `shelper.dll`:
+### 2.1 Symmetric Cipher and Trailer (`src/crypto/famatech.rs`)
+The trailer implementation and padding validation must strictly follow the specification extracted from `shelper.dll`:
 
 ```rust
-// Regras obrigatórias de codificação do trailer:
+// Mandatory trailer encoding rules:
 // 1. total_len = ((payload_len + 24) / 16) * 16;
 // 2. pad_len = total_len - payload_len; // 9 <= pad_len <= 24
 // 3. buffer[payload_len .. total_len - 9].fill(0xCC);
 // 4. checksum = sum_64bit_additive_little_endian(&buffer[0 .. total_len - 9]);
 // 5. buffer[total_len - 9 .. total_len - 1].copy_from_slice(&checksum.to_le_bytes());
 // 6. buffer[total_len - 1] = pad_len as u8;
-// 7. aes_256_cbc_encrypt(key, &mut iv, buffer); // IV é persistente e atualizado in-place
+// 7. aes_256_cbc_encrypt(key, &mut iv, buffer); // IV is persistent and updated in place
 ```
 
-### 2.2 Máquina de Estados do Handshake (`src/session/handshake.rs`)
-A integração em `src/session/` deve eliminar qualquer transição imediata para `SessionActive` sem validação de rede:
+### 2.2 Handshake State Machine (`src/session/handshake.rs`)
+The integration in `src/session/` must eliminate any immediate transition to `SessionActive` without network validation:
 
 ```rust
 pub enum HandshakeState {
-    /// 1. Envia magic framing [00 00 00 04] + [03 00 00 00], aguarda resposta idêntica
+    /// 1. Sends magic framing [00 00 00 04] + [03 00 00 00], waits for an identical reply
     WaitingMagicEcho,
-    /// 2. Gera 64 bytes randômicos, monta bloco de 76 bytes, cifra com RSA-2048 PKCS#1 v1.5,
-    ///    envia 256 bytes e aguarda 4 bytes do servidor
+    /// 2. Generates 64 random bytes, builds the 76-byte block, encrypts it with RSA-2048 PKCS#1 v1.5,
+    ///    sends 256 bytes and waits for the 4 bytes from the server
     WaitingServerHello {
         client_key_material: [u8; 64],
     },
-    /// 3. Recebe token de 4 bytes, deriva chave AES-256 dos primeiros 32 bytes de
-    ///    `client_key_material`, inicializa IV com zeros e ativa canal simétrico
+    /// 3. Receives the 4-byte token, derives the AES-256 key from the first 32 bytes of
+    ///    `client_key_material`, initializes the IV with zeros and activates the symmetric channel
     SessionActive {
         session_token: u32,
         crypto: CryptoChannel,
@@ -59,21 +59,21 @@ pub enum HandshakeState {
 }
 ```
 
-### 2.3 Interface do Dispositivo de Rede Local (`src/adapter/tap.rs`)
-Substituição direta do driver NDIS Windows (`NetMP60_1_1_64.sys`) no Linux:
-1. Abrir `/dev/net/tun` com `O_RDWR | O_NONBLOCK`.
-2. Emitir `ioctl(fd, TUNSETIFF, &ifr)` com flags `IFF_TAP | IFF_NO_PI`.
-3. Configurar MTU para 1500 bytes com `SIOCSIFMTU`.
-4. Configurar endereço MAC virtual com `SIOCSIFHWADDR`.
-5. Acoplar a um `tokio::io::unix::AsyncFd` para leitura e escrita assíncrona não-bloqueante de quadros Ethernet de 1514 bytes.
+### 2.3 Local Network Device Interface (`src/adapter/tap.rs`)
+Direct replacement of the Windows NDIS driver (`NetMP60_1_1_64.sys`) on Linux:
+1. Open `/dev/net/tun` with `O_RDWR | O_NONBLOCK`.
+2. Issue `ioctl(fd, TUNSETIFF, &ifr)` with the flags `IFF_TAP | IFF_NO_PI`.
+3. Set the MTU to 1500 bytes with `SIOCSIFMTU`.
+4. Set the virtual MAC address with `SIOCSIFHWADDR`.
+5. Attach to a `tokio::io::unix::AsyncFd` for non-blocking asynchronous read and write of 1514-byte Ethernet frames.
 
 ---
 
-## 3. Plano de Testes Automatizados com Vetores Extraídos
+## 3. Automated Test Plan with Extracted Vectors
 
-Para assegurar conformidade sem regressões na futura etapa de implementação:
-1. **Teste de Checksum 64-bit:** Vetor extraído diretamente de `shelper.dll` validando a soma little-endian de palavras de 8 bytes e o tratamento de bytes excedentes.
-2. **Teste de Padding / Unpadding:** Verificação de que payloads de comprimentos variados (ex.: 1 a 1500 bytes) sempre resultam em múltiplos estritos de 16 bytes e que `pad_len` se mantém entre 9 e 24 bytes com preenchimento `0xCC`.
-3. **Teste de Encadeamento de IV:** Validação de que dois blocos consecutivos cifrados com CBC utilizam os últimos 16 bytes do bloco anterior como IV subsequente.
-4. **Teste de Deserialização TLV:** Parsing dos blocos de Login, JoinNetwork e respostas de erro usando as tags catalogadas em `03-tlv-catalog.md`.
-5. **Teste de STUN Binding:** Simulação de resposta STUN com atributos `0x0001`, `0x0004` e `0x0005` conforme capturado no pacote #839 de `radmin_vm2.pcap`.
+To ensure conformance without regressions in the future implementation stage:
+1. **64-bit checksum test:** A vector extracted directly from `shelper.dll` validating the little-endian sum of 8-byte words and the handling of excess bytes.
+2. **Padding / unpadding test:** Verification that payloads of varying lengths (for example 1 to 1500 bytes) always result in strict multiples of 16 bytes, and that `pad_len` stays between 9 and 24 with `0xCC` padding.
+3. **IV chaining test:** Validation that two consecutive CBC-encrypted blocks use the last 16 bytes of the previous block as the subsequent IV.
+4. **TLV deserialization test:** Parsing of the Login, JoinNetwork and error-response blocks using the tags catalogued in `03-tlv-catalog.md`.
+5. **STUN Binding test:** Simulation of a STUN response with attributes `0x0001`, `0x0004` and `0x0005`, as captured in packet #839 of `radmin_vm2.pcap`.

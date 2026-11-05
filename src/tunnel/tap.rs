@@ -128,7 +128,6 @@ impl LinuxTap {
     }
 }
 
-/// Dispositivo TAP em memória para testes e execução em modo simulado/não privilegiado.
 pub struct MockTap {
     tx: mpsc::Sender<Vec<u8>>,
     rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,

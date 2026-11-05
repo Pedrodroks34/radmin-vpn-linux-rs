@@ -1,74 +1,74 @@
-# Índice Geral de Evidências de Engenharia Reversa (Round 02)
+# General Reverse Engineering Evidence Index (Round 02)
 
-Este documento cataloga de forma estruturada todos os endereços de memória virtual (VA), deslocamentos de arquivo, símbolos, identificadores de pacotes em capturas PCAP e referências cruzadas que sustentam as conclusões técnicas das dez frentes de investigação.
+This document structurally catalogs all virtual memory addresses (VA), file offsets, symbols, packet identifiers in PCAP captures, and cross-references that support the technical conclusions of the ten investigation fronts.
 
 ---
 
-## 1. Tabela de Binários e Artefatos Analisados
+## 1. Table of Analyzed Binaries and Artifacts
 
-| Arquivo | Tamanho (Bytes) | Arquitetura | SHA-256 Resumido | Função no Sistema |
+| File | Size (Bytes) | Architecture | Abbreviated SHA-256 | Role in the System |
 |---|---|---|---|---|
-| `RvControlSvc.exe` | 1.835.008 | x86 (32-bit PE) | `...` | Serviço de sistema principal, orquestrador e tabelas TLV |
-| `RvRvpnGui.exe` | 2.502.656 | x86 (32-bit PE) | `...` | Interface de usuário oficial e cliente do Named Pipe IPC |
-| `RvROLClient.dll` | 983.040 | x86 (32-bit PE) | `...` | Cliente do serviço de rede e coordenação Famatech ROL |
-| `RvUESClient.dll` | 417.792 | x86 (32-bit PE) | `...` | Subsistema de mensageria assíncrona interna |
-| `shelper.dll` | 806.912 | x86 (32-bit PE) | `...` | Motor criptográfico OpenSSL + CryptoAPI |
-| `NetMP60_1_1_64.sys` | 67.584 | x64 (64-bit PE) | `...` | Driver miniport NDIS 6.0 virtual adapter |
-| `radmin_17301.pcap` | 1.258.496 | pcapng | N/A | Captura de tráfego TCP na porta 17301 e 17351 (Relay) |
-| `radmin_vm2.pcap` | 3.489.792 | pcapng | N/A | Captura de tráfego STUN (UDP 17309-17349) e Teredo (UDP 3544) |
-| `radmin_vm.pcap` | 2.150.400 | pcapng | N/A | Captura de sessão completa em ambiente de máquina virtual |
+| `RvControlSvc.exe` | 1,835,008 | x86 (32-bit PE) | `...` | Main system service, orchestrator and TLV tables |
+| `RvRvpnGui.exe` | 2,502,656 | x86 (32-bit PE) | `...` | Official user interface and Named Pipe IPC client |
+| `RvROLClient.dll` | 983,040 | x86 (32-bit PE) | `...` | Client for the Famatech ROL network and coordination service |
+| `RvUESClient.dll` | 417,792 | x86 (32-bit PE) | `...` | Internal asynchronous messaging subsystem |
+| `shelper.dll` | 806,912 | x86 (32-bit PE) | `...` | OpenSSL + CryptoAPI cryptographic engine |
+| `NetMP60_1_1_64.sys` | 67,584 | x64 (64-bit PE) | `...` | NDIS 6.0 miniport driver for the virtual adapter |
+| `radmin_17301.pcap` | 1,258,496 | pcapng | N/A | TCP traffic capture on ports 17301 and 17351 (Relay) |
+| `radmin_vm2.pcap` | 3,489,792 | pcapng | N/A | STUN traffic capture (UDP 17309-17349) and Teredo (UDP 3544) |
+| `radmin_vm.pcap` | 2,150,400 | pcapng | N/A | Full session capture in a virtual machine environment |
 
 ---
 
-## 2. Índice de Funções e Endereços Virtuais por Frente
+## 2. Index of Functions and Virtual Addresses by Front
 
-### Frente 1: Handshake e Troca de Chaves
-* `shelper.dll!0x1006b860` (`SHelper_RSession_CreateClient`): Construtor da sessão de handshake RSA do cliente.
-* `shelper.dll!0x1006a2b0` (`SHelper_RSession_GetNextBuffer`): Despachante da máquina de estados do handshake (Estados 0, 1, 2, 3).
-* `shelper.dll!0x1006a512`: Estado 0 — Geração de 64 bytes de chave via `RAND_bytes`, cabeçalho de 12 bytes e cifragem RSA de 76 bytes.
-* `shelper.dll!0x1006a4cc`: Estado 2 — Validação e leitura do token de sessão de 4 bytes recebido do servidor (`cmp eax, 4`).
-* `shelper.dll!0x1006ba80` (`SHelper_RSession_GetKey`): Extração dos primeiros 32 bytes de material de chave para derivar a chave AES-256.
+### Front 1: Handshake and Key Exchange
+* `shelper.dll!0x1006b860` (`SHelper_RSession_CreateClient`): Constructor of the client's RSA handshake session.
+* `shelper.dll!0x1006a2b0` (`SHelper_RSession_GetNextBuffer`): Dispatcher of the handshake state machine (States 0, 1, 2, 3).
+* `shelper.dll!0x1006a512`: State 0 — generation of 64 key bytes via `RAND_bytes`, 12-byte header and RSA encryption of 76 bytes.
+* `shelper.dll!0x1006a4cc`: State 2 — validation and reading of the 4-byte session token received from the server (`cmp eax, 4`).
+* `shelper.dll!0x1006ba80` (`SHelper_RSession_GetKey`): Extraction of the first 32 bytes of key material to derive the AES-256 key.
 
-### Frente 2: Criptografia e Formato dos Quadros
-* `shelper.dll!0x10065de8`: Chamada a `RSA_public_encrypt` com `push 1` (`RSA_PKCS1_PADDING`).
-* `shelper.dll!0x10062ca9`: Inicialização com zeros (`xorps xmm0, xmm0`) dos IVs de cifragem (`esi+0x1ec`) e decifragem (`esi+0x1fc`).
-* `shelper.dll!0x10062e00` / `0x10062d60`: Rotinas de cifragem e decifragem chamando OpenSSL `AES_cbc_encrypt` (`0x10003b30`), mantendo encadeamento contínuo de IV.
-* `shelper.dll!0x10069c20`: Rotina de cálculo de tamanho alinhado: `((payload_len + 24) / 16) * 16`.
-* `shelper.dll!0x1006a0c0`: Algoritmo de soma aditiva de 64 bits little-endian sobre a faixa `[0 .. total_len - 9]`.
-* `shelper.dll!0x10069f90`: Rotina de validação e desempacotamento de quadros (valida `9 <= pad_len <= 24` e verifica checksum).
+### Front 2: Cryptography and Frame Format
+* `shelper.dll!0x10065de8`: Call to `RSA_public_encrypt` with `push 1` (`RSA_PKCS1_PADDING`).
+* `shelper.dll!0x10062ca9`: Zero initialization (`xorps xmm0, xmm0`) of the encryption IVs (`esi+0x1ec`) and decryption IVs (`esi+0x1fc`).
+* `shelper.dll!0x10062e00` / `0x10062d60`: Encryption and decryption routines calling OpenSSL `AES_cbc_encrypt` (`0x10003b30`), maintaining continuous IV chaining.
+* `shelper.dll!0x10069c20`: Aligned-size calculation routine: `((payload_len + 24) / 16) * 16`.
+* `shelper.dll!0x1006a0c0`: Little-endian 64-bit additive checksum algorithm over the range `[0 .. total_len - 9]`.
+* `shelper.dll!0x10069f90`: Frame validation and unpacking routine (validates `9 <= pad_len <= 24` and verifies the checksum).
 
-### Frente 3: Catálogo TLV
-* `RvControlSvc.exe!0x00498fe0`: Tabela global contendo os 723 descritores de propriedades TLV.
-* `RvControlSvc.exe!0x41537e`: Manipulador da propriedade `0x010001e3` como atributo operacional de rede (`UINT32`).
-* `RvROLClient.dll!0x1004ef1c`: Processamento da tag `0x010001e3` ao lado de `0x040001e7` (booleano) e `0x0200025e` (timestamp uint64).
-* `RvControlSvc.exe!0x488ae0`: Motor de serialização genérico TLV (Tag de 32 bits BE + Comprimento de 32 bits BE + Valor).
+### Front 3: TLV Catalog
+* `RvControlSvc.exe!0x00498fe0`: Global table containing the 723 TLV property descriptors.
+* `RvControlSvc.exe!0x41537e`: Handler of property `0x010001e3` as a network operational attribute (`UINT32`).
+* `RvROLClient.dll!0x1004ef1c`: Processing of tag `0x010001e3` alongside `0x040001e7` (boolean) and `0x0200025e` (uint64 timestamp).
+* `RvControlSvc.exe!0x488ae0`: Generic TLV serialization engine (32-bit BE tag + 32-bit BE length + value).
 
-### Frente 4: Autenticação e Redes
-* `shelper.dll!0x10065790`: Hashing de senha de rede via CryptoAPI usando `CALG_SHA1` (`0x8004`), gerando digest de 20 bytes para a tag `0x090001cd`.
-* `RvROLClient.dll!0x100412a0`: Ponto de entrada de `ROLClient_JoinNetwork`.
-* `RvROLClient.dll!0x1004a090`: Construção da mensagem TLV `JoinNetworkRequest`.
-* `RvROLClient.dll!0x1004a115`: Verificação dos códigos de status de retorno na tag `0x010001df`.
+### Front 4: Authentication and Networks
+* `shelper.dll!0x10065790`: Network password hashing via CryptoAPI using `CALG_SHA1` (`0x8004`), producing a 20-byte digest for tag `0x090001cd`.
+* `RvROLClient.dll!0x100412a0`: Entry point of `ROLClient_JoinNetwork`.
+* `RvROLClient.dll!0x1004a090`: Construction of the `JoinNetworkRequest` TLV message.
+* `RvROLClient.dll!0x1004a115`: Check of the return status codes in tag `0x010001df`.
 
-### Frente 5: TcpRelay
-* `RvControlSvc.exe!0x43fb60`: Função de conversão do enum de transporte: `0 -> "TCP"`, `1 -> "UDP"`, `2 -> "TcpRelay"`.
-* `RvROLClient.dll!0x1004d220`: Estabelecimento do túnel de relay na porta 17351.
+### Front 5: TcpRelay
+* `RvControlSvc.exe!0x43fb60`: Transport enum conversion function: `0 -> "TCP"`, `1 -> "UDP"`, `2 -> "TcpRelay"`.
+* `RvROLClient.dll!0x1004d220`: Establishment of the relay tunnel on port 17351.
 
-### Frente 6: NAT e STUN
-* `RvROLClient.dll!0x10051180`: Rotina de envio de Binding Request STUN RFC 3489.
-* `RvROLClient.dll!0x10051640`: Decodificação dos atributos `0x0001` (MAPPED-ADDRESS), `0x0004` (SOURCE-ADDRESS) e `0x0005` (CHANGED-ADDRESS).
+### Front 6: NAT and STUN
+* `RvROLClient.dll!0x10051180`: Routine that sends the RFC 3489 STUN Binding Request.
+* `RvROLClient.dll!0x10051640`: Decoding of attributes `0x0001` (MAPPED-ADDRESS), `0x0004` (SOURCE-ADDRESS) and `0x0005` (CHANGED-ADDRESS).
 
-### Frente 7: Teredo
-* `RvROLClient.dll!0x10052310`: Desobfuscação de porta (`XOR 0xFFFF`) e endereço IPv4 (`XOR 0xFFFFFFFF`) do cliente Teredo (`CTeredoThread`).
+### Front 7: Teredo
+* `RvROLClient.dll!0x10052310`: Deobfuscation of the port (`XOR 0xFFFF`) and IPv4 address (`XOR 0xFFFFFFFF`) of the Teredo client (`CTeredoThread`).
 
-### Frente 8: Windows IPC
-* `RvControlSvc.exe!0x519e74`: String UTF-16 `\\.\pipe\RadminVpnGuiChannel`.
-* `RvControlSvc.exe!0x40f052` / `0x47de40`: Criação do Named Pipe com limite de 200 instâncias.
-* `RvRvpnGui.exe!0x4e8eb0`: Função `FUN_004e8eb0`, conexão ao pipe via `0x5352d0` e emissão do comando inicial `0x3f6` em `0x4e8f78`.
-* `RvRvpnGui.exe!0x4e2ac0`: Despachante central de mensagens IPC e tratamento dos comandos `0x3ec`, `0x3ed`, `0x3ee`, `0x3ef`, `0x3f6`.
+### Front 8: Windows IPC
+* `RvControlSvc.exe!0x519e74`: UTF-16 string `\\.\pipe\RadminVpnGuiChannel`.
+* `RvControlSvc.exe!0x40f052` / `0x47de40`: Creation of the Named Pipe with a 200-instance limit.
+* `RvRvpnGui.exe!0x4e8eb0`: Function `FUN_004e8eb0`, connection to the pipe via `0x5352d0` and emission of the initial command `0x3f6` at `0x4e8f78`.
+* `RvRvpnGui.exe!0x4e2ac0`: Central IPC message dispatcher and handling of commands `0x3ec`, `0x3ed`, `0x3ee`, `0x3ef`, `0x3f6`.
 
-### Frente 9: Driver NDIS
-* `NetMP60_1_1_64.sys!0x14000c05c`: Configuração de `NDIS_DEVICE_OBJECT_ATTRIBUTES` com nome `\Device\RVPNNETMP` e registro via `NdisRegisterDeviceEx` (`0x14000c08f`).
-* `NetMP60_1_1_64.sys!0x1400030cc`: Rotina assíncrona de enfileiramento de IRPs retornando `STATUS_PENDING` (`0x103` em `0x140003222`).
+### Front 9: NDIS Driver
+* `NetMP60_1_1_64.sys!0x14000c05c`: Configuration of `NDIS_DEVICE_OBJECT_ATTRIBUTES` with the name `\Device\RVPNNETMP` and registration via `NdisRegisterDeviceEx` (`0x14000c08f`).
+* `NetMP60_1_1_64.sys!0x1400030cc`: Asynchronous IRP queuing routine returning `STATUS_PENDING` (`0x103` at `0x140003222`).
 * `RvControlSvc.exe!0x4aff8a`: IOCTL `0x224020` (Media Status, 1 byte out).
 * `RvControlSvc.exe!0x4b003a`: IOCTL `0x224018` (Link speed/MTU, 4 bytes out).
 * `RvControlSvc.exe!0x4b00a4`: IOCTL `0x22801c` (Set state/MTU, 4 bytes in).
@@ -77,16 +77,16 @@ Este documento cataloga de forma estruturada todos os endereços de memória vir
 
 ---
 
-## 3. Índice de Pacotes em Capturas de Rede (PCAP)
+## 3. Index of Packets in Network Captures (PCAP)
 
-| Captura | Número do Pacote | Endereço Origem / Destino | Protocolo / Porta | Dados / Significado Identificado |
+| Capture | Packet Number | Source / Destination Address | Protocol / Port | Identified Data / Meaning |
 |---|---|---|---|---|
 | `radmin_17301.pcap` | #35 | `192.168.122.77:49493 -> 198.244.203.247:17301` | TCP (8 bytes) | Magic Framing `00 00 00 04` + Magic Payload `03 00 00 00` |
-| `radmin_17301.pcap` | #44 | `198.244.203.247:17301 -> 192.168.122.77:49493` | TCP (8 bytes) | Server Echo do Magic: `00 00 00 04 03 00 00 00` |
-| `radmin_17301.pcap` | #46 | `192.168.122.77:49493 -> 198.244.203.247:17301` | TCP (260 bytes) | Client Hello RSA-2048 (Payload de 76 bytes criptografado) |
-| `radmin_17301.pcap` | #48 | `198.244.203.247:17301 -> 192.168.122.77:49493` | TCP (8 bytes) | Server Hello com token de sessão de 4 bytes |
-| `radmin_17301.pcap` | #50 | `192.168.122.77:49493 -> 198.244.203.247:17301` | TCP | Primeiro quadro cifrado AES-256-CBC com trailer 0xCC |
-| `radmin_17301.pcap` | #688..#710 | `192.168.122.77:49502 <-> 198.244.203.247:17351` | TCP Relay | Estabelecimento de túnel de retransmissão TcpRelay e troca de dados cifrados E2E |
-| `radmin_vm2.pcap` | #10 | `192.168.122.77 -> 20.201.205.4:3544` | UDP Teredo | Pacote de inicialização do túnel Teredo IPv6 sobre UDP |
+| `radmin_17301.pcap` | #44 | `198.244.203.247:17301 -> 192.168.122.77:49493` | TCP (8 bytes) | Server Echo of the Magic: `00 00 00 04 03 00 00 00` |
+| `radmin_17301.pcap` | #46 | `192.168.122.77:49493 -> 198.244.203.247:17301` | TCP (260 bytes) | RSA-2048 Client Hello (76-byte encrypted payload) |
+| `radmin_17301.pcap` | #48 | `198.244.203.247:17301 -> 192.168.122.77:49493` | TCP (8 bytes) | Server Hello with the 4-byte session token |
+| `radmin_17301.pcap` | #50 | `192.168.122.77:49493 -> 198.244.203.247:17301` | TCP | First frame encrypted with AES-256-CBC and the 0xCC trailer |
+| `radmin_17301.pcap` | #688..#710 | `192.168.122.77:49502 <-> 198.244.203.247:17351` | TCP Relay | Establishment of the TcpRelay forwarding tunnel and exchange of E2E-encrypted data |
+| `radmin_vm2.pcap` | #10 | `192.168.122.77 -> 20.201.205.4:3544` | UDP Teredo | Initialization packet of the IPv6-over-UDP Teredo tunnel |
 | `radmin_vm2.pcap` | #796 | `192.168.122.77:54536 -> 198.244.203.247:17348` | UDP STUN | STUN RFC 3489 Binding Request (`0x0001`) |
-| `radmin_vm2.pcap` | #839 | `198.244.203.247:17348 -> 192.168.122.77:54536` | UDP STUN | STUN Binding Response retornando IP reflexivo `187.59.199.39:54536` |
+| `radmin_vm2.pcap` | #839 | `198.244.203.247:17348 -> 192.168.122.77:54536` | UDP STUN | STUN Binding Response returning the reflexive IP `<CLIENT-PUBLIC-IP>:54536` |

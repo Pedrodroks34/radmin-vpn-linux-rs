@@ -1,16 +1,3 @@
-//! Implementação do Encapsulamento Teredo (RFC 4380) e NAT Traversal P2P do Radmin VPN.
-//!
-//! Descoberta comprovada em capturas reais (radmin_vm2.pcap, pacotes UDP #10 a #64):
-//! - O cliente Radmin VPN utiliza encapsulamento IPv6 em UDP baseado no padrão Teredo (RFC 4380)
-//!   com prefixo global `2001:0000::/32`.
-//! - Estrutura de endereçamento Teredo:
-//!   - Prefixo: 4 bytes `2001:0000`
-//!   - Servidor IPv4: 4 bytes (ex: `14 c9 cd 04` = 20.201.205.4)
-//!   - Flags: 2 bytes
-//!   - Porta Ofuscada: 2 bytes (`porta ^ 0xFFFF`)
-//!   - Cliente IPv4 Ofuscado: 4 bytes (`ipv4 ^ 0xFFFFFFFF`)
-//! - Pacotes são encapsulados sobre UDP com cabeçalho IPv6 de 40 bytes para
-//!   transposição de NAT simétrico e conexões P2P diretas entre peers.
 
 use crate::Result;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -34,7 +21,6 @@ pub enum TeredoError {
     Timeout,
 }
 
-/// Endereço Teredo decomposto segundo a RFC 4380.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TeredoAddress {
     pub server_ipv4: Ipv4Addr,
@@ -53,7 +39,6 @@ impl TeredoAddress {
         }
     }
 
-    /// Constrói a representação `Ipv6Addr` aplicando a ofuscação XOR da RFC 4380.
     pub fn to_ipv6(&self) -> Ipv6Addr {
         let mut octets = [0u8; 16];
         octets[0..4].copy_from_slice(&TEREDO_PREFIX);
@@ -69,7 +54,6 @@ impl TeredoAddress {
         Ipv6Addr::from(octets)
     }
 
-    /// Decompõe um endereço IPv6 verificando o prefixo Teredo e de-ofuscando porta e IP.
     pub fn from_ipv6(addr: &Ipv6Addr) -> std::result::Result<Self, TeredoError> {
         let octets = addr.octets();
         if octets[0..4] != TEREDO_PREFIX {
@@ -99,7 +83,6 @@ impl TeredoAddress {
     }
 }
 
-/// Pacote IPv6 decapsulado de transporte Teredo/UDP.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeredoDecapsulated {
     pub src_ip: Ipv6Addr,
@@ -112,27 +95,19 @@ pub struct TeredoDecapsulated {
 pub struct TeredoPacket;
 
 impl TeredoPacket {
-    /// Encapsula payload arbitrário em cabeçalho IPv6 (RFC 2460 / RFC 4380).
     pub fn encapsulate(src: &Ipv6Addr, dst: &Ipv6Addr, next_header: u8, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(IPV6_HEADER_LEN + payload.len());
-        // Version 6, Traffic Class 0, Flow Label 0
         buf.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
-        // Payload length (16 bits BE)
         let len = payload.len() as u16;
         buf.extend_from_slice(&len.to_be_bytes());
-        // Next Header & Hop Limit
         buf.push(next_header);
         buf.push(64); // Hop Limit
-                      // Source IPv6
         buf.extend_from_slice(&src.octets());
-        // Destination IPv6
         buf.extend_from_slice(&dst.octets());
-        // Payload
         buf.extend_from_slice(payload);
         buf
     }
 
-    /// Decapsula e valida o cabeçalho IPv6 do pacote UDP recebido.
     pub fn decapsulate(buf: &[u8]) -> std::result::Result<TeredoDecapsulated, TeredoError> {
         if buf.len() < IPV6_HEADER_LEN {
             return Err(TeredoError::TruncatedHeader(buf.len()));
@@ -169,7 +144,6 @@ impl TeredoPacket {
     }
 }
 
-/// Coordenador de UDP Hole Punching e verificação de rota P2P direta.
 pub struct UdpHolePuncher {
     local_socket: UdpSocket,
 }
@@ -190,7 +164,6 @@ impl UdpHolePuncher {
         Ok(self.local_socket.local_addr()?)
     }
 
-    /// Dispara sondas de hole punching UDP para o endereço público do peer e aguarda confirmação.
     pub async fn punch_hole(
         &self,
         peer_addr: SocketAddr,
@@ -209,7 +182,6 @@ impl UdpHolePuncher {
                 warn!("Falha ao enviar sonda UDP: {}", e);
             }
 
-            // Aguarda resposta de volta com timeout curto por tentativa
             let attempt_timeout = timeout / max_attempts as u32;
             let mut buf = [0u8; 64];
 
@@ -228,7 +200,6 @@ impl UdpHolePuncher {
                         "UDP Hole Punching bem-sucedido com {}! Rota direta confirmada.",
                         peer_addr
                     );
-                    // Confirma de volta para estabilização
                     let _ = self
                         .local_socket
                         .send_to(b"RADMIN_P2P_ACK", from_addr)
@@ -266,7 +237,6 @@ mod tests {
 
     #[test]
     fn test_parse_real_captured_packet_10_teredo_ipv6() {
-        // Primeiros 40 bytes do pacote UDP #10 de radmin_vm2.pcap
         let raw_hex =
             "6002e6a9001411802001000014c9cd0404d71ce64e8fb01d2001000014c9cd042c092a0544c438d8";
         let raw = (0..raw_hex.len())
@@ -278,7 +248,6 @@ mod tests {
         assert_eq!(decap.next_header, 17); // UDP
         assert_eq!(decap.hop_limit, 128); // 0x80
 
-        // Validação da origem Teredo de-ofuscada
         let src_teredo = TeredoAddress::from_ipv6(&decap.src_ip).unwrap();
         assert_eq!(src_teredo.server_ipv4, Ipv4Addr::new(20, 201, 205, 4));
         assert_eq!(src_teredo.mapped_port, 58137); // Porta real do pacote UDP #10!
@@ -312,7 +281,6 @@ mod tests {
             .unwrap();
         let addr2 = puncher2.local_addr().unwrap();
 
-        // Tarefa que responde à sonda
         let handle = tokio::spawn(async move {
             let mut buf = [0u8; 64];
             let (n, from) = puncher2.local_socket.recv_from(&mut buf).await.unwrap();

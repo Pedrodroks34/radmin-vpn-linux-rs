@@ -1,24 +1,24 @@
-# Frente 5: Protocolo TcpRelay e Conexão Mediada
+# Front 5: TcpRelay Protocol and Mediated Connection
 
-**Classificação de Certeza:** CONFIRMADO (desmontagem do enum de conexão em `RvControlSvc.exe` em `0x43fb60`, correlacionada com a análise de fluxo de pacotes na porta TCP 17351 em `radmin_17301.pcap`)
+**Certainty classification:** CONFIRMED (disassembly of the connection enum in `RvControlSvc.exe` at `0x43fb60`, correlated with the packet-flow analysis of TCP port 17351 in `radmin_17301.pcap`)
 
 ---
 
-## 1. Visão Geral do TcpRelay
+## 1. Overview of TcpRelay
 
-Quando dois peers não conseguem estabelecer uma conexão direta ponto-a-ponto (P2P via TCP Simultaneous Open ou UDP STUN) devido a firewalls restritivos ou NATs simétricos, o cliente recorre à rota de retransmissão centralizada (**TcpRelay**) operando na **porta TCP 17351**.
+When two peers cannot establish a direct point-to-point connection (P2P via TCP Simultaneous Open or UDP STUN) because of restrictive firewalls or symmetric NATs, the client falls back to the centralized relay route (**TcpRelay**) operating on **TCP port 17351**.
 
-### 1.1 Enumeração dos Tipos de Transporte (`RvControlSvc.exe` em `0x43fb60`)
-A função em `0x43fb60` mapeia o código do tipo de conexão para uma representação textual explícita:
+### 1.1 Enumeration of Transport Types (`RvControlSvc.exe` at `0x43fb60`)
+The function at `0x43fb60` maps the connection-type code to an explicit text representation:
 
 ```x86asm
-0x43fb60: mov eax, dword ptr [esp + 4] ; código do enum
+0x43fb60: mov eax, dword ptr [esp + 4] ; enum code
 0x43fb64: test eax, eax
-0x43fb66: je 0x43fb80                 ; 0 -> "TCP" (P2P Direto)
+0x43fb66: je 0x43fb80                 ; 0 -> "TCP" (Direct P2P)
 0x43fb68: dec eax
-0x43fb69: je 0x43fb88                 ; 1 -> "UDP" (P2P Direto)
+0x43fb69: je 0x43fb88                 ; 1 -> "UDP" (Direct P2P)
 0x43fb6b: dec eax
-0x43fb6c: je 0x43fb90                 ; 2 -> "TcpRelay" (Relay na porta 17351)
+0x43fb6c: je 0x43fb90                 ; 2 -> "TcpRelay" (Relay on port 17351)
 0x43fb6e: mov eax, 0x51d2a0           ; default -> "Unknown"
 0x43fb73: ret
 0x43fb80: mov eax, 0x51d2a8           ; "TCP"
@@ -31,45 +31,45 @@ A função em `0x43fb60` mapeia o código do tipo de conexão para uma represent
 
 ---
 
-## 2. Análise do Fluxo TcpRelay na Captura `radmin_17301.pcap`
+## 2. Analysis of the TcpRelay Flow in the `radmin_17301.pcap` Capture
 
-Na captura `radmin_17301.pcap`, após tentativas frustradas de conexão direta, o cliente inicia uma conexão TCP em direção a `198.244.203.247:17351` (pacotes #688 a #710):
+In the `radmin_17301.pcap` capture, after unsuccessful direct connection attempts, the client opens a TCP connection to `198.244.203.247:17351` (packets #688 to #710):
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor C1 as Peer Local (192.168.122.77)
-    participant R as Servidor TcpRelay (:17351)
-    actor C2 as Peer Remoto
+    actor C1 as Local Peer (192.168.122.77)
+    participant R as TcpRelay Server (:17351)
+    actor C2 as Remote Peer
 
     C1->>R: TCP SYN (:49502 -> :17351)
     R-->>C1: TCP SYN-ACK (:17351 -> :49502)
     C1->>R: TCP ACK
     C1->>R: Pkt #695: Magic Framing + Relay Binding Request<br/>- Tag 0x10000004: Peer Target Node ID<br/>- Tag 0x50000020: Session Cookie / Auth Token
-    R-->>C1: Pkt #701: Relay Binding Response<br/>- Tag 0x40000001: Relay Channel Status (0x01 = Pronto)
-    Note over C1,R,C2: O Servidor Relay atua como roteador transparente
-    C1->>R: Pkt #705: Tag 0x300000c0 (Payload Cifrado E2E destinado ao Peer C2)
-    R-->>C2: Repassa pacote #705 intacto
+    R-->>C1: Pkt #701: Relay Binding Response<br/>- Tag 0x40000001: Relay Channel Status (0x01 = Ready)
+    Note over C1,R,C2: The Relay Server acts as a transparent router
+    C1->>R: Pkt #705: Tag 0x300000c0 (E2E-encrypted payload destined for peer C2)
+    R-->>C2: Forwards packet #705 unchanged
 ```
 
-### 2.1 Tags de Controle e Encapsulamento do Protocolo TcpRelay
-O framing no canal 17351 utiliza prefixos de 4 bytes big-endian, seguidos por registros TLV dedicados à mediação de canal:
+### 2.1 Control Tags and Encapsulation in the TcpRelay Protocol
+Framing on channel 17351 uses 4-byte big-endian prefixes, followed by TLV records dedicated to channel mediation:
 
-| Tag Hex | Descrição e Finalidade | Tamanho Típico |
+| Hex Tag | Description and Purpose | Typical Size |
 |---|---|---|
-| `0x10000004` | **Target Node ID:** Identificador numérico do peer de destino solicitado | 4 bytes |
-| `0x20000008` | **Relay Routing ID:** Identificador de sessão de relay atribuído pelo servidor | 8 bytes |
-| `0x300000c0` | **Encapsulated Data:** Quadro de dados do túnel Ethernet VPN (cifrado E2E) | Variável (alinhado a 16 bytes) |
-| `0x40000001` | **Channel Status:** Flag de controle de fluxo / canal estabelecido | 1 byte |
-| `0x50000020` | **Session Cookie:** Token criptográfico efêmero gerado pelo servidor ROL | 32 bytes |
-| `0x600000c0` | **Multiplexed Frame:** Quadro multiplexado contendo múltiplos sub-pacotes | Variável |
-| `0x70000014` | **Relay Keepalive:** Batimento cardíaco do túnel TcpRelay | 20 bytes |
+| `0x10000004` | **Target Node ID:** Numeric identifier of the requested destination peer | 4 bytes |
+| `0x20000008` | **Relay Routing ID:** Relay session identifier assigned by the server | 8 bytes |
+| `0x300000c0` | **Encapsulated Data:** VPN Ethernet tunnel data frame (E2E-encrypted) | Variable (16-byte aligned) |
+| `0x40000001` | **Channel Status:** Flow-control flag / established channel | 1 byte |
+| `0x50000020` | **Session Cookie:** Ephemeral cryptographic token generated by the ROL server | 32 bytes |
+| `0x600000c0` | **Multiplexed Frame:** Multiplexed frame containing multiple sub-packets | Variable |
+| `0x70000014` | **Relay Keepalive:** Heartbeat of the TcpRelay tunnel | 20 bytes |
 
 ---
 
-## 3. Criptografia Ponta-a-Ponta (E2E) no TcpRelay
+## 3. End-to-End Encryption (E2E) in TcpRelay
 
-Um aspecto crítico revelado pela desmontagem de `RvROLClient.dll` e `RvControlSvc.exe`:
-* O servidor TcpRelay **não possui as chaves de decifragem dos quadros de dados**.
-* O payload transmitido sob a tag `0x300000c0` é previamente cifrado com a chave de sessão negociada diretamente entre os dois peers (via handshake RSA-2048 / AES-256 peer-to-peer).
-* O servidor TcpRelay apenas inspeciona o cabeçalho de roteamento (`0x10000004` / `0x20000008`) para reencaminhar o fluxo ao socket TCP do peer correspondente, preservando a confidencialidade e a integridade ponta-a-ponta dos dados trafegados na VPN.
+A critical aspect revealed by the disassembly of `RvROLClient.dll` and `RvControlSvc.exe`:
+* The TcpRelay server **does not hold the keys to decrypt the data frames**.
+* The payload transmitted under tag `0x300000c0` is previously encrypted with the session key negotiated directly between the two peers (via peer-to-peer RSA-2048 / AES-256 handshake).
+* The TcpRelay server only inspects the routing header (`0x10000004` / `0x20000008`) to forward the flow to the TCP socket of the corresponding peer, preserving the end-to-end confidentiality and integrity of the data transported over the VPN.

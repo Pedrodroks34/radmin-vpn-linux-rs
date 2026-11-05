@@ -238,7 +238,6 @@ impl TcpChannel {
         self.send_frame(packet).await
     }
 
-    /// Cifra o payload com o estado criptográfico Famatech e envia dentro de um frame TCP.
     pub async fn send_secure(&mut self, plaintext: &[u8]) -> Result<()> {
         let ciphertext = match &mut self.cipher {
             Some(cipher) => cipher.encrypt(plaintext)?,
@@ -256,7 +255,6 @@ impl TcpChannel {
             .ok_or_else(|| anyhow::Error::from(TransportError::ConnectionClosed))
     }
 
-    /// Recebe o próximo frame TCP, decifra o ciphertext e valida integridade/trailer.
     pub async fn receive_secure(&mut self) -> Result<Vec<u8>> {
         let frame = self.receive().await?;
         match &mut self.cipher {
@@ -353,19 +351,15 @@ mod tests {
         client_channel.enable_encryption(shared_key);
         server_channel.enable_encryption(shared_key);
 
-        // Cliente envia pacote cifrado
         let secret_msg = b"Ethernet Frame Data 0123456789".to_vec();
         client_channel.send_secure(&secret_msg).await.unwrap();
 
-        // Servidor recebe e decifra
         let received = server_channel.receive_secure().await.unwrap();
         assert_eq!(received, secret_msg);
 
-        // Servidor responde cifrado
         let response = b"ACK Ethernet Frame".to_vec();
         server_channel.send_secure(&response).await.unwrap();
 
-        // Cliente recebe e decifra
         let client_received = client_channel.receive_secure().await.unwrap();
         assert_eq!(client_received, response);
     }

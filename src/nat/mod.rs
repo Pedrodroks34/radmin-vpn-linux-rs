@@ -74,7 +74,6 @@ impl NatDetector {
             local_port,
         ));
 
-        // Determinação básica de NAT
         let nat_type = if pub_addr.ip().is_loopback() || pub_addr.ip().is_unspecified() {
             NatType::None
         } else {
@@ -99,8 +98,6 @@ pub enum P2pStrategy {
     Relay,
 }
 
-/// Helper para TCP Simultaneous-Open utilizando SO_REUSEADDR / SO_REUSEPORT
-/// conforme evidenciado nos PCAPs do Radmin VPN.
 pub async fn attempt_tcp_simultaneous_open(
     local_port: u16,
     peer_addr: SocketAddr,
@@ -129,13 +126,11 @@ pub async fn attempt_tcp_simultaneous_open(
 
     socket.bind(&bind_addr.into())?;
 
-    // Inicia conexão não-bloqueante
     let _ = socket.connect(&peer_addr.into());
 
     let std_stream: std::net::TcpStream = socket.into();
     let stream = TcpStream::from_std(std_stream)?;
 
-    // Aguarda conclusão do handshake TCP
     tokio::time::timeout(timeout, stream.writable())
         .await
         .map_err(|_| anyhow::anyhow!("Timeout no TCP simultaneous-open com {}", peer_addr))??;

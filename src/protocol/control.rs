@@ -1,21 +1,3 @@
-//! Mensagens do protocolo de controle e gerenciamento de redes/peers do Radmin VPN.
-//!
-//! Engenharia reversa a partir da tabela de descritores de propriedades do
-//! RvControlSvc.exe (endereço 0x00498fe0 e função 0x4aec20):
-//!
-//! Principais tags TLV de controle (verificadas na tabela de registro 0x00498fe0):
-//! - 0x010001d8 (TAG_CLIENT_VERSION): Versão do cliente (uint32)
-//! - 0x010001db (TAG_MACHINE_ID): ID único da máquina/instalação (uint32)
-//! - 0x010001de (TAG_VIRTUAL_IPV4): Endereço IPv4 virtual atribuído (26.x.x.x, uint32)
-//! - 0x010001df (TAG_SESSION_TOKEN): Token identificador da sessão ativa (uint32)
-//! - 0x0100032b (TAG_PEER_STATUS): Estado do peer (1=Offline, 2=Online, 3=Connecting)
-//! - 0x010001e3 (TAG_MEMBER_COUNT): Contagem de membros da rede (uint32)
-//! - 0x020001d5 (TAG_NETWORK_ID): Identificador único da rede Radmin (uint64)
-//! - 0x020001e1 (TAG_TIMESTAMP): Timestamp em milissegundos UTC (uint64)
-//! - 0x090001ca (TAG_RSA_PUBLIC_KEY): Chave pública RSA-2048 (256 bytes)
-//! - 0x090001dc (TAG_NETWORK_NAME): Nome da rede virtual (string UTF-8)
-//! - 0x090001dd (TAG_PASSWORD_HASH): Hash SHA-1 da senha (20 bytes, CALG_SHA1 0x8004 em shelper.dll)
-//! - 0x090001e0 (TAG_VIRTUAL_IPV6): Endereço IPv6 virtual / Teredo (16 bytes)
 
 use crate::protocol::tlv::{TlvMessage, TlvTag};
 use crate::Result;
@@ -37,7 +19,6 @@ pub const TAG_PASSWORD_HASH: TlvTag = TlvTag(0x090001dd);
 pub const TAG_VIRTUAL_IPV6: TlvTag = TlvTag(0x090001e0);
 pub const TAG_NODE_ID: TlvTag = TlvTag(0x02000008);
 
-/// Gera o hash da senha de rede no padrão verificado do Radmin VPN (SHA-1, CALG_SHA1 0x8004 em shelper.dll).
 pub fn hash_network_password(password: &str) -> [u8; 20] {
     openssl::sha::sha1(password.as_bytes())
 }
@@ -54,7 +35,6 @@ pub enum ControlProtocolError {
     Utf8Error(#[from] std::string::FromUtf8Error),
 }
 
-/// Estado de conectividade de um peer na rede virtual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum PeerStatus {
@@ -86,7 +66,6 @@ impl From<PeerStatus> for u32 {
     }
 }
 
-/// Mensagens de controle de alto nível trocadas com a infraestrutura oficial.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlMessage {
     Login {
@@ -124,7 +103,6 @@ pub enum ControlMessage {
 }
 
 impl ControlMessage {
-    /// Converte a mensagem estruturada em `TlvMessage` com as tags do binário oficial.
     pub fn to_tlv(&self) -> TlvMessage {
         let mut msg = TlvMessage::new();
         match self {
@@ -187,14 +165,11 @@ impl ControlMessage {
         msg
     }
 
-    /// Serializa diretamente para bytes no framing de controle TLV.
     pub fn to_bytes(&self) -> Vec<u8> {
         self.to_tlv().to_bytes()
     }
 
-    /// Tenta desserializar uma mensagem a partir de `TlvMessage`.
     pub fn from_tlv(msg: &TlvMessage) -> Result<Self> {
-        // 1. Verificar se é Keepalive
         if let (Some(token), Some(ts)) =
             (msg.get_u32(TAG_SESSION_TOKEN), msg.get_u64(TAG_TIMESTAMP))
         {
@@ -206,7 +181,6 @@ impl ControlMessage {
             }
         }
 
-        // 2. Verificar se é Login
         if let (Some(ver), Some(mach), Some(token)) = (
             msg.get_u32(TAG_CLIENT_VERSION),
             msg.get_u32(TAG_MACHINE_ID),
@@ -219,7 +193,6 @@ impl ControlMessage {
             });
         }
 
-        // 3. Verificar se é LoginResponse
         if let (Some(token), Some(ip_bits), Some(node_id)) = (
             msg.get_u32(TAG_SESSION_TOKEN),
             msg.get_u32(TAG_VIRTUAL_IPV4),
@@ -232,7 +205,6 @@ impl ControlMessage {
             });
         }
 
-        // 4. Verificar se é PeerInfo
         if let (Some(node_id), Some(ip_bits), Some(st), Some(ts)) = (
             msg.get_u64(TAG_NODE_ID),
             msg.get_u32(TAG_VIRTUAL_IPV4),
@@ -247,7 +219,6 @@ impl ControlMessage {
             });
         }
 
-        // 5. Verificar se é JoinNetwork
         if let (Some(name_bytes), Some(pwd)) = (
             msg.get_buffer(TAG_NETWORK_NAME),
             msg.get_buffer(TAG_PASSWORD_HASH),
@@ -259,14 +230,12 @@ impl ControlMessage {
             });
         }
 
-        // 6. Verificar se é LeaveNetwork
         if let Some(net_id) = msg.get_u64(TAG_NETWORK_ID) {
             if msg.records.len() == 1 {
                 return Ok(Self::LeaveNetwork { network_id: net_id });
             }
         }
 
-        // 7. Verificar se é NetworkInfo
         if let (Some(net_id), Some(name_bytes)) = (
             msg.get_u64(TAG_NETWORK_ID),
             msg.get_buffer(TAG_NETWORK_NAME),
@@ -288,7 +257,6 @@ impl ControlMessage {
         ))
     }
 
-    /// Desserializa a partir dos bytes de payload bruto.
     pub fn parse(payload: &[u8]) -> Result<Self> {
         let tlv = TlvMessage::parse(payload)?;
         Self::from_tlv(&tlv)

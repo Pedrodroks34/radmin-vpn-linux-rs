@@ -61,7 +61,6 @@ impl IpcHandler for DaemonContext {
                         let assigned_ip = Ipv4Addr::new(26, 100, 200, 1);
                         *self.virtual_ip.lock().await = Some(assigned_ip);
 
-                        // Cria interface de túnel configurada
                         let t_cfg = TunnelConfig {
                             local_ip: Some(assigned_ip.to_string()),
                             ..Default::default()
@@ -225,7 +224,6 @@ impl Daemon {
         let handler = self.context.clone();
         let shutdown_rx = self.shutdown_tx.subscribe();
 
-        // Inicia loop assíncrono do IPC
         let handle = tokio::spawn(async move {
             if let Err(e) = server.run_loop(handler, shutdown_rx).await {
                 error!("Erro fatal no servidor IPC: {}", e);
@@ -247,7 +245,6 @@ impl Daemon {
             let _ = task.await;
         }
 
-        // Limpeza de recursos
         self.context.connected.store(false, Ordering::SeqCst);
         if let Some(mut sess) = self.context.session_mgr.lock().await.take() {
             let _ = sess.disconnect().await;
@@ -291,19 +288,16 @@ mod tests {
         daemon.start().await.unwrap();
         assert_eq!(daemon.state(), DaemonState::Running);
 
-        // Aguarda listener iniciar
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let mut client = IpcClient::connect(&sock_path).await.unwrap();
 
-        // 1. Status inicial
         let resp = client.send_command(&IpcCommand::QueryStatus).await.unwrap();
         match resp {
             IpcResponse::Status { connected, .. } => assert!(!connected),
             other => panic!("Esperado Status, obtido {:?}", other),
         }
 
-        // 2. SwitchPower(true)
         let resp_power = client
             .send_command(&IpcCommand::SwitchPower { enable: true })
             .await
@@ -313,7 +307,6 @@ mod tests {
             other => panic!("Esperado Success, obtido {:?}", other),
         }
 
-        // 3. Status atualizado
         let resp2 = client.send_command(&IpcCommand::QueryStatus).await.unwrap();
         match resp2 {
             IpcResponse::Status {
@@ -327,7 +320,6 @@ mod tests {
             other => panic!("Esperado Status, obtido {:?}", other),
         }
 
-        // 4. Parar daemon
         daemon.stop().await.unwrap();
         assert_eq!(daemon.state(), DaemonState::Stopped);
         assert!(!sock_path.exists());

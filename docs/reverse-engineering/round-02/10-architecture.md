@@ -1,112 +1,112 @@
-# Frente 10: Arquitetura Global e Decomposição de Módulos
+# Front 10: Global Architecture and Module Decomposition
 
-**Classificação de Certeza:** CONFIRMADO (análise de importações/exportações PE, rastreamento de fios de execução e mapeamento de dependências entre binários do pacote oficial)
+**Certainty classification:** CONFIRMED (analysis of PE imports/exports, tracing of execution threads, and dependency mapping between the binaries of the official package)
 
 ---
 
-## 1. Visão Geral do Sistema Oficial
+## 1. Overview of the Official System
 
-O cliente oficial do Radmin VPN 2.1 é composto por uma arquitetura em camadas orientada a serviços no Windows:
+The official Radmin VPN 2.1 client is a layered, service-oriented architecture on Windows:
 
 ```mermaid
 graph TD
-    subgraph Modo de Usuário (Sessão 1)
-        GUI["RvRvpnGui.exe<br/>(Interface Gráfica Qt/MFC)"]
+    subgraph User Mode (Session 1)
+        GUI["RvRvpnGui.exe<br/>(Graphical Interface Qt/MFC)"]
     end
 
-    subgraph Modo de Usuário (Serviço de Sistema SYSTEM)
+    subgraph User Mode (SYSTEM Service)
         PIPE["Named Pipe<br/>\\\\.\\pipe\\RadminVpnGuiChannel"]
-        SVC["RvControlSvc.exe<br/>(Serviço de Controle e Roteamento)"]
-        ROL["RvROLClient.dll<br/>(Cliente de Coordenação ROL)"]
-        UES["RvUESClient.dll<br/>(Subsistema de Eventos UES)"]
-        SHL["shelper.dll<br/>(Motor Criptográfico OpenSSL + CryptoAPI)"]
+        SVC["RvControlSvc.exe<br/>(Control and Routing Service)"]
+        ROL["RvROLClient.dll<br/>(ROL Coordination Client)"]
+        UES["RvUESClient.dll<br/>(UES Event Subsystem)"]
+        SHL["shelper.dll<br/>(Cryptographic Engine OpenSSL + CryptoAPI)"]
     end
 
-    subgraph Modo Kernel (Ring 0)
-        DEV["Dispositivo de Controle<br/>\\Device\\RVPNNETMP"]
-        DRV["NetMP60_1_1_64.sys<br/>(Driver Miniport NDIS 6.0)"]
-        OS_NET["Pilha de Rede TCP/IP do Windows"]
+    subgraph Kernel Mode (Ring 0)
+        DEV["Control Device<br/>\\Device\\RVPNNETMP"]
+        DRV["NetMP60_1_1_64.sys<br/>(NDIS 6.0 Miniport Driver)"]
+        OS_NET["Windows TCP/IP Network Stack"]
     end
 
-    GUI <-->|IPC Comandos 0x3ec..0x3f6| PIPE
+    GUI <-->|IPC Commands 0x3ec..0x3f6| PIPE
     PIPE <--> SVC
-    SVC <-->|Controle de Redes e Membros| ROL
-    SVC <-->|Sinalização Assíncrona| UES
+    SVC <-->|Network and Member Control| ROL
+    SVC <-->|Asynchronous Signaling| UES
     ROL <-->|RSA-2048 / AES-256 / SHA-1| SHL
-    SVC <-->|5 Códigos IOCTL + Packet Pump| DEV
+    SVC <-->|5 IOCTL Codes + Packet Pump| DEV
     DEV <--> DRV
     DRV <--> OS_NET
 ```
 
 ---
 
-## 2. Responsabilidades dos Módulos Oficiais
+## 2. Responsibilities of the Official Modules
 
 1. **`RvRvpnGui.exe`:**
-   * Apresentação da interface ao usuário final.
-   * Não possui código de criptografia direta nem manipula sockets da VPN; delega tudo ao serviço através de comandos IPC no Named Pipe.
+   * Presents the interface to the end user.
+   * Has no direct encryption code and does not handle VPN sockets; it delegates everything to the service through IPC commands on the Named Pipe.
 2. **`RvControlSvc.exe`:**
-   * Orquestrador central em espaço de usuário.
-   * Gerencia ciclo de vida da interface de rede, rotas, resolução de nomes e despacho de pacotes.
+   * Central orchestrator in user space.
+   * Manages the lifecycle of the network interface, routes, name resolution and packet dispatch.
 3. **`RvROLClient.dll`:**
-   * Implementa o protocolo cliente para comunicação com a nuvem Famatech (*Radmin Online*).
-   * Gerencia autenticação de usuário, listagem de redes, ingresso/saída de membros e descoberta de nós.
-   * Conduz os testes de NAT (RFC 3489 STUN) e orquestra o tunelamento Teredo (`CTeredoThread`).
+   * Implements the client protocol for communicating with the Famatech cloud (*Radmin Online*).
+   * Manages user authentication, network listing, member join/leave and node discovery.
+   * Runs the NAT tests (RFC 3489 STUN) and orchestrates Teredo tunneling (`CTeredoThread`).
 4. **`RvUESClient.dll`:**
-   * Gerencia fila de eventos assíncronos e telemetria interna entre subsistemas.
+   * Manages the asynchronous event queue and internal telemetry between subsystems.
 5. **`shelper.dll`:**
-   * Camada de isolamento de segurança criptográfica.
-   * Incorpora rotinas estáticas do OpenSSL (`RSA_public_encrypt`, `RSA_private_decrypt`, `AES_set_encrypt_key`, `AES_cbc_encrypt`, `RAND_bytes`) e soma aditiva de integridade de 64 bits.
+   * Cryptographic security isolation layer.
+   * Incorporates static OpenSSL routines (`RSA_public_encrypt`, `RSA_private_decrypt`, `AES_set_encrypt_key`, `AES_cbc_encrypt`, `RAND_bytes`) and a 64-bit additive integrity sum.
 6. **`NetMP60_1_1_64.sys`:**
-   * Driver virtual NDIS que expõe uma interface Ethernet Camada 2 ao sistema operacional.
+   * Virtual NDIS driver that exposes a Layer 2 Ethernet interface to the operating system.
 
 ---
 
-## 3. Modelo de Concorrência e Threads
+## 3. Concurrency and Thread Model
 
-No serviço de sistema (`RvControlSvc.exe` + `RvROLClient.dll`), foram identificados os seguintes fios de execução especializados:
+In the system service (`RvControlSvc.exe` + `RvROLClient.dll`), the following specialized execution threads were identified:
 
 ```mermaid
 flowchart LR
-    T1["Thread Principal<br/>(I/O Reactor epoll/IOCP)"] -->|Eventos de Rede| M["Despachante Central"]
-    T2["Thread de Leitura do Pipe<br/>(IPC Worker)"] -->|Comandos GUI| M
-    T3["Thread do Packet Pump<br/>(NDIS/TAP Reader)"] -->|Quadros Ethernet Brutos| M
-    T4["Thread STUN / NAT<br/>(Sondagem UDP)"] -->|Candidatos Reflexivos| M
-    T5["Thread Teredo<br/>(CTeredoThread)"] -->|Túnel IPv6/UDP 3544| M
+    T1["Main Thread<br/>(I/O Reactor epoll/IOCP)"] -->|Network events| M["Central Dispatcher"]
+    T2["Pipe Read Thread<br/>(IPC Worker)"] -->|GUI commands| M
+    T3["Packet Pump Thread<br/>(NDIS/TAP Reader)"] -->|Raw Ethernet frames| M
+    T4["STUN / NAT Thread<br/>(UDP probing)"] -->|Reflexive candidates| M
+    T5["Teredo Thread<br/>(CTeredoThread)"] -->|IPv6/UDP 3544 tunnel| M
 ```
 
-1. **Thread de I/O de Controle:** Mantém a conexão TCP com a porta 17301 dos servidores ROL.
-2. **Thread do Packet Pump:** Lê continuamente quadros Ethernet da interface de rede e entrega à camada de cifragem.
-3. **Thread do Servidor IPC:** Aguarda conexões de instâncias de interface gráfica no Named Pipe.
-4. **Threads de Conexão P2P / TcpRelay:** Cada canal de peer ativo possui seu próprio contexto de cifragem simétrica independente com encadeamento contínuo de IV.
+1. **Control I/O thread:** Maintains the TCP connection to port 17301 of the ROL servers.
+2. **Packet pump thread:** Continuously reads Ethernet frames from the network interface and hands them to the encryption layer.
+3. **IPC server thread:** Waits for graphical interface instances to connect to the Named Pipe.
+4. **P2P / TcpRelay connection threads:** Each active peer channel has its own independent symmetric encryption context with continuous IV chaining.
 
 ---
 
-## 4. Árvore de Decisão do Roteamento de Quadros (Data Path)
+## 4. Frame Routing Decision Tree (Data Path)
 
-Quando uma aplicação local emite um pacote IP direcionado a um nó da rede virtual (ex.: `26.12.34.56`):
+When a local application sends an IP packet to a node on the virtual network (for example, `26.12.34.56`):
 
 ```mermaid
 flowchart TD
-    A["Quadro Ethernet recebido da interface TAP/NDIS"] --> B["Consulta tabela ARP/MAC interna da rede VPN"]
-    B --> C{"Peer Destino Conhecido e Online?"}
-    C -- Não --> D["Descarta ou Requisita Resolução ao Servidor ROL"]
-    C -- Sim --> E{"Tipo de Transporte Ativo para o Peer?"}
-    E -- 0: TCP Direto --> F["Criptografa com Chave P2P -> Envia via Socket TCP Direto"]
-    E -- 1: UDP Direto --> G["Criptografa com Chave P2P -> Envia via Datagrama UDP Hole-Punched"]
-    E -- Teredo --> H["Criptografa -> Encapsula IPv6/UDP 3544"]
-    E -- 2: TcpRelay --> I["Criptografa com Chave P2P -> Encapsula TLV 0x300000c0 -> Envia ao Relay :17351"]
+    A["Ethernet frame received from the TAP/NDIS interface"] --> B["Query the internal ARP/MAC table of the VPN network"]
+    B --> C{"Destination peer known and online?"}
+    C -- No --> D["Drop or request resolution from the ROL server"]
+    C -- Yes --> E{"Active transport type for the peer?"}
+    E -- 0: Direct TCP --> F["Encrypt with P2P key -> Send via direct TCP socket"]
+    E -- 1: Direct UDP --> G["Encrypt with P2P key -> Send via hole-punched UDP datagram"]
+    E -- Teredo --> H["Encrypt -> Encapsulate in IPv6/UDP 3544"]
+    E -- 2: TcpRelay --> I["Encrypt with P2P key -> Encapsulate TLV 0x300000c0 -> Send to relay :17351"]
 ```
 
 ---
 
-## 5. Mapeamento Arquitetural para o Cliente Rust no Linux
+## 5. Architectural Mapping for the Rust Client on Linux
 
-| Componente Windows Oficial | Equivalente na Implementação Rust (`radmin-vpn-linux-rs`) |
+| Official Windows Component | Equivalent in the Rust Implementation (`radmin-vpn-linux-rs`) |
 |---|---|
-| `RvControlSvc.exe` | Daemon de background em Rust (`radmin-vpn-daemon` ou `main.rs`) |
-| `NetMP60_1_1_64.sys` | Dispositivo de kernel nativo `/dev/net/tun` com `IFF_TAP \| IFF_NO_PI` |
-| `shelper.dll` | Crate `aes`, `rsa`, `sha1` ou `ring` com implementação do trailer proprietário |
-| `RvROLClient.dll` | Módulo `src/session/` e `src/protocol/` |
-| `\\.\pipe\RadminVpnGuiChannel` | Socket de domínio UNIX `/var/run/radmin-vpn.sock` |
-| `RvRvpnGui.exe` | CLI interativa (`radmin-vpn-cli`) ou GUI GTK/Tauri |
+| `RvControlSvc.exe` | Background daemon in Rust (`radmin-vpn-daemon` or `main.rs`) |
+| `NetMP60_1_1_64.sys` | Native kernel device `/dev/net/tun` with `IFF_TAP \| IFF_NO_PI` |
+| `shelper.dll` | `aes`, `rsa`, `sha1` or `ring` crates with the proprietary trailer implementation |
+| `RvROLClient.dll` | `src/session/` and `src/protocol/` modules |
+| `\\.\pipe\RadminVpnGuiChannel` | UNIX domain socket `/var/run/radmin-vpn.sock` |
+| `RvRvpnGui.exe` | Interactive CLI (`radmin-vpn-cli`) or GTK/Tauri GUI |

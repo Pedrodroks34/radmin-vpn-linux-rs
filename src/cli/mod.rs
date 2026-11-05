@@ -22,10 +22,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Exibe o estado atual, IP virtual, peers conectados e estatísticas de tráfego
     Status,
 
-    /// Cria ou verifica a interface TAP sem conectar
     Interface {
         #[arg(short, long, default_value = "radmin0")]
         name: String,
@@ -34,7 +32,6 @@ pub enum Commands {
         mock: bool,
     },
 
-    /// Conecta ao servidor e inicia o túnel VPN
     Connect {
         #[arg(
             short,
@@ -47,34 +44,27 @@ pub enum Commands {
         mock: bool,
     },
 
-    /// Encerra a conexão e desativa os recursos
     Disconnect,
 
-    /// Valida ou exibe a configuração atual
     Config {
         #[arg(long, help = "Gerar arquivo de configuração padrão")]
         generate: Option<PathBuf>,
     },
 
-    /// Conectar a uma rede específica
     Join {
         #[arg(short, long)]
         network: String,
     },
 
-    /// Sair de uma rede específica
     Leave {
         #[arg(short, long)]
         network: String,
     },
 
-    /// Listar redes disponíveis
     List,
 
-    /// Iniciar o daemon em segundo plano
     Start,
 
-    /// Parar o daemon em segundo plano
     Stop,
 }
 
@@ -198,7 +188,6 @@ pub async fn run(cli: Cli) -> crate::Result<()> {
                 }
             }
 
-            // Fallback para conexão direta standalone em primeiro plano
             let server_addr = server.unwrap_or_else(|| "45.162.230.182:17301".to_string());
             println!(
                 "Conectando ao servidor Radmin VPN em {} (modo standalone)...",
@@ -208,7 +197,6 @@ pub async fn run(cli: Cli) -> crate::Result<()> {
             let mut session = crate::session::SessionManager::new();
             println!("Estado: Conectando...");
 
-            // Configura tratamento de sinal SIGINT/SIGTERM para encerramento gracioso
             tokio::select! {
                 res = session.connect(&server_addr) => {
                     match res {

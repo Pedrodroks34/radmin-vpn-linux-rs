@@ -1,34 +1,34 @@
-# Frente 8: Comunicação IPC entre GUI e Serviço
+# Front 8: IPC Communication Between the GUI and the Service
 
-**Classificação de Certeza:** CONFIRMADO (desmontagem direta de `FUN_004e8eb0` e `FUN_004e2ac0` em `RvRvpnGui.exe` e criação do Named Pipe em `RvControlSvc.exe` em `0x40f052` / `0x47de40`)
-
----
-
-## 1. Visão Geral da Arquitetura IPC
-
-No ambiente Windows oficial, o Radmin VPN é decomposto em dois processos independentes com níveis de privilégio distintos:
-1. **`RvControlSvc.exe` (Serviço de Sistema / Background Service):** Executa com privilégios de `SYSTEM` (`NT AUTHORITY\SYSTEM`), responsável por gerenciar a placa de rede virtual, interagir com os servidores de coordenação ROL, gerenciar chaves e rotear o tráfego VPN.
-2. **`RvRvpnGui.exe` (Interface Gráfica de Usuário):** Executa no contexto do usuário convencional logado (`Session 1`), responsável por exibir a interface de usuário, receber cliques de conexão/desconexão e exibir a lista de redes e membros.
-
-A comunicação entre a GUI e o Serviço ocorre exclusivamente através de **Named Pipes do Windows**.
+**Certainty classification:** CONFIRMED (direct disassembly of `FUN_004e8eb0` and `FUN_004e2ac0` in `RvRvpnGui.exe`, and creation of the Named Pipe in `RvControlSvc.exe` at `0x40f052` / `0x47de40`)
 
 ---
 
-## 2. Identificação e Criação do Named Pipe
+## 1. Overview of the IPC Architecture
 
-O canal de Named Pipe possui o seguinte identificador canônico em UTF-16:
+In the official Windows environment, Radmin VPN is split into two independent processes with different privilege levels:
+1. **`RvControlSvc.exe` (System service / background service):** Runs with `SYSTEM` privileges (`NT AUTHORITY\SYSTEM`). It manages the virtual network adapter, interacts with the ROL coordination servers, manages keys and routes VPN traffic.
+2. **`RvRvpnGui.exe` (graphical user interface):** Runs in the context of the logged-in user (`Session 1`). It displays the user interface, receives connect/disconnect clicks, and shows the list of networks and members.
+
+Communication between the GUI and the service happens exclusively through **Windows Named Pipes**.
+
+---
+
+## 2. Identification and Creation of the Named Pipe
+
+The Named Pipe channel has the following canonical identifier in UTF-16:
 ```
 \\.\pipe\RadminVpnGuiChannel
 ```
 
-### 2.1 Lado do Servidor (`RvControlSvc.exe` em `0x40f052`)
-No serviço de sistema, a rotina de inicialização em `0x40f040` cria o Named Pipe com capacidade para até 200 instâncias simultâneas de clientes:
+### 2.1 Server Side (`RvControlSvc.exe` at `0x40f052`)
+In the system service, the initialization routine at `0x40f040` creates the Named Pipe with capacity for up to 200 simultaneous client instances:
 
 ```x86asm
 0x40f040: push ebp
 0x40f041: mov ebp, esp
 0x40f043: push 0xc8                 ; nMaxInstances = 200 (0xC8)
-0x40f048: push dword ptr [ebp + 8]  ; atributos de segurança (SECURITY_ATTRIBUTES)
+0x40f048: push dword ptr [ebp + 8]  ; security attributes (SECURITY_ATTRIBUTES)
 0x40f04b: add ecx, 0xe0
 0x40f051: push 0x519e74             ; L"\\\\.\\pipe\\RadminVpnGuiChannel"
 0x40f056: call 0x47de40             ; CreateNamedPipeW(..., PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, ...)
@@ -37,14 +37,14 @@ No serviço de sistema, a rotina de inicialização em `0x40f040` cria o Named P
 0x40f05f: ret 4
 ```
 
-### 2.2 Lado do Cliente (`RvRvpnGui.exe` em `FUN_004e8eb0`)
-A GUI localiza o pipe no endereço de memória `0x5e7fe4` e conecta-se assincronamente através de `0x5352d0`:
+### 2.2 Client Side (`RvRvpnGui.exe` in `FUN_004e8eb0`)
+The GUI locates the pipe at the memory address `0x5e7fe4` and connects asynchronously through `0x5352d0`:
 
 ```x86asm
-0x4e8f28: push dword ptr [0x5e7fd4] ; timeout de conexão
+0x4e8f28: push dword ptr [0x5e7fd4] ; connection timeout
 0x4e8f2e: mov ecx, ebx
-0x4e8f30: push dword ptr [0x5e7fd0] ; modo de abertura
-0x4e8f36: push dword ptr [esi + 0x11c] ; handle de overlapped I/O
+0x4e8f30: push dword ptr [0x5e7fd0] ; open mode
+0x4e8f36: push dword ptr [esi + 0x11c] ; overlapped I/O handle
 0x4e8f3c: push 0x5e7fe4             ; L"\\\\.\\pipe\\RadminVpnGuiChannel"
 0x4e8f41: call 0x5352d0             ; CreateFileW / WaitNamedPipeW
 0x4e8f46: test al, al
@@ -53,23 +53,23 @@ A GUI localiza o pipe no endereço de memória `0x5e7fe4` e conecta-se assincron
 
 ---
 
-## 3. Estrutura das Mensagens e Protocolo de Comandos
+## 3. Message Structure and Command Protocol
 
-Assim que o Named Pipe é conectado pela interface gráfica, um quadro de handshake inicial de 25 bytes é trocado para validar a versão do canal de IPC. Em seguida, os comandos são serializados através da rotina `FUN_004e2ac0`.
+As soon as the GUI connects to the Named Pipe, an initial 25-byte handshake frame is exchanged to validate the IPC channel version. The commands are then serialized through the routine `FUN_004e2ac0`.
 
-### 3.1 Identificadores de Comandos Confirmados (`FUN_004e2ac0`)
-Pela desmontagem dos chamadores de `FUN_004e2ac0`, foram identificados os seguintes códigos operacionais:
+### 3.1 Confirmed Command Identifiers (`FUN_004e2ac0`)
+From the disassembly of the callers of `FUN_004e2ac0`, the following operation codes were identified:
 
-| Código (Hex) | Código (Dec) | Ponto de Chamada | Significado / Operação | Parâmetros |
+| Code (Hex) | Code (Dec) | Call Site | Meaning / Operation | Parameters |
 |---|---|---|---|---|
-| **`0x3f6`** | 1014 | `0x4e8f78` | **Subscrição de Eventos do Serviço:** Emitido imediatamente pela GUI após abrir o pipe para registrar seu interesse em notificações de estado da rede | `param = 0` |
-| **`0x3ec`** | 1004 | `0x4e92b6` | **Comando de Conectar / Reabilitar VPN:** Emitido quando o usuário clica no botão principal de ligar ou reconectar | `param = 1` |
-| **`0x3ed`** | 1005 | `0x4e9304` | **Comando de Desconectar / Pausar VPN:** Desliga o tráfego do adaptador virtual | `param = 0` |
-| **`0x3ee`** | 1006 | `0x4e9352` | **Consulta de Estado do Adaptador:** Requisita o status atual do driver NDIS e endereço IP atribuído | `param = 0` |
-| **`0x3ef`** | 1007 | `0x4e9295` | **Notificação de Estado Conectado:** Sinaliza que a GUI assumiu o estado ativo e pronto | `param = eax` |
+| **`0x3f6`** | 1014 | `0x4e8f78` | **Service event subscription:** Sent immediately by the GUI after opening the pipe to register its interest in network state notifications | `param = 0` |
+| **`0x3ec`** | 1004 | `0x4e92b6` | **Connect / re-enable VPN command:** Sent when the user clicks the main connect or reconnect button | `param = 1` |
+| **`0x3ed`** | 1005 | `0x4e9304` | **Disconnect / pause VPN command:** Turns off traffic on the virtual adapter | `param = 0` |
+| **`0x3ee`** | 1006 | `0x4e9352` | **Adapter status query:** Requests the current status of the NDIS driver and the assigned IP address | `param = 0` |
+| **`0x3ef`** | 1007 | `0x4e9295` | **Connected-state notification:** Signals that the GUI has assumed the active, ready state | `param = eax` |
 
-### 3.2 Formato do Envelope de Mensagem IPC
-Cada mensagem trafegada no Named Pipe possui um cabeçalho fixo seguido do payload:
+### 3.2 IPC Message Envelope Format
+Each message sent over the Named Pipe has a fixed header followed by the payload:
 
 ```
 +-----------------------------+-----------------------------+-----------------------------+
@@ -81,9 +81,9 @@ Cada mensagem trafegada no Named Pipe possui um cabeçalho fixo seguido do paylo
 
 ---
 
-## 4. Equivalente Arquitetural para o Cliente Linux
+## 4. Architectural Equivalent for the Linux Client
 
-No ambiente Linux nativo, o mecanismo equivalente com paridade funcional completa é:
-* **Mecanismo:** **UNIX Domain Sockets** (`AF_UNIX`) vinculados a `/var/run/radmin-vpn.sock` (ou sob `XDG_RUNTIME_DIR/radmin-vpn.sock` no modo de usuário).
-* **Segurança de Acesso:** Permissões de arquivo POSIX `0660` atribuídas ao grupo `radminvpn` ou administradores locais (`root`).
-* **Protocolo:** O cliente Rust pode implementar o envelope binário nativo para compatibilidade com eventuais GUIs portadas ou expor uma API IPC baseada em JSON-RPC sobre o socket UNIX.
+On native Linux, the equivalent mechanism with full functional parity is:
+* **Mechanism:** **UNIX Domain Sockets** (`AF_UNIX`) bound to `/var/run/radmin-vpn.sock` (or under `XDG_RUNTIME_DIR/radmin-vpn.sock` in user mode).
+* **Access security:** POSIX file permissions `0660`, assigned to the `radminvpn` group or to local administrators (`root`).
+* **Protocol:** The Rust client can implement the native binary envelope for compatibility with any ported GUI, or expose an IPC API based on JSON-RPC over the UNIX socket.

@@ -92,19 +92,16 @@ impl Tunnel {
                 let name = tap.name().to_string();
                 info!("Interface TAP Linux aberta: {}", name);
 
-                // Configurar MTU
                 if let Err(e) = InterfaceConfigurator::set_mtu(&name, self.config.mtu) {
                     warn!("Não foi possível configurar MTU via Netlink/ioctl: {}", e);
                 }
 
-                // Configurar MAC se fornecido
                 if let Some(mac) = self.config.mac_address {
                     if let Err(e) = InterfaceConfigurator::set_mac_address(&name, mac) {
                         warn!("Não foi possível configurar endereço MAC via ioctl: {}", e);
                     }
                 }
 
-                // Configurar IP se fornecido
                 if let Some(ip_str) = &self.config.local_ip {
                     if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
                         let netmask = self
@@ -125,7 +122,6 @@ impl Tunnel {
                     }
                 }
 
-                // Ativar interface (IFF_UP)
                 if let Err(e) = InterfaceConfigurator::set_up(&name) {
                     warn!("Não foi possível ativar interface (IFF_UP): {}", e);
                 }
@@ -171,7 +167,6 @@ impl Tunnel {
     }
 }
 
-/// Loop bidirecional de encaminhamento de quadros (Forwarding Pump)
 pub struct ForwardingPump {
     running: Arc<AtomicBool>,
     metrics: Arc<TunnelMetrics>,
@@ -195,7 +190,6 @@ impl ForwardingPump {
         self.metrics.clone()
     }
 
-    /// Executa o loop bidirecional entre o dispositivo TAP e o canal TCP de transporte seguro.
     pub async fn run(
         &self,
         tap: Arc<AnyTap>,
@@ -210,10 +204,8 @@ impl ForwardingPump {
         let tap_in = tap.clone();
         let crypto_in = crypto.clone();
 
-        // Canal intermediário entre o leitor do TAP e o transmissor do TCP
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(128);
 
-        // Tarefa 1: Lê quadros Ethernet do TAP -> cifra -> fila de envio
         let tap_reader_handle = tokio::spawn(async move {
             let mut read_buf = vec![0u8; 2048];
             while running_tx.load(Ordering::Relaxed) {
@@ -244,7 +236,6 @@ impl ForwardingPump {
             }
         });
 
-        // Tarefa 2: Consome pacotes cifrados e envia pelo canal TCP
         let running_pump = self.running.clone();
         let tap_writer = tap.clone();
         let crypto_out = crypto.clone();
@@ -252,14 +243,12 @@ impl ForwardingPump {
 
         loop {
             tokio::select! {
-                // Outbound: TAP -> TCP
                 Some(encrypted_frame) = outbound_rx.recv() => {
                     if let Err(e) = transport.send(encrypted_frame).await {
                         error!("Erro ao enviar quadro pelo transporte TCP: {}", e);
                         break;
                     }
                 }
-                // Inbound: TCP -> decifra -> TAP
                 result = transport.receive() => {
                     match result {
                         Ok(framed_packet) => {
@@ -380,7 +369,6 @@ mod tests {
                 .await;
         });
 
-        // Simula frame Ethernet gerado pelo kernel no TAP
         let eth_frame = vec![
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x00,
             0x45, 0x00, 0x00, 0x20, 0x01, 0x02, 0x03, 0x04,
@@ -388,19 +376,15 @@ mod tests {
 
         endpoint.inject_frame(eth_frame.clone()).await.unwrap();
 
-        // Servidor TCP deve receber o pacote cifrado no frame
         let received_net_frame = server_transport.receive().await.unwrap();
-        // Decifra com a mesma chave do servidor
         let mut server_cipher = crate::crypto::FamatechCipherState::new(shared_key);
         let decrypted_eth = server_cipher.decrypt(&received_net_frame.payload).unwrap();
         assert_eq!(decrypted_eth, eth_frame);
 
-        // Servidor envia frame de resposta
         let reply_frame = vec![0x00, 0x11, 0x22, 0xaa, 0xbb, 0xcc, 0x08, 0x00, 0x42];
         let encrypted_reply = server_cipher.encrypt(&reply_frame).unwrap();
         server_transport.send(encrypted_reply).await.unwrap();
 
-        // TAP deve receber de volta o frame original após o pump decifrar
         match &*tap {
             AnyTap::Mock(m) => {
                 let outbound = m.recv_outbound().await.unwrap();
