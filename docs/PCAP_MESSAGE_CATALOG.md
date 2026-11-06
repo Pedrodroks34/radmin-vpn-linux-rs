@@ -1,48 +1,49 @@
 # PCAP Message Catalog — Radmin VPN Traffic Analysis
 
-**Projeto:** Radmin VPN Linux client (Rust, independente)  
-**Diretório de capturas:** `claude-handoff/pcaps/`  
-**Data da análise:** 06 nov 2026  
+**Project:** Radmin VPN Linux client (Rust, independent)  
+**Capture directory:** `claude-handoff/pcaps/`  
+**Analysis date:** 06 nov 2026  
+**Language:** English  
 
 ---
 
-## Sumário do Catálogo
+## Catalog Summary
 
-| Protocolo | Porta | Família | Tamanho (bytes) | Quantidade | Confiança |
+| Protocol | Port | Family | Size (bytes) | Quantity | Confidence |
 |---|---|---|---|---|---|
-| TCP | 17301 | Controle | Variável (4+payload) | ~100 | CONFIRMADO |
-| TCP | 17351 | Controle alternativo | Variável (4+payload) | ~30 | CONFIRMADO |
-| UDP | 9993 | A — Setup/completo | 137 | 93 | CONFIRMADO |
-| UDP | 9993 | B — Curto | 33 | 223 | CONFIRMADO |
-| UDP | 9993 | C — Keepalive curto | 28 | 82 | CONFIRMADO |
-| UDP | 9993 | D — Médio | 99 | 74 | CONFIRMADO |
-| UDP | 9993 | E — Grande (connect) | 247-641 | ~40 | CONFIRMADO |
-| UDP | 47836 | Keepalive | 4 | ~60 | CONFIRMADO |
-| UDP | 17309/17341/17342/17357/17358 | STUN Binding Request | 20 | ~20 | CONFIRMADO |
-| UDP | 17309/17341/17342/17357/17358 | STUN Binding Response | 56 | ~10 | CONFIRMADO |
-| UDP | 3544 | Teredo Router Solicitation | 61 | 2 | CONFIRMADO |
+| TCP | 17301 | Control | Variable (4+payload) | ~100 | CONFIRMED |
+| TCP | 17351 | Alternative control | Variable (4+payload) | ~30 | CONFIRMED |
+| UDP | 9993 | A — Setup/complete | 137 | 93 | CONFIRMED |
+| UDP | 9993 | B — Short | 33 | 223 | CONFIRMED |
+| UDP | 9993 | C — Short keepalive | 28 | 82 | CONFIRMED |
+| UDP | 9993 | D — Medium | 99 | 74 | CONFIRMED |
+| UDP | 9993 | E — Large (connect) | 247–641 | ~40 | CONFIRMED |
+| UDP | 47836 | Keepalive | 4 | ~60 | CONFIRMED |
+| UDP | 17309/17341/17342/17357/17358 | STUN Binding Request | 20 | ~20 | CONFIRMED |
+| UDP | 17309/17341/17342/17357/17358 | STUN Binding Response | 56 | ~10 | CONFIRMED |
+| UDP | 3544 | Teredo Router Solicitation | 61 | 2 | CONFIRMED |
 
 ---
 
-## Mensagem TCP/17301 — Controle
+## TCP/17301 Message — Control
 
-### Estrutura
+### Structure
 
 ```
 [4-byte big-endian length][payload]
 ```
 
-O campo de length representa apenas o tamanho do payload (exclui os 4 bytes do header).
+The length field represents only the payload size (excludes the 4-byte header).
 
-### Exemplos Reais
+### Real Examples
 
-#### Mensagem 1 — 192 bytes de payload
+#### Message 1 — 192 bytes payload
 
-**Captura:** `radmin-connect.pcapng`  
+**Capture:** `radmin-connect.pcapng`  
 **Frame:** 77  
 **Timestamp:** 06/11/2026 14:22:09.xxx  
-**Origem:** 192.168.15.15:44340  
-**Destino:** 148.113.190.78:17301  
+**Source:** 192.168.15.15:44340  
+**Destination:** 148.113.190.78:17301  
 **tcp.len:** 196  
 **Length field:** `00 00 00 c0` (192)
 
@@ -63,14 +64,14 @@ a7 6 03 84 68 28 13 5b 2c 8b 6e a0 39 6b b0 e
 a0 6 03 6b c d 2c
 ```
 
-**Interpretação:** Dados criptografados (alta entropia). Não há campos identificáveis no payload.
+**Interpretation:** Encrypted data (high entropy). No identifiable fields in payload.
 
-#### Mensagem 2 — 32 bytes de payload
+#### Message 2 — 32 bytes payload
 
-**Captura:** `radmin-connect.pcapng`  
+**Capture:** `radmin-connect.pcapng`  
 **Frame:** 80  
-**Origem:** 192.168.15.15:44340  
-**Destino:** 148.113.190.78:17301  
+**Source:** 192.168.15.15:44340  
+**Destination:** 148.113.190.78:17301  
 **tcp.len:** 36  
 **Length field:** `00 00 00 20` (32)
 
@@ -80,74 +81,74 @@ c7 f5 78 26 af 97 91 03 70 c8 6f d5 cb 17 12 18
 58 9d 2f 73 7f 39 7d cf 59 ee 46 4d 43 21 5b d0
 ```
 
-**Interpretação:** 32 bytes de dados aparentemente aleatórios (possível chave, nonce ou hash criptografado).
+**Interpretation:** 32 bytes of apparently random data (possible key, nonce, or cryptographic hash).
 
-#### Mensagem 3 — 256 bytes de payload
+#### Message 3 — 256 bytes payload
 
-**Captura:** `radmin-connect.pcapng`  
+**Capture:** `radmin-connect.pcapng`  
 **Frame:** 81  
-**Origem:** 148.113.190.78:17301  
-**Destino:** 192.168.15.15:44340  
+**Source:** 148.113.190.78:17301  
+**Destination:** 192.168.15.15:44340  
 **tcp.len:** 260  
 **Length field:** `00 00 01 00` (256)
 
-**Payload (256 bytes):** Dados criptografados (alta entropia, não exibidos por tamanho).
+**Payload (256 bytes):** Encrypted data (high entropy, not displayed due to size).
 
-#### Mensagem Fragmentada — 2592 bytes total
+#### Fragmented Message — 2592 bytes total
 
-**Captura:** `radmin-connect.pcapng`  
-**Frame 100:** Origem 148.113.190.78:17301, Destino 192.168.15.15:44340  
+**Capture:** `radmin-connect.pcapng`  
+**Frame 100:** Source 148.113.190.78:17301, Destination 192.168.15.15:44340  
 **Length field:** `00 00 0a 20` (2592)  
-**tcp.len:** 1440 (primeiro fragmento: 4 header + 1436 payload)
+**tcp.len:** 1440 (first fragment: 4 header + 1436 payload)
 
-**Frame 101:** Origem 148.113.190.78:17301, Destino 192.168.15.15:44340  
-**tcp.len:** 1156 (continuação: 1156 bytes payload, sem novo length prefix)  
-**Reconstrução:** 1436 + 1156 = 2592 ✓
+**Frame 101:** Source 148.113.190.78:17301, Destination 192.168.15.15:44340  
+**tcp.len:** 1156 (continuation: 1156 bytes payload, no new length prefix)  
+**Reconstruction:** 1436 + 1156 = 2592 ✓
 
 ---
 
-## Mensagem TCP/17351 — Controle Alternativo
+## TCP/17351 Message — Alternative Control
 
-### Estrutura
+### Structure
 
 ```
 [4-byte big-endian length][payload]
 ```
 
-Payload interno:
+Internal payload:
 ```
-[4 bytes: 10 00 00 04 — versão/tipo constante]
-[4 bytes: número de sequência big-endian]
-[variável: payload da mensagem]
+[4 bytes: 10 00 00 04 — constant version/type]
+[4 bytes: big-endian sequence number]
+[variable: message payload]
 ```
 
-### Exemplos Reais
+### Real Examples
 
-#### Mensagem 1 — Sequência 4
+#### Message 1 — Sequence 4
 
-**Captura:** `radmin_vm.pcap`  
+**Capture:** `radmin_vm.pcap`  
 **Frame:** 5487  
-**Origem:** 45.162.230.182:17351  
-**Destino:** 192.168.122.77:49497  
+**Source:** 45.162.230.182:17351  
+**Destination:** 192.168.122.77:49497  
 **tcp.len:** 16  
 **Length field:** `00 00 00 0c` (12)
 
-**Payload completo (12 bytes):**
+**Complete payload (12 bytes):**
 ```
 00 00 00 04 01 00 01 df 00 00 00 02
 ```
 
-**Campos:**
-- `00 00 00 04`: versão/tipo (constante)
-- `01 00 01 df`: campo variável
-- `00 00 00 02`: número de sequência = 2
+**Fields:**
+- `00 00 00 04`: version/type (constant)
+- `01 00 01 df`: variable field
+- `00 00 00 02`: sequence number = 2
 
-#### Mensagem 2 — Sequência 3
+#### Message 2 — Sequence 3
 
-**Captura:** `radmin_vm.pcap`  
+**Capture:** `radmin_vm.pcap`  
 **Frame:** 5494  
-**Origem:** 45.162.230.182:17351  
-**Destino:** 192.168.122.77:49497  
+**Source:** 45.162.230.182:17351  
+**Destination:** 192.168.122.77:49497  
 **tcp.len:** 207  
 **Length field:** `00 00 00 cb` (203)
 
@@ -167,17 +168,17 @@ c 3 f 3f 74 6 12 14 1 3b 79 c 8 b 11 f 12 4 da
 91 79 ff 6 bd 77 a 3 5bc 0 6 24 9 13 c 84 f 95 c
 ```
 
-**Campos:**
-- `10 00 00 04`: versão/tipo (constante)
-- `00 00 00 03`: número de sequência = 3
-- `60 00 00 bf ...`: payload variável (195 bytes)
+**Fields:**
+- `10 00 00 04`: version/type (constant)
+- `00 00 00 03`: sequence number = 3
+- `60 00 00 bf ...`: variable payload (195 bytes)
 
-#### Mensagem 3 — Sequência 4
+#### Message 3 — Sequence 4
 
-**Captura:** `radmin_vm.pcap`  
+**Capture:** `radmin_vm.pcap`  
 **Frame:** 5501  
-**Origem:** 45.162.230.182:17351  
-**Destino:** 192.168.122.77:49497  
+**Source:** 45.162.230.182:17351  
+**Destination:** 192.168.122.77:49497  
 **tcp.len:** 208  
 **Length field:** `00 00 00 cc` (204)
 
@@ -199,66 +200,73 @@ ed 5d 48 b 21 66 a fd 97 ec 77 1b d 74 2c 2a 76
 33 69 14 f 6
 ```
 
-**Campos:**
-- `10 00 00 04`: versão/tipo (constante)
-- `00 00 00 04`: número de sequência = 4
-- `60 00 00 c0 ...`: payload variável (200 bytes)
+**Fields:**
+- `10 00 00 04`: version/type (constant)
+- `00 00 00 04`: sequence number = 4
+- `60 00 00 c0 ...`: variable payload (200 bytes)
 
-### Números de Sequência Observados
+### Observed Sequence Numbers
 
-| Frame | Sequência | Direção |
+| Frame | Direction | Sequence |
 |---|---|---|
-| 5487 | 2 | Servidor → Cliente |
-| 5493 | 2 | Servidor → Cliente |
-| 5494 | 3 | Servidor → Cliente |
-| 5501 | 4 | Servidor → Cliente |
-| 5502 | 5 | Cliente → Servidor |
-| 5509 | 6 | Cliente → Servidor |
-| 5510 | (sem sequência) | Cliente → Servidor (20 bytes) |
-| 5511 | (sem sequência) | Cliente → Servidor (36 bytes) |
-| 5512 | (sem sequência) | Cliente → Servidor (68 bytes) |
+| 5487 | Server → Client | 4 |
+| 5493 | Server → Client | 2 |
+| 5494 | Server → Client | 3 |
+| 5501 | Server → Client | 4 |
+| 5502 | Client → Server | 5 |
+| 5509 | Client → Server | 6 |
+| 5510 | Client → Server | (no sequence, 20 bytes) |
+| 5511 | Client → Server | (no sequence, 36 bytes) |
+| 5512 | Client → Server | (no sequence, 68 bytes) |
 
-**Observação:** Nem todas as mensagens TCP/17351 têm o campo de sequência. Mensagens menores (20-68 bytes) podem ter estrutura diferente.
+**Observation:** Not all TCP/17351 messages have a sequence field. Smaller messages (20–68 bytes) may have a different structure.
 
 ---
 
-## Mensagem UDP/9993 — Família A (137 bytes)
+## UDP/9993 Message — Family A (137 bytes)
 
-### Estrutura Completa
+### Complete Structure
 
-```
-Offset  Conteúdo                          Tamanho  Interpretação
-0x00    25 2d ff 68                       4 bytes  Magic / tipo de mensagem
-0x04    42 c3 84 70                       4 bytes  Campo variável (flags?)
-0x08    e5 d4 c1 c5 bc 21 59 16           8 bytes  Identificador sessão (parte 1)
-0x10    c8 0f                             2 bytes  Identificador sessão (parte 2)
-0x12    00 01                             2 bytes  Subtipo de mensagem
-0x14    03 74 49 74 bf 0f ed 01           8 bytes  Campo variável
-0x1c    0d 01 10 00                       4 bytes  Campo fixo
-0x20    02 00 00 01                       4 bytes  Campo fixo
-0x24    a1 b1 ea 42 91 21 59 16 c8 0f     10 bytes  Identificador repetido
-0x2e    00 2e 38 e9 ... (48 bytes)        48 bytes  Região criptografada
-0x5e    00 04                             2 bytes  TLV Type
-0x60    1a ac b2 4f                       4 bytes  IP do peer (big-endian)
-0x64    27 09                             2 bytes  Porta do peer (big-endian)
-0x66    00 00 00 00 08 ea c9 0a           8 bytes  Campo variável
-0x6e    00 00 01 94                       4 bytes  Campo variável
-0x72    db 79 5b 4e 0b 2c                 6 bytes  Campo variável
-0x78    ?? (17 bytes não documentados)    17 bytes  FALTANDO no relatório anterior
-```
+| Offset | Size | Hex bytes | Interpretation | Confidence |
+|---|---|---|---|---|
+| 0x00 | 4 | `25 2d ff 68` | Magic / message type | CONFIRMED |
+| 0x04 | 4 | `42 c3 84 70` | Variable field (flags?) | INCONCLUSIVE |
+| 0x08 | 10 | `e5 d4 c1 c5 bc 21 59 16 c8 0f` | Session identifier | STRONG INDICATION |
+| 0x12 | 2 | `00 01` | Message subtype | CONFIRMED |
+| 0x14 | 8 | `03 74 49 74 bf 0f ed 01` | Variable field | INCONCLUSIVE |
+| 0x1c | 4 | `0d 01 10 00` | Fixed field | CONFIRMED |
+| 0x20 | 4 | `02 00 00 01` | Fixed field | CONFIRMED |
+| 0x24 | 10 | `a1 b1 ea 42 91 21 59 16 c8 0f` | Repeated session ID | HYPOTHESIS |
+| 0x2e | 48 | `00 2e 38 e9 ...` | Encrypted region | STRONG INDICATION |
+| 0x5e | 12 | `1d ba c6 ca 71 c4 dc a7 1d ba 4f cb` | Unknown region | INCONCLUSIVE |
+| 0x6a | 6 | `cc 9f 54 b0 57 4d` | Unknown | INCONCLUSIVE |
+| 0x70 | 2 | `0e 08` | Unknown | INCONCLUSIVE |
+| 0x72 | 2 | `59 c1` | Unknown | INCONCLUSIVE |
+| 0x74 | 2 | `af 78` | Unknown | INCONCLUSIVE |
+| 0x76 | 2 | `4e 00` | Unknown | INCONCLUSIVE |
+| 0x78 | 2 | `00 00` | Possible TLV start | HYPOTHESIS |
+| 0x7a | 4 | `00 08 ea c9` | Possible IP fragment | HYPOTHESIS |
+| 0x7e | 2 | `0a 00` | Unknown | INCONCLUSIVE |
+| 0x80 | 1 | `00` | Unknown | INCONCLUSIVE |
+| 0x81 | 7 | `00 01 94 db 79 5b` | Unknown | INCONCLUSIVE |
+| 0x88 | 1 | `4e` | Unknown | INCONCLUSIVE |
+| 0x89 | 1 | `0b` | Unknown | INCONCLUSIVE |
+| 0x8a | 1 | `2c` | Unknown | INCONCLUSIVE |
 
-### Exemplos Reais
+**Total:** 137 bytes. The previous report documented only up to 0x77 (120 bytes), omitting 17 bytes at offsets 0x78–0x8a.
 
-#### Exemplo 1 — Virtual → Virtual
+### Real Examples
 
-**Captura:** `radmin-mine.pcapng`  
+#### Example 1 — Virtual → Virtual
+
+**Capture:** `radmin-mine.pcapng`  
 **Frame:** 116  
 **Interface:** 1 (radminvpn0)  
-**Origem:** 26.239.229.134:9993  
-**Destino:** 26.172.178.79:9993  
+**Source:** 26.239.229.134:9993  
+**Destination:** 26.172.178.79:9993  
 **udp.length:** 145 (137 bytes payload)
 
-**Payload completo (137 bytes):**
+**Complete payload (137 bytes):**
 ```
 25 2d ff 68 42 c3 84 70 e5 d4 c1 c5 bc 21 59 16
 c8 0f 00 01 03 74 49 74 bf 0f ed 01 0d 01 10 00
@@ -267,20 +275,20 @@ c8 0f 00 01 03 74 49 74 bf 0f ed 01 0d 01 10 00
 6c 7a 3e 5d 6c 86 65 7c bb e4 53 9d 0b c3 69 5e
 db 03 c5 ab 8b ef 20 1d c6 ca 71 c4 dc a7 1d ba
 4f cb cc 9f 54 b0 57 4d 0e 08 59 c1 af 78 4e 00
-04 1a ac b2 4f 27 09 00 00 00 00 08 ea c9 0a 00
-00 01 94 db 79 5b 4e 0b 2c
+04 1a ac b2 4f 27 09 00 00 00 08 ea c9 0a 00 00
+01 94 db 79 5b 4e 0b 2c
 ```
 
-#### Exemplo 2 — Física → Virtual
+#### Example 2 — Physical → Virtual
 
-**Captura:** `radmin-mine.pcapng`  
+**Capture:** `radmin-mine.pcapng`  
 **Frame:** 127  
 **Interface:** 0 (enp7s0)  
-**Origem:** 192.168.15.15:9993  
-**Destino:** [IP_PUBLICO_MASCARADO}:9993  
+**Source:** 192.168.15.15:9993  
+**Destination:** [IP_PUBLICO_MASCARADO]:9993  
 **udp.length:** 145 (137 bytes payload)
 
-**Payload completo (137 bytes):**
+**Complete payload (137 bytes):**
 ```
 5d a8 6b 96 1d 5d 1b e e 5d 4c 1c 5b c 21 59 16
 c8 0f 00 0d 03 dd 76 d7 ec cb a c 01 0d 01 10 00
@@ -289,87 +297,84 @@ c8 0f 00 0d 03 dd 76 d7 ec cb a c 01 0d 01 10 00
 6c 7a 3e 5d 6c 86 65 7c bb e4 53 9d 0b c3 69 5e
 db 03 c5 ab 8b ef 20 1d c6 ca 71 c4 dc a7 1d ba
 4f cb cc 9f 54 b0 57 4d 0e 08 59 c1 af 78 4e 00
-04 b1 70 4f e2 27 09 00 00 00 00 08 eac 9 0a 00
-00 01 94 db 79 5b 4e fb 2b
+04 b1 70 4f e2 27 09 00 00 00 08 eac 9 0a 00 00
+01 94 db 79 5b 4e fb 2b
 ```
 
-**Diferenças em relação ao Exemplo 1:**
-- Offset 0x00-0x03: diferente (`5d a8 6b 96` vs `25 2d ff 68`) — possivelmente mensagem diferente ou nonce
-- Offset 0x08-0x11: `e5 d4 c1 c5 bc 21 59 16 c8 0f` — MESMO identificador de sessão
-- Offset 0x5e-0x65: `00 04 b1 70 4f e2 27 09` — TLV 0x0004 com IP `b1 70 4f e2` = [IP_PUBLICO_MASCARADO} e porta `27 09` = 9993
+**Differences from Example 1:**
+- Offset 0x00–0x03: different (`5d a8 6b 96` vs `25 2d ff 68`) — possibly different message or nonce
+- Offset 0x08–0x11: `e5 d4 c1 c5 bc 21 59 16 c8 0f` — SAME session identifier
+- Offset 0x6f–0x76: `00 04 b1 70 4f e2 27 09` — TLV 0x0004 with IP `b1 70 4f e2` = [IP_PUBLICO_MASCARADO] and port `27 09` = 9993
 
-#### Exemplo 3 — Hole Punching (mesmo payload, porta diferente)
+#### Example 3 — Hole Punching (same payload, different port)
 
-**Captura:** `radmin-mine.pcapng`  
+**Capture:** `radmin-mine.pcapng`  
 **Frame:** 117  
-**Origem:** 26.239.229.134:48318  
-**Destino:** 26.172.178.79:9993  
+**Source:** 26.239.229.134:48318  
+**Destination:** 26.172.178.79:9993  
 **udp.length:** 145
 
-**Payload:** IDENTICO ao frame 116 (mesmo payload de 137 bytes)
+**Payload:** IDENTICAL to frame 116 (same 137-byte payload)
 
-**Conclusão:** O mesmo payload é reenviado de múltiplas portas de origem para facilitar hole punching.
+**Conclusion:** The same payload is retransmitted from multiple source ports to facilitate hole punching.
 
 ---
 
-## Mensagem UDP/9993 — Família B (33 bytes)
+## UDP/9993 Message — Family B (33 bytes)
 
-### Estrutura
+### Structure
 
-```
-Offset  Conteúdo                          Tamanho
-0x00    b9 6b 32 c3                       4 bytes  Campo variável
-0x04    13 57 56 f8                       4 bytes  Campo variável
-0x08    77 8c de 71                       4 bytes  Campo variável
-0x0c    90 21 59 16                       4 bytes  Parte do identificador de sessão
-0x10    c8 0f                             2 bytes  Parte do identificador de sessão
-0x12    08 af                             2 bytes  Campo variável
-0x14    22 1d ce fb                       4 bytes  Campo variável
-0x18    43 42 25 7e                       4 bytes  Campo variável
-0x1c    46 9e 55 19                       4 bytes  Campo variável
-0x20    2f                                1 byte   Campo variável / trailer
-```
+| Offset | Size | Bytes | Interpretation |
+|---|---|---|---|
+| 0x00 | 4 | `b9 6b 32 c3` | Variable field |
+| 0x04 | 4 | `13 57 56 f8` | Variable field |
+| 0x08 | 4 | `77 8c de 71` | Variable field |
+| 0x0c | 6 | `90 21 59 16 c8 0f` | Session identifier (partial, 6 bytes) |
+| 0x12 | 2 | `08 af` | Variable field |
+| 0x14 | 4 | `22 1d ce fb` | Variable field |
+| 0x18 | 4 | `43 42 25 7e` | Variable field |
+| 0x1c | 4 | `46 9e 55 19` | Variable field |
+| 0x20 | 1 | `2f` | Variable field / trailer |
 
-### Exemplo Real
+### Real Example
 
-**Captura:** `radmin-mine.pcapng`  
+**Capture:** `radmin-mine.pcapng`  
 **Frame:** 139  
 **Interface:** 0 (enp7s0)  
-**Origem:** 192.168.15.15:48318  
-**Destino:** 103.195.103.66:9993  
+**Source:** 192.168.15.15:48318  
+**Destination:** 103.195.103.66:9993  
 **udp.length:** 41 (33 bytes payload)
 
-**Payload completo (33 bytes):**
+**Complete payload (33 bytes):**
 ```
 b9 6b 32 c3 13 57 56 f8 77 8c de 71 90 21 59 16
 c8 0f 08 af 22 1d ce fb 43 42 25 7e 46 9e 55 19 2f
 ```
 
-**Observação:** Contém apenas 6 bytes do identificador de sessão (`90 21 59 16 c8 0f`), não os 10 bytes completos.
+**Observation:** Contains only 6 bytes of session identifier (`90 21 59 16 c8 0f`), not the complete 10 bytes.
 
 ---
 
-## Mensagem UDP/9993 — Família C (28 bytes)
+## UDP/9993 Message — Family C (28 bytes)
 
-### Estrutura
+### Structure
 
-```
-Offset  Conteúdo                          Tamanho
-0x00    09 3e 08 ab b0 a6 17 91           8 bytes  Campo variável
-0x08    e5 d4 c1 c5 bc 21 59 16 c8 0f     10 bytes  Identificador de sessão completo
-0x12    18 ac 77 1e 68 c7 9b e0 c5 0c     10 bytes  Campo variável / trailer
-```
+| Offset | Size | Bytes | Interpretation |
+|---|---|---|---|
+| 0x00 | 8 | `09 3e 08 ab b0 a6 17 91` | Variable field |
+| 0x08 | 10 | `e5 d4 c1 c5 bc 21 59 16 c8 0f` | Complete session identifier |
+| 0x12 | 10 | `18 ac 77 1e 68 c7 9b e0 c5 0c` | Variable field / trailer |
 
-### Exemplo Real
+### Real Example
 
-**Captura:** `radmin-mine.pcapng`  
+**Capture:** `radmin-mine.pcapng`  
 **Frame:** 187  
 **Interface:** 0 (enp7s0)  
-**Origem:** 192.168.15.15:9993  
-**Destino:** 25.33.236.186:9993  
+**Source:** 192.168.15.15:9993  
+**Destination:** 25.33.236.186:9993  
 **udp.length:** 36 (28 bytes payload)
 
-**Payload completo (28 bytes):**
+**Complete payload (28 bytes):**
 ```
 09 3e 08 ab b0 a6 17 91 e5 d4 c1 c5 bc 21 59 16
 c8 0f 18 ac 77 1e 68 c7 9b e0 c5 0c
@@ -377,18 +382,18 @@ c8 0f 18 ac 77 1e 68 c7 9b e0 c5 0c
 
 ---
 
-## Mensagem UDP/9993 — Família D (99 bytes)
+## UDP/9993 Message — Family D (99 bytes)
 
-### Exemplo Real
+### Real Example
 
-**Captura:** `radmin-mine.pcapng`  
+**Capture:** `radmin-mine.pcapng`  
 **Frame:** 143  
 **Interface:** 0 (enp7s0)  
-**Origem:** 192.168.15.15:9993  
-**Destino:** [IP_PUBLICO_MASCARADO}:9993  
+**Source:** 192.168.15.15:9993  
+**Destination:** [IP_PUBLICO_MASCARADO]:9993  
 **udp.length:** 107 (99 bytes payload)
 
-**Payload completo (99 bytes):**
+**Complete payload (99 bytes):**
 ```
 b5 29 7e d0 4f 09 38 8e e5 d4 c1 c5 bc 21 59 16
 c8 0f 18 31 ff fc 43 50 cd d0 29 e4 01 23 d3 84
@@ -401,18 +406,18 @@ a7 22 26 26 3e 82 e6 91 14 40 58 97 3d 7d a7 0e
 
 ---
 
-## Mensagem UDP/9993 — Família E (247-641 bytes)
+## UDP/9993 Message — Family E (247–641 bytes)
 
-### Exemplo Real (249 bytes)
+### Real Example (249 bytes)
 
-**Captura:** `radmin-mine-host.pcapng`  
+**Capture:** `radmin-mine-host.pcapng`  
 **Frame:** 132  
 **Interface:** 0 (enp7s0)  
-**Origem:** [IP_PUBLICO_MASCARADO}:9993  
-**Destino:** 192.168.15.15:9993  
+**Source:** [IP_PUBLICO_MASCARADO]:9993  
+**Destination:** 192.168.15.15:9993  
 **udp.length:** 257 (249 bytes payload)
 
-**Payload (primeiros 64 bytes):**
+**Payload (first 64 bytes):**
 ```
 b6 0d 0e 91 fa 1e c5 00 21 59 16 c8 0f e5 d4 c1
 c5 bc 21 59 16 c8 0f 18 08 6b cf d5 6c 27 0c 3e
@@ -426,152 +431,159 @@ d 1f a 6 d a 1 d e 9 b 5 4 b d 9 3 f c c 7 e 3
 3 af a 7 76 0c ee 2 b 96 0
 ```
 
-**Observação:** Contém `21 59 16 c8 0f` e `e5 d4 c1 c5 bc 21 59 16 c8 0f` (identificador de sessão parcial e completo).
+**Observation:** Contains `21 59 16 c8 0f` and `e5 d4 c1 c5 bc 21 59 16 c8 0f` (partial and complete session identifier).
 
 ---
 
-## Mensagem UDP/47836 — Keepalive
+## UDP/47836 Message — Keepalive
 
-### Estrutura
+### Structure
 
-```
-Offset  Conteúdo  Tamanho  Interpretação
-0x00    XX 02 00 00  4 bytes  Contador sequencial little-endian uint16
-```
+| Offset | Size | Bytes | Interpretation |
+|---|---|---|---|
+| 0x00 | 4 | `XX 02 00 00` | Sequential counter |
 
-### Exemplos Reais
+**Layout ambiguity:** The 4-byte payload can be interpreted as either:
+- `uint16 LE counter + 2 zero bytes` (counter value from first 2 bytes, then `00 00`)
+- `uint32 LE counter` (counter value from all 4 bytes)
 
-#### Captura radmin-mine.pcapng
+Both interpretations produce identical values because the upper 16 bits are always zero. No evidence distinguishes these interpretations.
 
-| Frame | Payload | Valor (LE uint16) | Origem | Destino |
+### Real Examples
+
+#### Capture `radmin-mine.pcapng`:
+
+| Frame | Payload | Value | Source | Destination |
 |---|---|---|---|---|
 | 66 | c3 02 00 00 | 707 | 26.228.88.155:47836 | 26.239.229.134:47836 |
 | 342 | c4 02 00 00 | 708 | 26.228.88.155:47836 | 26.239.229.134:47836 |
 | 543 | c5 02 00 00 | 709 | 26.228.88.155:47836 | 26.239.229.134:47836 |
 
-#### Captura radmin-mine-host.pcapng
+#### Capture `radmin-mine-host.pcapng`:
 
-| Frame | Payload | Valor (LE uint16) | Origem | Destino |
+| Frame | Payload | Value | Source | Destination |
 |---|---|---|---|---|
 | 93 | 22 03 00 00 | 802 | 26.228.88.155:47836 | 26.239.229.134:47836 |
 | 213 | 23 03 00 00 | 803 | 26.228.88.155:47836 | 26.239.229.134:47836 |
 
-#### Captura radmin-connect.pcapng
+#### Capture `radmin-connect.pcapng`:
 
-| Frame | Payload | Valor (LE uint32) | Origem | Destino |
+| Frame | Payload | Value | Source | Destination |
 |---|---|---|---|---|
 | 312 | 9e 00 00 00 | 158 | 26.228.88.155:47836 | 26.239.229.134:47836 |
 | 957 | 9f 00 00 00 | 159 | 26.228.88.155:47836 | 26.239.229.134:47836 |
 
 ---
 
-## Mensagem STUN — Binding Request
+## STUN Message — Binding Request
 
-### Estrutura (RFC 5389)
+### Structure (non-standard variant)
 
-```
-Offset  Campo                   Tamanho  Valor exemplo
-0x00    Message Type            2 bytes  0x0001 (Binding Request)
-0x02    Message Length          2 bytes  0x0000
-0x04    Magic Cookie            4 bytes  0x2112A442 (implícito no dissector)
-0x08    Transaction ID          16 bytes  Aleatório
-```
+| Offset | Field | Size | Example Value |
+|---|---|---|---|
+| 0x00 | Message Type | 2 bytes | `00 01` (Binding Request) |
+| 0x02 | Message Length | 2 bytes | `00 00` |
+| 0x04 | Transaction ID | 16 bytes | Random |
+| **Total** | | **20 bytes** | |
 
-**Payload total:** 20 bytes (sem atributos)
+**Note:** This is NOT standard RFC 5389 STUN. No magic cookie (0x2112A442) is present, and the transaction ID is 16 bytes (not 12).
 
-### Exemplo Real
+### Real Example
 
-**Captura:** `radmin_vm.pcap`  
+**Capture:** `radmin_vm.pcap`  
 **Frame:** 5477  
-**Origem:** 192.168.122.77:54527  
-**Destino:** 135.181.75.11:17357  
+**Source:** 192.168.122.77:54527  
+**Destination:** 135.181.75.11:17357  
 **udp.length:** 28 (20 bytes payload)
 
-**Payload completo:**
+**Complete payload:**
 ```
 00 01 00 00 24 df 38 03 cb e7 64 ea 10 67 38 b6
 1d 31 4c 66
 ```
 
-**Campos:**
+**Fields:**
 - Message Type: `00 01` = Binding Request
-- Message Length: `00 00` = 0 atributos
+- Message Length: `00 00` = 0 attributes
 - Transaction ID: `24 df 38 03 cb e7 64 ea 10 67 38 b6 1d 31 4c 66`
 
 ---
 
-## Mensagem STUN — Binding Response
+## STUN Message — Binding Response
 
-### Estrutura
+### Structure
 
-```
-Offset  Campo                   Tamanho
-0x00    Message Type            2 bytes  0x0101 (Binding Response)
-0x02    Message Length          2 bytes  0x0024 (36 bytes de atributos)
-0x04    Magic Cookie            4 bytes
-0x08    Transaction ID          16 bytes  (mesmo da request)
-0x18    Atributos               36 bytes  (MAPPED-ADDRESS, XOR-MAPPED-ADDRESS, etc.)
-```
+| Offset | Field | Size |
+|---|---|---|
+| 0x00 | Message Type | 2 bytes (`01 01` = Binding Response) |
+| 0x02 | Message Length | 2 bytes (`00 24` = 36 bytes attributes) |
+| 0x04 | Transaction ID | 16 bytes (same as request) |
+| 0x14 | Attributes | 36 bytes |
+| **Total** | | **56 bytes** |
 
-**Payload total:** 56 bytes
+**Note:** 98 bytes is the Ethernet frame size (frame.len), not the UDP payload. The UDP payload is 56 bytes.
 
-### Exemplo Real
+### Real Example
 
-**Captura:** `radmin_vm.pcap`  
+**Capture:** `radmin_vm.pcap`  
 **Frame:** 5489  
-**Origem:** 135.181.75.11:17357  
-**Destino:** 192.168.122.77:54527  
+**Source:** 135.181.75.11:17357  
+**Destination:** 192.168.122.77:54527  
 **udp.length:** 64 (56 bytes payload)
 
-**Payload (primeiros 20 bytes visíveis):**
+**Payload (first 20 bytes):**
 ```
-01 01 00 24 [transaction ID] [atributos 36 bytes]
+01 01 00 24 [transaction ID] [36 bytes attributes]
 ```
+
+**Decoded attributes:**
+- Attribute 1: Type 0x0001 (MAPPED-ADDRESS), Length 8, IPv4, Port 54527, IP 187.59.199.39
+- Attribute 2: Type 0x0004 (SOURCE-ADDRESS), Length 8, IPv4, Port 0, IP 0.0.0.0
+- Attribute 3: Type 0x0005 (CHANGED-ADDRESS), Length 8, IPv4, Port 0, IP 0.0.0.0
 
 ---
 
-## Mensagem Teredo — Router Solicitation
+## Teredo Message — Router Solicitation
 
-### Estrutura
+### Structure
 
-UDP payload encapsulado em Teredo IPv6 tunneling:
-- Teredo header: cliente identifier, authentication, nonce
-- IPv6 packet interno: ICMPv6 Router Solicitation
+UDP payload encapsulated in Teredo IPv6 tunneling:
+- Teredo header: client identifier, authentication, nonce
+- Inner IPv6 packet: ICMPv6 Router Solicitation
 
-### Exemplo Real
+### Real Example
 
-**Captura:** `radmin_vm.pcap`  
+**Capture:** `radmin_vm.pcap`  
 **Frame:** 708  
-**Origem:** 192.168.122.77:54778  
-**Destino:** 20.201.205.4:3544  
+**Source:** 192.168.122.77:54778  
+**Destination:** 20.201.205.4:3544  
 **udp.length:** 69 (61 bytes payload)
 
-**Campos identificados:**
+**Identified fields:**
 - Nonce: `8a cf 00 87 dd ea 34 02`
 - ICMPv6 Type: 133 (Router Solicitation)
-- Origem IPv6: `fe80::ffff:ffff:fffe`
-- Destino IPv6: `ff02::2`
+- Source IPv6: `fe80::ffff:ffff:fffe`
+- Destination IPv6: `ff02::2`
 
 ---
 
-## Campos Não Semantizados (Sem Nomes Atribuídos)
+## Non-Semanticized Fields
 
-Conforme as regras da investigação, os seguintes campos não recebem interpretação semântica sem evidência:
+Per investigation rules, the following fields receive no semantic interpretation without evidence:
 
-| Campo | Offset (Família A) | Tamanho | Valores observados |
+| Field | Offset (Family A) | Size | Observed Values |
 |---|---|---|---|
-| Magic/tipo | 0x00 | 4 bytes | `25 2d ff 68`, `5d a8 6b 96`, `7b 69 98 01`, `1c 6e f3 f5` |
+| Magic/type | 0x00 | 4 bytes | `25 2d ff 68`, `5d a8 6b 96`, `7b 69 98 01`, `1c 6e f3 f5` |
 | Flags? | 0x04 | 4 bytes | `42 c3 84 70`, `00 0d 03 dd`, `00 c4 d1 77`, `00 31 7c 7f` |
-| Variável 1 | 0x14 | 8 bytes | Múltiplos valores diferentes |
-| Fixo 1 | 0x1c | 4 bytes | `0d 01 10 00` (constante na Família A) |
-| Fixo 2 | 0x20 | 4 bytes | `02 00 00 01` (constante na Família A) |
-| Criptografado | 0x2e | 48 bytes | Alta entropia, diferente entre mensagens |
-| Variável TLV | 0x66 | 8 bytes | `00 00 00 00 08 ea c9 0a` |
-| Variável TLV | 0x6e | 4 bytes | `00 00 01 94` |
-| Variável TLV | 0x72 | 6 bytes | `db 79 5b 4e 0b 2c` |
-| Não documentado | 0x78 | 17 bytes | Não capturado no relatório anterior |
+| Variable 1 | 0x14 | 8 bytes | Multiple different values |
+| Fixed 1 | 0x1c | 4 bytes | `0d 01 10 00` (constant in Family A) |
+| Fixed 2 | 0x20 | 4 bytes | `02 00 00 01` (constant in Family A) |
+| Encrypted | 0x2e | 48 bytes | High entropy, different between messages |
+| Unknown region | 0x5e | 12 bytes | `1d ba c6 ca 71 c4 dc a7 1d ba 4f cb` |
+| Unknown region | 0x6a | 6 bytes | `cc 9f 54 b0 57 4d` |
+| Unknown region | 0x70 | 8 bytes | `0e 08 59 c1 af 78 4e 00` |
+| Undocumented | 0x78 | 13 bytes | `00 00 00 08 ea c9 0a 00 00 01 94 db 79 5b` |
+| Undocumented | 0x85 | 3 bytes | `4e 0b 2c` |
 
----
-
-**Documento gerado:** `docs/PCAP_MESSAGE_CATALOG.md`  
-**Arquivos .pcapng originais:** Preservados, não modificados
+**Generated file:** `docs/PCAP_MESSAGE_CATALOG.md`  
+**Original .pcapng files:** Preserved, unmodified

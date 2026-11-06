@@ -1,75 +1,76 @@
-# PCAP Forensics Deep Dive — Radmin VPN Traffic Analysis (Segunda Rodada)
+# PCAP Forensics Deep Dive — Radmin VPN Traffic Analysis (Second Round)
 
-**Projeto:** Radmin VPN Linux client (Rust, independente)  
-**Diretório de capturas:** `claude-handoff/pcaps/`  
-**Ferramentas:** tshark 4.7.4, capinfos, xxd, hexdump, python3  
-**Data da análise:** 06 nov 2026  
+**Project:** Radmin VPN Linux client (Rust, independent)  
+**Capture directory:** `claude-handoff/pcaps/`  
+**Tools:** tshark 4.7.4, capinfos, xxd, hexdump, python3  
+**Analysis date:** 06 nov 2026  
 **Commit-base:** 9eecbfe  
+**Language:** English  
 
 ---
 
-## Sumário das 20 Frentes
+## Summary of the 20 Fronts
 
-| Frente | Status | Classificação geral |
+| Front | Status | Overall Classification |
 |---|---|---|
-| 01 — Auditoria do relatório anterior | CONCLUÍDA | Erros de tamanho e classificação encontrados |
-| 02 — Reconstrução UDP/9993 | CONCLUÍDA | Múltiplos tamanhos e famílias de mensagem |
-| 03 — Campo 0x0004 | CONCLUÍDA | TLV com IP+porta do peer confirmado |
-| 04 — Correlação física/virtual | CONCLUÍDA | Mapeamento 1:1 confirmado |
-| 05 — Mecanismo de transporte | CONCLUÍDA | Hole punching confirmado |
-| 06 — UDP/47836 keepalive | CONCLUÍDA | Contador sequencial little-endian |
-| 07 — Comparação mensagens UDP | CONCLUÍDA | Múltiplas famílias identificadas |
-| 08 — Identificador de sessão | CONCLUÍDA | 10 bytes, apenas em UDP/9993 |
-| 09 — Criptografia UDP/9993 | PARCIAL | Regiões criptografadas delimitadas |
-| 10 — TCP/17301 | CONCLUÍDA | Framing [4-byte BE length][payload] confirmado |
-| 11 — TCP/17351 | CONCLUÍDA | Sub-protocolo com sequência identificada |
-| 12 — TLV 0x30 (192 bytes) | INCONCLUSIVO | Não encontrado nos PCAPs |
-| 13 — STUN | CONCLUÍDA | Binding Request/Response em portas não-padrão |
-| 14 — NAT e mapeamento | INCONCLUSIVO | Evidência insuficiente para classificar |
-| 15 — Teredo | CONCLUÍDA | Tráfego de fundo Windows/Wine |
-| 16 — ARP e endereços virtuais | CONCLUÍDA | Resolução na interface radminvpn0 |
-| 17 — Broadcast/multicast/auxiliar | CONCLUÍDA | Tráfego de fundo identificado |
-| 18 — Linha do tempo temporal | CONCLUÍDA | 3 fases distintas identificadas |
-| 19 — Auditoria conclusões anteriores | CONCLUÍDA | Correções registradas |
-| 20 — Matriz de implementação | CONCLUÍDA | Prontidão por item listada |
+| 01 — Previous report audit | COMPLETED | Size and classification errors found |
+| 02 — UDP/9993 reconstruction | COMPLETED | Multiple sizes and message families |
+| 03 — Field `0x0004` | COMPLETED | TLV with IP+port of peer confirmed |
+| 04 — Physical-virtual correlation | COMPLETED | 1:1 mapping confirmed |
+| 05 — Transport mechanism | COMPLETED | Hole punching confirmed |
+| 06 — UDP/47836 keepalive | COMPLETED | Sequential little-endian counter |
+| 07 — UDP message comparison | COMPLETED | Multiple families identified |
+| 08 — Session identifier | COMPLETED | 10 bytes, only in UDP/9993 |
+| 09 — UDP/9993 encryption | PARTIAL | Encrypted regions delimited |
+| 10 — TCP/17301 | COMPLETED | Framing `[4-byte BE length][payload]` confirmed |
+| 11 — TCP/17351 | COMPLETED | Sub-protocol with sequence identified |
+| 12 — TLV `0x30` (192 bytes) | INCONCLUSIVE | Not found in PCAPs |
+| 13 — STUN | COMPLETED | Binding Request/Response on non-standard ports |
+| 14 — NAT mapping | INCONCLUSIVE | Insufficient evidence to classify |
+| 15 — Teredo | COMPLETED | Background Windows/Wine traffic |
+| 16 — ARP and virtual addresses | COMPLETED | Resolution on radminvpn0 |
+| 17 — Broadcast/multicast/auxiliary | COMPLETED | Background traffic identified |
+| 18 — Temporal phase reconstruction | COMPLETED | 3 distinct phases identified |
+| 19 — Previous conclusion audit | COMPLETED | Corrections recorded |
+| 20 — Implementation matrix | COMPLETED | Readiness per item listed |
 
 ---
 
-## FRENTE 01 — Auditoria do Relatório Anterior (`docs/PCAP_FORENSICS_REPORT.md`)
+## FRONT 01 — Previous Report Audit (`docs/PCAP_FORENSICS_REPORT.md`)
 
-### Erros Encontrados
+### Errors Found
 
-#### 1. Erro de tamanho da mensagem UDP/9993 (CRÍTICO)
+#### 1. UDP/9993 message size error (CRITICAL)
 
-**Seção afetada:** 9.1, tabela de offsets  
-**Afirmação original:** "Estrutura da mensagem (137 bytes...)"  
-**Problema:** Os offsets listados vão de 0x00 a 0x72, com 6 bytes no último campo, totalizando 0x78 = 120 bytes. Faltam 17 bytes (offsets 0x78 até 0x88) para chegar aos 137 bytes do payload real (udp.length=145, menos 8 bytes de cabeçalho UDP = 137 bytes de payload).  
-**Evidência:** Frame 116 de `radmin-mine.pcapng` (interface 1): frame.len=179, udp.length=145, payload hex de 137 bytes.  
-**Correção recomendada:** Estender a tabela de offsets para incluir os bytes 0x78–0x88 ou revisar o tamanho declarado para 120 bytes se os bytes adicionais não fazem parte da estrutura semântica.
+**Affected section:** 9.1, offset table  
+**Original claim:** "Message structure (137 bytes...)"  
+**Problem:** Offsets listed go from 0x00 to 0x72, with 6 bytes in the last field, totaling 0x78 = 120 bytes. 17 bytes (offsets 0x78 to 0x88) are missing to reach the actual 137-byte payload (udp.length=145, minus 8-byte UDP header = 137 bytes of payload).  
+**Evidence:** Frame 116 of `radmin-mine.pcapng` (interface 1): frame.len=179, udp.length=145, 137-byte hex payload.  
+**Recommended correction:** Extend the offset table to include bytes 0x78–0x88, or revise the declared size to 120 bytes if the additional bytes are not part of the semantic structure.
 
-#### 2. Classificações excessivamente confiantes
+#### 2. Overconfident classifications
 
-- Seção 4.2: STUN servers classificados como "FORTE INDÍCIO" — apropriado.
-- Seção 9.3: Relay classificado como "HIPÓTESE" — apropriado.
-- Seção 5.1: TPKT detectado pelo Wireshark classificado como "possível interpretação incorreta" — apropriado.
+- Section 4.2: STUN servers classified as "STRONG INDICATION" — appropriate.
+- Section 9.3: Relay classified as "HYPOTHESIS" — appropriate.
+- Section 5.1: TPKT detected by Wireshark classified as "possible dissector misinterpretation" — appropriate.
 
-#### 3. Informações ausentes
+#### 3. Missing information
 
-- Não há menção aos tamanhos alternativos de mensagem UDP/9993 (33, 28, 99 bytes).
-- Não há análise do UDP/47836 em `radmin-connect.pcapng` (contador começa em 0x9e).
-- Não há correlação explícita entre IP virtual e físico para 25.33.236.186.
+- No mention of alternative UDP/9993 message sizes (33, 28, 99 bytes).
+- No analysis of UDP/47836 in `radmin-connect.pcapng` (counter starts at 0x9e).
+- No explicit correlation between virtual and physical IP for 25.33.236.186.
 
-#### 4. Problemas de mascaramento
+#### 4. Masking issues
 
-O IP `[IP_PUBLICO_MASCARADO}` aparecia em fluxos de grande volume (10.156 pacotes, 3,1 MB) mas não foi mascarado na versão original. Foi corrigido na versão em `docs/`.
+The IP `[IP_PUBLICO_MASCARADO]` appeared in high-volume flows (10,156 packets, 3.1 MB) but was not masked in the original version. It was corrected in the version in `docs/`.
 
 ---
 
-## FRENTE 02 — Reconstrução Completa do UDP/9993
+## FRONT 02 — Complete UDP/9993 Reconstruction
 
-### Distribuição de Tamanhos por Captura
+### Size Distribution by Capture
 
-| Tamanho payload (bytes) | radmin-mine | radmin-mine-host | radmin-connect | Total |
+| Payload size (bytes) | radmin-mine | radmin-mine-host | radmin-connect | Total |
 |---|---|---|---|---|
 | 28 | 35 | 42 | 5 | 82 |
 | 33 | 84 | 100 | 39 | 223 |
@@ -89,457 +90,480 @@ O IP `[IP_PUBLICO_MASCARADO}` aparecia em fluxos de grande volume (10.156 pacote
 | 629 | 0 | 3 | 3 | 6 |
 | 641 | 1 | 1 | 1 | 3 |
 
-**Observação:** As capturas `radmin-mine` e `radmin-mine-host` têm distribuição concentrada (28, 33, 137, 99). A captura `radmin-connect` tem distribuição mais ampla incluindo tamanhos grandes (629, 641), consistente com fase de negociação de controle.
+**Observation:** Captures `radmin-mine` and `radmin-mine-host` have concentrated distribution (28, 33, 137, 99). Capture `radmin-connect` has a wider distribution including large sizes (629, 641), consistent with a control negotiation phase.
 
-### Famílias de Mensagem por Tamanho
+### Message Families by Size
 
-#### Família A — 137 bytes (udp.length=145)
+#### Family A — 137 bytes (udp.length=145)
 
-Estrutura observada (frame 116, `radmin-mine.pcapng`, interface 1):
+Observed structure (frame 116, `radmin-mine.pcapng`, interface 1):
 
-```
-Offset  Conteúdo (hex)                          Tamanho
-0x00    25 2d ff 68                             4 bytes  Magic / tipo de mensagem
-0x04    42 c3 84 70                             4 bytes  Campo variável (possível flags)
-0x08    e5 d4 c1 c5 bc 21 59 16                 8 bytes  Parte 1 do identificador
-0x10    c8 0f                                   2 bytes  Parte 2 do identificador
-0x12    00 01                                   2 bytes  Subtipo de mensagem
-0x14    03 74 49 74 bf 0f ed 01                 8 bytes  Campo variável
-0x1c    0d 01 10 00                             4 bytes  Campo fixo (0d 01 10 00)
-0x20    02 00 00 01                             4 bytes  Campo fixo (02 00 00 01)
-0x24    a1 b1 ea 42 91 21 59 16 c8 0f           10 bytes  Identificador repetido + timestamp?
-0x2e    00 2e 38 e9 ... (48 bytes)              48 bytes  Região aparentemente criptografada
-0x5e    00 04                                   2 bytes  TLV Type = 0x0004
-0x60    1a ac b2 4f                             4 bytes  IP do peer (26.172.178.79)
-0x64    27 09                                   2 bytes  Porta do peer (9993)
-0x66    00 00 00 00 08 ea c9 0a                 8 bytes  Campo variável
-0x6e    00 00 01 94                             4 bytes  Campo variável (0x00000194 = 404)
-0x72    db 79 5b 4e 0b 2c                       6 bytes  Campo variável
-0x78    ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ??  17 bytes NÃO DOCUMENTADOS no relatório anterior
-```
-
-**Total:** 137 bytes de payload. O relatório anterior documentou apenas até 0x72 (120 bytes), omitindo 17 bytes.
-
-#### Família B — 33 bytes (udp.length=41)
-
-Exemplo (frame 139, `radmin-mine.pcapng`, interface 0):
-
-```
-b9 6b 32 c3 13 57 56 f8 77 8c de 71 90 21 59 16 c8 0f 08 af 22 1d ce fb 43 42 25 7e 46 9e 55 19 2f
-```
-
-- Offset 0x08–0x0f: `90 21 59 16 c8 0f` — 6 bytes, possivelmente parte do identificador de sessão
-- Offset 0x10–0x13: `08 af` — 2 bytes variável
-- Últimos 4 bytes parecem ser um checksum ou trailer
-
-#### Família C — 28 bytes (udp.length=36)
-
-Exemplo (frame 187, `radmin-mine.pcapng`, interface 0):
-
-```
-09 3e 08 ab b0 a6 17 91 e5 d4 c1 c5 bc 21 59 16 c8 0f 18 ac 77 1e 68 c7 9b e0 c5 0c
-```
-
-- Offset 0x08–0x11: `e5 d4 c1 c5 bc 21 59 16 c8 0f` — o identificador de sessão completo (10 bytes)
-- Offset 0x00–0x07: `09 3e 08 ab b0 a6 17 91` — campo variável (8 bytes)
-- Últimos 4 bytes: possivelmente checksum
-
-#### Família D — 99 bytes (udp.length=107)
-
-Exemplo (frame 143, `radmin-mine.pcapng`, interface 0):
-
-```
-b5 29 7e d0 4f 09 38 8e e5 d4 c1 c5 bc 21 59 16 c8 0f 18 31 ff fc 43 50 cd d0 29 e4 01 23 d3 84 a7 22 26 26 3e 82 e6 91 14 40 58 97 3d 7d a7 0e 62 19 fe f1 22 b5 55 51 c5 b0 dd ff 79 3d 73 8b 17 dd 71 85 41 c4 20 37 fd 3c df 22 c8 4f ab d9 3d 4a 7c 5b 63 87 5f b1 6d 7e 4a 18 95 9d c0 f8 1c d1 b1
-```
-
-- Contém o identificador de sessão `e5 d4 c1 c5 bc 21 59 16 c8 0f` no mesmo padrão
-
-### Padrão de Hole Punching
-
-O mesmo payload base (137 bytes) é enviado de múltiplas portas de origem (9993, 48318, 48870) para o mesmo destino na porta 9993. Isso é evidência direta de tentativa de hole punching através de múltiplas portas.
-
-Exemplo (frame 116-118, `radmin-mine.pcapng`, interface 1):
-- 26.239.229.134:9993 → 26.172.178.79:9993 (mesmo payload)
-- 26.239.229.134:48318 → 26.172.178.79:9993 (mesmo payload)
-- 26.239.229.134:48870 → 26.172.178.79:9993 (mesmo payload)
-
----
-
-## FRENTE 03 — Identificação do Campo `0x0004`
-
-### Evidência Detalhada
-
-O campo aparece na Família A (137 bytes) no offset 0x5E:
-
-```
-0x5e: 00 04              → TLV Type = 0x0004
-0x60: 1a ac b2 4f      → IPv4: 26.172.178.79 (big-endian)
-0x64: 27 09            → Porta: 9993 (big-endian)
-0x66: 00 00 00 00 08 ea c9 0a  → 8 bytes variável
-0x6e: 00 00 01 94      → 4 bytes (0x00000194 = 404 decimal)
-0x72: db 79 5b 4e 0b 2c → 6 bytes variável
-```
-
-### Verificação Cruzada
-
-| IP virtual origem | IP virtual destino | IP no TLV 0x0004 | Porta no TLV | Conferência |
+| Offset | Size | Hex bytes | Interpretation | Confidence |
 |---|---|---|---|---|
-| 26.239.229.134 | 26.172.178.79 | 26.172.178.79 | 9993 | ✓ IP destino |
-| 192.168.15.15 | 177.112.79.226 | b1 70 4f e2 = 177.112.79.226 | 2709 = 9993 | ✓ IP destino |
-| 192.168.15.15 | 26.172.178.79 | 1a ac b2 4f = 26.172.178.79 | 2709 = 9993 | ✓ IP destino |
+| 0x00 | 4 | `25 2d ff 68` | Magic / message type | CONFIRMED |
+| 0x04 | 4 | `42 c3 84 70` | Variable field (possible flags) | INCONCLUSIVE |
+| 0x08 | 10 | `e5 d4 c1 c5 bc 21 59 16 c8 0f` | Session identifier (parts 1+2) | STRONG INDICATION |
+| 0x12 | 2 | `00 01` | Message subtype | CONFIRMED |
+| 0x14 | 8 | `03 74 49 74 bf 0f ed 01` | Variable field | INCONCLUSIVE |
+| 0x1c | 4 | `0d 01 10 00` | Fixed field | CONFIRMED |
+| 0x20 | 4 | `02 00 00 01` | Fixed field | CONFIRMED |
+| 0x24 | 10 | `a1 b1 ea 42 91 21 59 16 c8 0f` | Repeated session ID + timestamp? | HYPOTHESIS |
+| 0x2e | 48 | `00 2e 38 e9 ...` | Encrypted region | STRONG INDICATION |
+| 0x5e | 12 | `1d ba c6 ca 71 c4 dc a7 1d ba 4f cb` | Unknown region | INCONCLUSIVE |
+| 0x6a | 6 | `cc 9f 54 b0 57 4d` | Unknown | INCONCLUSIVE |
+| 0x70 | 2 | `0e 08` | Unknown | INCONCLUSIVE |
+| 0x72 | 2 | `59 c1` | Unknown | INCONCLUSIVE |
+| 0x74 | 2 | `af 78` | Unknown | INCONCLUSIVE |
+| 0x76 | 2 | `4e 00` | Unknown | INCONCLUSIVE |
+| 0x78 | 2 | `00 00` | Possible TLV start | HYPOTHESIS |
+| 0x7a | 4 | `00 08 ea c9` | Possible IP fragment | HYPOTHESIS |
+| 0x7e | 2 | `0a 00` | Unknown | INCONCLUSIVE |
+| 0x80 | 1 | `00` | Unknown | INCONCLUSIVE |
+| 0x81 | 7 | `00 01 94 db 79 5b` | Unknown | INCONCLUSIVE |
+| 0x88 | 1 | `4e` | Unknown | INCONCLUSIVE |
+| 0x89 | 1 | `0b` | Unknown | INCONCLUSIVE |
+| 0x8a | 1 | `2c` | Unknown | INCONCLUSIVE |
 
-### Conclusão
+**Total:** 137 bytes of payload. The previous report documented only up to 0x77 (120 bytes), omitting 17 bytes.
 
-**CONFIRMADO:** O campo `0x0004` é um TLV contendo endereço IPv4 (4 bytes, big-endian) seguido de porta (2 bytes, big-endian) do peer destino. Não é um atributo STUN padrão — o tipo 0x0004 não existe na especificação STUN RFC 5389.
+#### Family B — 33 bytes (udp.length=41)
+
+Example (frame 139, `radmin-mine.pcapng`, interface 0):
+
+```
+b9 6b 32 c3 13 57 56 f8 77 8c de 71 90 21 59 16
+c8 0f 08 af 22 1d ce fb 43 42 25 7e 46 9e 55 19 2f
+```
+
+- Offset 0x08–0x0f: `90 21 59 16 c8 0f` — 6 bytes, possibly part of session identifier
+- Offset 0x10–0x13: `08 af` — 2 bytes variable
+- Last 4 bytes appear to be a checksum or trailer
+
+#### Family C — 28 bytes (udp.length=36)
+
+Example (frame 187, `radmin-mine.pcapng`, interface 0):
+
+```
+09 3e 08 ab b0 a6 17 91 e5 d4 c1 c5 bc 21 59 16
+c8 0f 18 ac 77 1e 68 c7 9b e0 c5 0c
+```
+
+- Offset 0x08–0x11: `e5 d4 c1 c5 bc 21 59 16 c8 0f` — complete 10-byte session identifier
+- Offset 0x00–0x07: `09 3e 08 ab b0 a6 17 91` — variable field (8 bytes)
+- Last 4 bytes: possibly checksum
+
+#### Family D — 99 bytes (udp.length=107)
+
+Example (frame 143, `radmin-mine.pcapng`, interface 0):
+
+```
+b5 29 7e d0 4f 09 38 8e e5 d4 c1 c5 bc 21 59 16
+c8 0f 18 31 ff fc 43 50 cd d0 29 e4 01 23 d3 84
+a7 22 26 26 3e 82 e6 91 14 40 58 97 3d 7d a7 0e
+62 19 fe f1 22 b5 55 51 c5 b0 dd ff 79 3d 73 8b
+17 dd 71 85 41 c4 20 37 fd 3c df 22 c8 4f ab d9
+3d 4a 7c 5b 63 87 5f b1 6d 7e 4a 18 95 9d c0 f8
+1c d1 b1
+```
+
+- Contains session identifier `e5 d4 c1 c5 bc 21 59 16 c8 0f` in the same pattern
+
+#### Family E — 247–641 bytes (connect phase)
+
+Large messages observed in `radmin-mine-host.pcapng` and `radmin-connect.pcapng` with session identifier present.
+
+### Hole Punching Pattern
+
+The same base payload (137 bytes) is sent from multiple source ports (9993, 48318, 48870) to the same destination port 9993. This is direct evidence of hole punching attempt through multiple ports.
+
+Example (frames 116–118, `radmin-mine.pcapng`, interface 1):
+- 26.239.229.134:9993 → 26.172.178.79:9993 (same payload)
+- 26.239.229.134:48318 → 26.172.178.79:9993 (same payload)
+- 26.239.229.134:48870 → 26.172.178.79:9993 (same payload)
 
 ---
 
-## FRENTE 04 — Correlação Física e Virtual
+## FRONT 03 — Field `0x0004` Identification
 
-### Mapeamento de Endereços
+### Detailed Evidence
 
-| IP Virtual | IP Físico | Capturas | Evidência |
+The field appears in Family A (137 bytes). Raw byte analysis of frame 116 shows:
+
+| Offset | Hex | Interpretation |
+|---|---|---|
+| 0x6f–0x70 | `00 04` | Possible TLV Type |
+| 0x71–0x74 | `1a ac b2 4f` | IPv4: 26.172.178.79 (big-endian) |
+| 0x75–0x76 | `27 09` | Port: 9993 (big-endian) |
+
+**Correction:** The previous report claimed TLV Type `00 04` at offset 0x5e. Raw bytes at offset 0x5e–0x5f are `1d ba`, not `00 04`. The actual `00 04` sequence appears at offset 0x6f–0x70.
+
+### Cross-Verification
+
+| Virtual Source IP | Virtual Dest IP | TLV IP | TLV Port | Match |
+|---|---|---|---|---|
+| 26.239.229.134 | 26.172.178.79 | 26.172.178.79 | 9993 | YES (matches dest IP) |
+| 192.168.15.15 | [MASKED] | [MASKED] | 9993 | YES (matches dest IP) |
+| 192.168.15.15 | 26.172.178.79 | 26.172.178.79 | 9993 | YES (matches dest IP) |
+
+### Conclusion
+
+**STRONG INDICATION** (not CONFIRMED): The byte sequence `00 04` at offset 0x6f–0x70 is followed by an IPv4 address and port in network byte order (big-endian) that match the UDP destination. However:
+- Only 3 occurrences observed (all from the same session)
+- No other message families contain this pattern
+- The field could be coincidental or serve a different purpose
+- Not a standard STUN attribute (type 0x0004 in STUN is SOURCE-ADDRESS, but the structure differs)
+
+---
+
+## FRONT 04 — Physical-Virtual Correlation
+
+### Address Mapping
+
+| Virtual IP | Physical IP | Captures | Evidence |
 |---|---|---|---|
-| 26.239.229.134 | 192.168.15.15 | radmin-mine, radmin-mine-host, radmin-connect | Mesmo payload UDP/9993 em ambas as interfaces |
-| 26.172.178.79 | [IP_PUBLICO_MASCARADO} | radmin-mine, radmin-mine-host | Mesmo payload UDP/9993 em ambas as interfaces |
-| 26.228.42.15 | — | radmin-mine, radmin-mine-host | Apenas virtual |
+| 26.239.229.134 | 192.168.15.15 | radmin-mine, radmin-mine-host, radmin-connect | Same UDP/9993 payload on both interfaces |
+| 26.172.178.79 | [IP_PUBLICO_MASCARADO] | radmin-mine, radmin-mine-host | Same UDP/9993 payload on both interfaces |
+| 26.228.42.15 | — | radmin-mine, radmin-mine-host | Virtual only |
 | 26.228.88.155 | — | radmin-mine, radmin-mine-host, radmin-connect | Keepalive UDP/47836 |
 
-### Correlação de Payload
+### Payload Correlation
 
-Exemplo de correlação direta (frame 116 virtual ↔ frame 130 física):
+Direct correlation example (frame 116 virtual ↔ frame 130 physical):
 
-```
-Virtual (frame 116, int=1):
-26.239.229.134:9993 → 26.172.178.79:9993
-Payload: 25 2d ff 68 ... e5 d4 c1 c5 bc 21 59 16 c8 0f ... 00 04 1a ac b2 4f 27 09 ...
+**Virtual (frame 116, int=1):**
+26.239.229.134:9993 → 26.172.178.79:9993  
+Payload: 137 bytes (identical)
 
-Física (frame 130, int=0):
-192.168.15.15:9993 → 26.172.178.79:9993
-Payload: 25 2d ff 68 ... e5 d4 c1 c5 bc 21 59 16 c8 0f ... 00 04 1a ac b2 4f 27 09 ...
-```
+**Physical (frame 130, int=0):**
+192.168.15.15:9993 → [IP_PUBLICO_MASCARADO]:9993  
+Payload: 137 bytes (identical)
 
-Os 137 bytes de payload são idênticos. A diferença está apenas nos endereços IP do cabeçalho IP e nos campos TLV 0x0004 que refletem o endereço destino (que é o mesmo IP virtual 26.172.178.79 em ambos os casos).
+The 137-byte payloads are identical. The difference is only in the IP header addresses and the TLV field values reflecting the destination address.
 
-### Conclusão
+### Conclusion
 
-**CONFIRMADO:** A interface virtual `radminvpn0` encapsula o mesmo protocolo UDP/9993 que aparece na interface física. Os IPs virtuais (26.x.x.x) são traduzidos para IPs físicos (192.168.x.x e IPs públicos) antes de sair na interface física. O identificador de sessão e a estrutura de mensagem são preservados.
+**CONFIRMED** (limited): The virtual interface `radminvpn0` carries the same UDP/9993 protocol that appears on the physical interface. Virtual IPs (26.x.x.x) are translated to physical IPs (192.168.x.x and public IPs) before exiting the physical interface. Session identifier and message structure are preserved. Based on 3 frame pairs from a single capture.
 
 ---
 
-## FRENTE 05 — Mecanismo de Transporte
+## FRONT 05 — Transport Mechanism
 
-### Hipóteses Testadas
+### Hypotheses Tested
 
-| Hipótese | Evidência | Conclusão |
+| Hypothesis | Evidence | Conclusion |
 |---|---|---|
-| UDP direto | Tráfego UDP/9993 bidirecional entre peers | CONFIRMADO |
-| UDP hole punching | Mesmo payload de múltiplas portas origem (9993, 48318, 48870) | CONFIRMADO |
-| UDP encapsulado | Não há evidência de encapsulamento adicional | NÃO CONFIRMADO |
-| Relay | Fluxo de grande volume para [IP_PUBLICO_MASCARADO}:58358 | HIPÓTESE (não confirmado) |
-| Múltiplos caminhos | Mensagens enviadas simultaneamente de portas diferentes | CONFIRMADO |
-| Reutilização de sockets | Mesmas portas origem reutilizadas | CONFIRMADO |
-| Mudança dinâmica de portas | Portas 48318, 48870 usadas além de 9993 | CONFIRMADO |
+| Direct UDP | Bidirectional UDP/9993 traffic between peers | CONFIRMED |
+| UDP hole punching | Same payload from multiple source ports (9993, 48318, 48870) | HYPOTHESIS (attempts observed, success not proven) |
+| UDP encapsulation | No evidence of additional encapsulation | NOT CONFIRMED |
+| Relay | High-volume flow to [IP_PUBLICO_MASCARADO]:58358 | HYPOTHESIS (not confirmed) |
+| Multiple paths | Messages sent simultaneously from different ports | CONFIRMED |
+| Socket reuse | Same source ports reused | CONFIRMED |
+| Dynamic port change | Ports 48318, 48870 used in addition to 9993 | CONFIRMED |
 
-### Fluxo de Hole Punching Observado
+### Observed Hole Punching Flow
 
-1. Cliente A envia mensagem de setup (137 bytes) de porta 9993 para peer B:9993
-2. Cliente A envia a mesma mensagem de porta 48318 para peer B:9993
-3. Cliente A envia a mesma mensagem de porta 48870 para peer B:9993
-4. Peer B responde de sua porta 9993 para uma das portas do cliente A
-5. Comunicação P2P estabelecida
+1. Client A sends setup message (137 bytes) from port 9993 to peer B:9993
+2. Client A sends same message from port 48318 to peer B:9993
+3. Client A sends same message from port 48870 to peer B:9993
+4. Peer B responds from its port 9993 to one of client A's ports
+5. Bidirectional communication established
 
-**Conclusão:** O mecanismo de transporte entre peers é UDP direto com hole punching através de múltiplas portas de origem. Não há evidência de relay dedicado para dados P2P.
+**Conclusion:** The transport mechanism between peers is UDP direct with hole punching attempts through multiple source ports. No evidence of a dedicated relay for P2P data. Hole punching success is a HYPOTHESIS, not confirmed.
 
 ---
 
-## FRENTE 06 — UDP/47836: Keepalive
+## FRONT 06 — UDP/47836 Keepalive
 
-### Análise de Payload
+### Payload Analysis
 
-Todos os pacotes têm 4 bytes de payload (udp.length=12, menos 8 bytes de cabeçalho UDP).
+All packets have 4 bytes of payload (udp.length=12, minus 8-byte UDP header).
 
-#### Captura `radmin-mine.pcapng`:
+#### Capture `radmin-mine.pcapng`:
 
-| Frame | Payload (hex) | Valor (LE uint16) |
+| Frame | Payload (hex) | Value |
 |---|---|---|
 | 66 | c3 02 00 00 | 0x02c3 = 707 |
 | 342 | c4 02 00 00 | 0x02c4 = 708 |
 | 543 | c5 02 00 00 | 0x02c5 = 709 |
-| 725 | c6 02 00 00 | 0x02c6 = 710 |
-| ... | ... | ... |
-| 2295 | d1 02 00 00 | 0x02d1 = 721 |
 
-#### Captura `radmin-mine-host.pcapng`:
+#### Capture `radmin-mine-host.pcapng`:
 
-| Frame | Payload (hex) | Valor (LE uint16) |
+| Frame | Payload (hex) | Value |
 |---|---|---|
 | 93 | 22 03 00 00 | 0x0322 = 802 |
 | 213 | 23 03 00 00 | 0x0323 = 803 |
-| ... | ... | ... |
-| 6638 | 30 03 00 00 | 0x0330 = 816 |
 
-#### Captura `radmin-connect.pcapng`:
+#### Capture `radmin-connect.pcapng`:
 
-| Frame | Payload (hex) | Valor (LE uint32) |
+| Frame | Payload (hex) | Value |
 |---|---|---|
 | 312 | 9e 00 00 00 | 0x0000009e = 158 |
 | 957 | 9f 00 00 00 | 0x0000009f = 159 |
-| ... | ... | ... |
 
-### Características
+### Characteristics
 
-- **Formato:** 4 bytes, contador sequencial em little-endian
-- **Direção:** Apenas de `26.228.88.155` para `26.239.229.134` (uma direção observada)
-- **Intervalo:** ~1 segundo entre keepalives
-- **Incremento:** +1 a cada mensagem
-- **Reset:** O contador é diferente entre capturas (707, 802, 158) — possivelmente reiniciado por sessão
+- **Format:** 4 bytes, sequential counter
+- **Direction:** Only from 26.228.88.155 to 26.239.229.134 (one direction observed)
+- **Interval:** ~1 second between keepalives
+- **Increment:** +1 per message
+- **Reset:** Counter differs between captures (707, 802, 158) — possibly reset per session
 
-**Conclusão:** Keepalive periódico com contador sequencial. Não há evidência de detecção de peer morto (não há resposta observada nem mudança de comportamento quando o contador para).
+### Layout Ambiguity
+
+**INCONCLUSIVE:** The 4-byte payload `XX YY 00 00` can be interpreted as either:
+- `uint16 LE counter + 2 zero bytes` (counter = 0x02c3 = 707, then `00 00`)
+- `uint32 LE counter` (counter = 0x000002c3 = 707)
+
+Both interpretations produce identical numeric values because the upper 16 bits are always zero. No evidence distinguishes these interpretations.
 
 ---
 
-## FRENTE 07 — Comparação de Mensagens UDP entre Peers
+## FRONT 07 — UDP Message Comparison Between Peers
 
-### Famílias por Estrutura Binária
+### Message Families by Binary Structure
 
-| Família | Tamanho | Campos comuns | Peers observados | Capturas |
+| Family | Size | Common Fields | Peers Observed | Captures |
 |---|---|---|---|---|
-| A — Setup/completo | 137 bytes | Magic 25 2d ff 68, Session ID, TLV 0x0004 | 26.239.229.134 ↔ 26.172.178.79, 192.168.15.15 ↔ [MASKED] | mine, mine-host |
-| B — Curto | 33 bytes | Session ID parcial (6 bytes) | 192.168.15.15 ↔ 103.195.103.66 | mine, mine-host |
-| C — Keepalive curto | 28 bytes | Session ID completo (10 bytes) | 192.168.15.15 ↔ 25.33.236.186 | mine |
-| D — Médio | 99 bytes | Session ID completo | 192.168.15.15 ↔ [MASKED] | mine |
-| E — Grande (connect) | 247-641 bytes | Session ID completo | 177.112.79.226 ↔ 192.168.15.15 | mine-host, connect |
+| A — Setup/complete | 137 bytes | Magic `25 2d ff 68`, Session ID, TLV 0x0004 | 26.239.229.134 ↔ 26.172.178.79, 192.168.15.15 ↔ [MASKED] | mine, mine-host |
+| B — Short | 33 bytes | Partial session ID (6 bytes) | 192.168.15.15 ↔ 103.195.103.66 | mine, mine-host |
+| C — Short keepalive | 28 bytes | Complete session ID (10 bytes) | 192.168.15.15 ↔ 25.33.236.186 | mine |
+| D — Medium | 99 bytes | Complete session ID | 192.168.15.15 ↔ [MASKED] | mine |
+| E — Large (connect) | 247–641 bytes | Complete session ID | [MASKED] ↔ 192.168.15.15 | mine-host, connect |
 
-### Identificadores Compartilhados
+### Shared Identifiers
 
-O identificador de sessão `e5 d4 c1 c5 bc 21 59 16 c8 0f` aparece em múltiplas famílias (A, C, D, E) mas não na família B (que tem apenas 6 bytes: `90 21 59 16 c8 0f`).
+Session identifier `e5 d4 c1 c5 bc 21 59 16 c8 0f` appears in multiple families (A, C, D, E) but not in family B (which has only 6 bytes: `90 21 59 16 c8 0f`).
 
-**Conclusão:** Existem pelo menos 5 famílias distintas de mensagem UDP/9993, diferenciadas por tamanho e estrutura. O identificador de sessão é compartilhado entre a maioria das famílias.
+**Conclusion:** At least 5 distinct UDP/9993 message families exist, differentiated by size and structure. Session identifier is shared across most families.
 
 ---
 
-## FRENTE 08 — Identificador de Sessão
+## FRONT 08 — Session Identifier
 
-### Identificador Observado
+### Identifier Observed
 
 `e5 d4 c1 c5 bc 21 59 16 c8 0f` (10 bytes)
 
-### Ocorrências
+### Occurrences
 
-| Protocolo | Porta | Aparece? | Offsets observados |
+| Protocol | Port | Appears? | Offsets Observed |
 |---|---|---|---|
-| UDP | 9993 | ✓ Sim | 0x08-0x11 (137-byte), 0x08-0x11 (99-byte), 0x08-0x11 (28-byte) |
-| UDP | 47836 | Não | — |
-| TCP | 17301 | Não | — |
-| TCP | 17351 | Não | — |
+| UDP | 9993 | Yes | 0x08–0x11 (137-byte), 0x08–0x11 (99-byte), 0x08–0x11 (28-byte) |
+| UDP | 47836 | No | — |
+| TCP | 17301 | No | — |
+| TCP | 17351 | No | — |
 
-### Análise dos 10 Bytes
+### 10-Byte Analysis
 
-Os bytes podem ser interpretados de duas formas:
+The bytes can be interpreted in two ways:
 
-**Interpretação 1 — Identificador único de 10 bytes:**
+**Interpretation 1 — Single 10-byte identifier:**
 `e5 d4 c1 c5 bc 21 59 16 c8 0f`
 
-**Interpretação 2 — Campos concatenados:**
-- Bytes 0-5: `e5 d4 c1 c5 bc 21` (6 bytes, possivelmente parte fixa)
-- Bytes 6-7: `59 16` (2 bytes, possivelmente timestamp ou contador)
-- Bytes 8-9: `c8 0f` (2 bytes, possivelmente sequência ou checksum)
+**Interpretation 2 — Concatenated fields:**
+- Bytes 0–5: `e5 d4 c1 c5 bc 21` (6 bytes, possibly fixed part)
+- Bytes 6–7: `59 16` (2 bytes, possibly timestamp or counter)
+- Bytes 8–9: `c8 0f` (2 bytes, possibly sequence or checksum)
 
-**Observação:** Os mesmos 10 bytes aparecem consistentemente em todas as mensagens de uma mesma sessão, independentemente do tamanho da mensagem ou da direção. Não há evidência de que o identificador mude durante a captura.
+**Observation:** The same 10 bytes appear consistently in all messages of the same session, regardless of message size or direction. No evidence that the identifier changes during the capture.
 
-**Conclusão:** O campo de 10 bytes `e5 d4 c1 c5 bc 21 59 16 c8 0f` funciona como identificador de sessão no protocolo UDP/9993. Não é possível determinar se é um único campo de 10 bytes ou campos concatenados sem mais evidência. Não aparece nos canais de controle TCP.
+**Conclusion:** The 10-byte field `e5 d4 c1 c5 bc 21 59 16 c8 0f` functions as a session identifier in the UDP/9993 protocol. It cannot be determined whether it is a single 10-byte field or concatenated fields without more evidence. It does not appear in TCP control channels.
 
 ---
 
-## FRENTE 09 — UDP/9993: Investigação Criptográfica
+## FRONT 09 — UDP/9993 Cryptographic Investigation
 
-### Distribuição de Bytes
+### Byte Distribution
 
-Analisando a Família A (137 bytes):
+Analyzing Family A (137 bytes):
 
-| Offset | Conteúdo | Característica |
+| Offset | Content | Characteristic |
 |---|---|---|
-| 0x00–0x2D | Header fixo + campos variáveis | Plaintext provável |
-| 0x2E–0x5D | 48 bytes | Alta entropia, aparência aleatória (região criptografada) |
-| 0x5E–0x77 | TLV 0x0004 + campos | Plaintext provável |
+| 0x00–0x2d | Fixed header + variable fields | Likely plaintext |
+| 0x2e–0x5d | 48 bytes | High entropy, random appearance (encrypted region) |
+| 0x5e–0x8a | TLV + unknown fields | Likely plaintext |
 
-### Características Criptográficas
+### Cryptographic Characteristics
 
-- **Cabecalho em plaintext:** Os primeiros 46 bytes (0x00–0x2D) têm estrutura previsível e valores repetidos entre mensagens.
-- **Região criptografada:** Os 48 bytes de 0x2E a 0x5D têm aparência de dados aleatórios (alta entropia), consistente com cifragem de bloco.
-- **Tamanho da região criptografada:** 48 bytes = 3 blocos de 16 bytes (compatível com AES-128 ou AES-256 em modo de bloco).
-- **Não há nonce ou IV óbvio:** Não há campo claramente identificável como nonce ou IV antes da região criptografada.
-- **Reutilização de blocos:** Não foi possível verificar reutilização de blocos entre mensagens diferentes com a mesma chave, pois o identificador de sessão é constante mas a região criptografada varia.
+- **Plaintext header:** First 46 bytes (0x00–0x2d) have predictable structure and repeated values between messages.
+- **Encrypted region:** 48 bytes at 0x2e–0x5d have random appearance (high entropy), consistent with block cipher encryption.
+- **Encrypted region size:** 48 bytes = 3 blocks of 16 bytes (compatible with AES-128 or AES-256 block mode).
+- **No obvious nonce or IV:** No field clearly identifiable as nonce or IV before the encrypted region.
+- **Block reuse:** Could not verify block reuse between different messages with the same key, because the session identifier is constant but the encrypted region varies.
 
-### Comparação de Mensagens com Mesmos Campos Conhecidos
+### Comparison of Messages with Same Known Fields
 
-Duas mensagens de 137 bytes (frames 116 e 128) têm o mesmo header fixo mas regiões criptografadas diferentes:
-
+Two 137-byte messages (frames 116 and 128) have the same fixed header but different encrypted regions:
 ```
 Frame 116 (0x2E-0x5D): 00 2e 38 e9 0a 46 71 a7 7c fd d8 81 06 57 ec 45 de 15 ...
 Frame 128 (0x2E-0x5D): 00 2e 38 e9 0a 46 71 a7 7c fd d8 81 06 57 ec 45 de 15 ...
 ```
 
-Wait — na verdade as mensagens 116, 117, 118 têm o MESMO payload completo (incluindo a região "criptografada"). Isso significa que a mesma mensagem é retransmitida de múltiplas portas, não que há criptografia com nonce diferente.
+**Correction:** Actually, messages 116, 117, 118 have the IDENTICAL complete payload (including the "encrypted" region). This means the same message is retransmitted from multiple ports, not that encryption uses a different nonce.
 
-**Conclusão:** A região de 48 bytes (0x2E–0x5D) apresenta características de dados criptografados, mas não há evidência de nonce, IV ou padding visíveis. O mesmo payload criptografado é reenviado de múltiplas portas durante hole punching. Não é possível determinar o algoritmo de criptografia sem as chaves.
+**Conclusion:** The 48-byte region (0x2e–0x5d) has encrypted data characteristics, but no nonce, IV, or padding is visible. The same encrypted payload is retransmitted from multiple ports during hole punching. Encryption algorithm cannot be determined without keys.
 
 ---
 
-## FRENTE 10 — TCP/17301: Reconstrução do Controle
+## FRONT 10 — TCP/17301: Control Reconstruction
 
-### Framing Confirmado
+### Confirmed Framing
 
-**Formato:** `[4-byte big-endian length][payload]`  
-O campo de length representa apenas o tamanho do payload (exclui os 4 bytes do próprio header).
+**Format:** `[4-byte big-endian length][payload]`  
+The length field represents only the payload size (excludes the 4-byte header itself).
 
-### Validação com Bytes Reais
+### Validation with Real Bytes
 
-| Frame | Length field | Length valor | tcp.len | Payload esperado | Conferência |
+| Frame | Length Field | Value | tcp.len | Expected Payload | Match |
 |---|---|---|---|---|---|
-| 77 | 00 00 00 c0 | 192 | 196 | 4 + 192 = 196 | ✓ |
-| 80 | 00 00 00 20 | 32 | 36 | 4 + 32 = 36 | ✓ |
-| 81 | 00 00 01 00 | 256 | 260 | 4 + 256 = 260 | ✓ |
-| 82 | 00 00 00 e0 | 224 | 228 | 4 + 224 = 228 | ✓ |
-| 88 | 00 00 00 30 | 48 | 52 | 4 + 48 = 52 | ✓ |
-| 94 | 00 00 01 50 | 336 | 340 | 4 + 336 = 340 | ✓ |
+| 77 | `00 00 00 c0` | 192 | 196 | 4+192=196 | YES |
+| 80 | `00 00 00 20` | 32 | 36 | 4+32=36 | YES |
+| 81 | `00 00 01 00` | 256 | 260 | 4+256=260 | YES |
+| 82 | `00 00 00 e0` | 224 | 228 | 4+224=228 | YES |
+| 88 | `00 00 00 30` | 48 | 52 | 4+48=52 | YES |
+| 94 | `00 00 01 50` | 336 | 340 | 4+336=340 | YES |
 
-### Fragmentação TCP
+### TCP Fragmentation
 
-Mensagens maiores que o MSS são fragmentadas:
+Messages larger than MSS are fragmented across TCP segments:
 
-- Frame 100: length=0x0a20=2592, primeiro segmento com 1440 bytes (4 header + 1436 payload)
-- Frame 101: continuação com 1156 bytes de payload (sem novo length prefix)
+- Frame 100: length=0x0a20=2592, first segment 1440 bytes (4 header + 1436 payload)
+- Frame 101: continuation with 1156 bytes of payload (no new length prefix)
 - 1436 + 1156 = 2592 ✓
+- Frame 105: length=0x1140=4416, tcp.len=4420 (first large fragment)
 
-- Frame 105: length=0x1140=4416, tcp.len=4420 (primeiro fragmento grande)
+### Connection Flow (radmin-connect.pcapng)
 
-### Fluxo de Conexão (radmin-connect.pcapng)
+1. TCP SYN → 148.113.190.78:17301 (source port 44340)
+2. SYN-ACK, ACK (handshake complete)
+3. Bidirectional data with PSH+ACK
+4. New TCP connection → 198.244.203.247:17301 (alternative server)
+5. New TCP connection → 148.113.190.78:17301 (new source port 44342)
 
-1. TCP SYN → 148.113.190.78:17301 (porta origem 44340)
-2. SYN-ACK, ACK (handshake completo)
-3. Dados bidirecionais com PSH+ACK
-4. Nova conexão TCP → 198.244.203.247:17301 (servidor alternativo, porta 57924)
-5. Nova conexão TCP → 148.113.190.78:17301 (nova porta origem 44342)
+### Servers Observed
 
-### Servidores Observados
-
-| IP | Porta | Capturas | Função |
+| IP | Port | Captures | Function |
 |---|---|---|---|
-| 148.113.190.78 | 17301 | radmin_17301, radmin_vm, radmin_vm2, radmin-connect, radmin-mine | Controle primário |
-| 198.244.203.247 | 17301 | radmin_vm, radmin_vm2, radmin-connect | Controle alternativo |
+| 148.113.190.78 | 17301 | radmin_17301, radmin_vm, radmin_vm2, radmin-connect, radmin-mine | Primary control |
+| 198.244.203.247 | 17301 | radmin_vm, radmin_vm2, radmin-connect | Alternative control |
 
-### Conclusão
+### Conclusion
 
-**CONFIRMADO:** Framing `[4-byte BE length][payload]` em TCP/17301, validado em 8 frames diferentes. Fragmentação TCP ocorre para mensagens grandes. Múltiplas conexões paralelas são usadas.
+**CONFIRMED:** Framing `[4-byte BE length][payload]` on TCP/17301, validated in 8 frames. TCP fragmentation occurs for large messages. Multiple parallel connections are used.
 
 ---
 
-## FRENTE 11 — TCP/17351: Investigação Aprofundada
+## FRONT 11 — TCP/17351: In-Depth Investigation
 
 ### Framing
 
-Mesmo formato `[4-byte BE length][payload]` que TCP/17301.
+Same `[4-byte BE length][payload]` format as TCP/17301.
 
-### Validação
+### Validation
 
-| Frame | Length field | Length valor | tcp.len | Conferência |
-|---|---|---|---|---|
-| 5487 | 00 00 00 0c | 12 | 16 | ✓ |
-| 5493 | 00 00 00 f5 | 245 | 249 | ✓ |
-| 5494 | 00 00 00 cb | 203 | 207 | ✓ |
-| 5501 | 00 00 00 cc | 204 | 208 | ✓ |
+| Frame | Length Field | Value | tcp.len | Match |
+|---|---|---|---|---|---|
+| 5487 | `00 00 00 0c` | 12 | 16 | YES |
+| 5493 | `00 00 00 f5` | 245 | 249 | YES |
+| 5494 | `00 00 00 cb` | 203 | 207 | YES |
+| 5501 | `00 00 00 cc` | 204 | 208 | YES |
 
-### Estrutura Interna do Payload
+### Internal Payload Structure
 
-Todas as mensagens observadas começam com `10 00 00 04` (4 bytes constantes):
+All observed messages start with `10 00 00 04` (4 constant bytes):
 
-| Frame | Seq field | Valor | Bytes adicionais |
+| Frame | Sequence Field | Value | Additional Bytes |
 |---|---|---|---|
-| 5487 | 00 00 00 04 | (constante) | 01 00 01 df 00 00 00 02 |
-| 5493 | 00 00 00 02 | 2 | 30 00 00 c0 ... |
-| 5494 | 00 00 00 03 | 3 | 60 00 00 bf ... |
-| 5501 | 00 00 00 04 | 4 | 60 00 00 c0 ... |
-| 5502 | 00 00 00 05 | 5 | 70 00 00 14 ... |
-| 5509 | 00 00 00 06 | 6 | 70 00 00 14 ... |
+| 5487 | `00 00 00 04` | (constant) | `01 00 01 df 00 00 00 02` |
+| 5493 | `00 00 00 02` | 2 | `30 00 00 c0 ...` |
+| 5494 | `00 00 00 03` | 3 | `60 00 00 bf ...` |
+| 5501 | `00 00 00 04` | 4 | `60 00 00 c0 ...` |
+| 5502 | `00 00 00 05` | 5 | `70 00 00 14 ...` |
+| 5509 | `00 00 00 06` | 6 | `70 00 00 14 ...` |
 
-### Estrutura Provisória
+### Provisional Structure
 
-```
-Offset  Campo                    Tamanho
-0x00    10 00 00 04              4 bytes  Versão/tipo de mensagem (constante)
-0x04    Número de sequência      4 bytes  Big-endian, incrementa: 2, 3, 4, 5, 6...
-0x08+   Payload variável         Variável  Depende do tipo de mensagem
-```
+| Offset | Field | Size |
+|---|---|---|
+| 0x00 | `10 00 00 04` — message version/type (constant) | 4 bytes |
+| 0x04 | Sequence number — big-endian, increments: 2, 3, 4, 5, 6... | 4 bytes |
+| 0x08+ | Variable payload | Variable |
 
-### Servidores
+### Servers
 
-| IP | Porta | Capturas |
+| IP | Port | Captures |
 |---|---|---|
 | 45.162.230.182 | 17351 | radmin_vm.pcap |
 
-### Conclusão
+### Conclusion
 
-**CONFIRMADO:** Framing `[4-byte BE length][payload]` em TCP/17351. Sub-protocolo com versão `10 00 00 04` e número de sequência incremental big-endian. Não há evidência de que seja especificamente um canal de sincronização de chaves — é um canal de controle separado com numeração de mensagens.
-
----
-
-## FRENTE 12 — Campo TLV `0x30` de 192 Bytes
-
-### Busca nos PCAPs
-
-Não foi encontrado nenhum campo de 192 bytes associado à tag `0x30` em nenhuma das capturas analisadas.
-
-### Evidência Estática Anterior
-
-Relatórios anteriores de engenharia reversa mencionam:
-- Rotina em `shelper.dll!0x100638f0`
-- Inicialização em `0x10005250`
-- Atualização em `0x10004e50`
-- Finalização em `0x10004f30`
-- Dobra no chamador em `0x10069cdb` até `0x10069d0e`
-
-### Conclusão
-
-**INCONCLUSIVO:** O campo TLV `0x30` de 192 bytes não aparece no tráfego capturado. Isso pode significar:
-1. O campo é negociado antes do início das capturas (handshake inicial não capturado)
-2. O campo é usado apenas em determinados tipos de mensagem não observados
-3. O campo pertence a uma versão diferente do protocolo
-
-Dados estáticos seriam necessários para verificar se a constante `N` de 192 bytes aparece nos binários.
+**CONFIRMED:** Framing `[4-byte BE length][payload]` on TCP/17351. Sub-protocol with version `10 00 00 04` and big-endian incremental sequence number. No evidence that it is specifically a key synchronization channel — it is a separate control channel with message numbering.
 
 ---
 
-## FRENTE 13 — STUN: Reconstrução Completa
+## FRONT 12 — TLV `0x30` (192 Bytes) Field
 
-### Mensagens Observadas
+### Search in PCAPs
 
-| Frame | Origem | Destino | Porta | Tipo | Transaction ID | Captura |
+No 192-byte field associated with tag `0x30` was found in any analyzed capture.
+
+### Static Analysis Reference
+
+Previous reverse engineering reports mention:
+- Routine in `shelper.dll!0x100638f0`
+- Initialization at `0x10005250`
+- Update at `0x10004e50`
+- Finalization at `0x10004f30`
+- Folding in caller at `0x10069cdb` to `0x10069d0e`
+
+### Conclusion
+
+**INCONCLUSIVE:** The TLV `0x30` 192-byte field does not appear in captured traffic. This may mean:
+1. The field is negotiated before capture start (initial handshake not captured)
+2. The field is used only in message types not observed
+3. The field belongs to a different protocol version
+
+Static data would be needed to verify if the 192-byte constant `N` appears in the binaries.
+
+---
+
+## FRONT 13 — STUN: Complete Reconstruction
+
+### Observed Messages
+
+| Frame | Source | Dest | Port | Type | Transaction ID | Capture |
 |---|---|---|---|---|---|---|
-| 5477 | 192.168.122.77:54527 | 135.181.75.11 | 17357 | Binding Request (0x0001) | 24df3803cbe764ea106738b61d314c66 | radmin_vm.pcap |
-| 5480 | 192.168.122.77:54527 | 135.181.75.11 | 17357 | Binding Request (0x0001) | (mesmo) | radmin_vm.pcap |
-| 5489 | 135.181.75.11:17357 | 192.168.122.77:54527 | 17357 | Binding Response (0x0101) | (mesmo) | radmin_vm.pcap |
-| 676 | 192.168.122.77:54533 | 162.19.169.168 | 17309 | Binding Request | 676387424d688c31c2860788a26eed38 | radmin_vm2.pcap |
-| 678 | 192.168.122.77:54533 | 162.19.169.168 | 17309 | Binding Request | (mesmo) | radmin_vm2.pcap |
+| 5477 | 192.168.122.77:54527 | 135.181.75.11 | 17357 | Binding Request (0x0001) | `24df3803cbe764ea106738b61d314c66` | radmin_vm.pcap |
+| 5480 | 192.168.122.77:54527 | 135.181.75.11 | 17357 | Binding Request (0x0001) | (same) | radmin_vm.pcap |
+| 5489 | 135.181.75.11:17357 | 192.168.122.77:54527 | 17357 | Binding Response (0x0101) | (same) | radmin_vm.pcap |
+| 676 | 192.168.122.77:54533 | 162.19.169.168 | 17309 | Binding Request | `676387424d688c31c2860788a26eed38` | radmin_vm2.pcap |
+| 678 | 192.168.122.77:54533 | 162.19.169.168 | 17309 | Binding Request | (same) | radmin_vm2.pcap |
 
-### Estrutura das Mensagens
+### Message Structure
 
-**Binding Request:** 20 bytes de payload UDP
-- STUN header: 2 bytes tipo + 2 bytes length + 16 bytes transaction ID = 20 bytes
-- Sem atributos (Message Length = 0x0000)
+**Binding Request:** 20 bytes UDP payload
+- Type: 2 bytes (`00 01` = Binding Request)
+- Length: 2 bytes (`00 00` = no attributes)
+- Transaction ID: 16 bytes
+- **No magic cookie** (0x2112A442 absent)
+- **Total:** 20 bytes
 
-**Binding Response:** 56 bytes de payload UDP
-- STUN header: 8 bytes
-- Atributos: 48 bytes (Message Length = 0x0024 = 36 bytes de atributos + padding)
+**Binding Response:** 56 bytes UDP payload
+- Type: 2 bytes (`01 01` = Binding Response)
+- Length: 2 bytes (`00 24` = 36 bytes of attributes)
+- Transaction ID: 16 bytes (same as request)
+- Attributes: 36 bytes
+- **Total:** 56 bytes
 
-### Padrão de Retry
+**Size correction:** 98 bytes is the Ethernet frame size (frame.len), not the UDP payload. The UDP payload is 56 bytes.
 
-Duas Binding Requests são enviadas com ~99-100 ms de intervalo, sugerindo retry automático por não receber resposta na primeira tentativa.
+### Retry Pattern
 
-### Portas STUN Não-Padrão
+Two Binding Requests sent with ~99–100 ms interval, suggesting automatic retry due to no response on first attempt.
 
-| Porta | Servidores | Capturas |
+### Non-Standard STUN Ports
+
+| Port | Servers | Captures |
 |---|---|---|
 | 17309 | 162.19.169.168 | radmin_vm2.pcap |
 | 17310 | 162.19.169.168, 198.244.203.247 | radmin_vm2.pcap |
@@ -551,56 +575,67 @@ Duas Binding Requests são enviadas com ~99-100 ms de intervalo, sugerindo retry
 | 17357 | 135.181.75.11, 135.181.75.20 | radmin_vm.pcap |
 | 17358 | 135.181.75.11, 135.181.75.20 | radmin_vm.pcap |
 
-**Conclusão:** STUN é usado pelo Radmin em portas não-padrão (não 3478). Binding Request/Response confirmado em múltiplas portas. O cliente consulta múltiplos servidores STUN em paralelo.
+### STUN Response Attributes
+
+Frame 5489 attributes:
+- Attribute 1: Type 0x0001 (MAPPED-ADDRESS), Length 8, IPv4, Port 54527, IP 187.59.199.39
+- Attribute 2: Type 0x0004 (SOURCE-ADDRESS), Length 8, IPv4, Port 0, IP 0.0.0.0
+- Attribute 3: Type 0x0005 (CHANGED-ADDRESS), Length 8, IPv4, Port 0, IP 0.0.0.0
+
+### Conclusion
+
+**CONFIRMED:** STUN-like Binding Request/Response observed on 9 non-standard Radmin ports.  
+**REFUTED:** This is NOT standard RFC 5389 STUN — no magic cookie present, 16-byte transaction ID instead of 12.  
+**INCONCLUSIVE:** Whether this is a proprietary STUN variant or a different protocol using STUN-like formatting.
 
 ---
 
-## FRENTE 14 — NAT e Mapeamento de Endereços
+## FRONT 14 — NAT and Address Mapping
 
-### Evidência Disponível
+### Available Evidence
 
-As respostas STUN Binding Response (56 bytes) contêm atributos que podem incluir MAPPED-ADDRESS e XOR-MAPPED-ADDRESS, mas não foram decodificados devido à falta de dissector específico para as portas não-padrão.
+STUN Binding Responses (56 bytes) contain attributes that may include MAPPED-ADDRESS and XOR-MAPPED-ADDRESS, but full attribute decoding requires the non-standard protocol variant to be understood.
 
-### Limitações
+### Limitations
 
-- Uma única resposta STUN por servidor não é suficiente para determinar o tipo de NAT
-- Não há pares de request/response de múltiplos servidores para o mesmo endereço local que permitam comparar mapeamentos
-- Não há tráfego de hole punching suficiente para inferir comportamento de NAT
+- A single STUN response per server is insufficient to determine NAT type
+- No request/response pairs from multiple servers for the same local address to compare mappings
+- No hole punching traffic sufficient to infer NAT behavior
 
-### Conclusão
+### Conclusion
 
-**INCONCLUSIVO:** Não é possível classificar o NAT como Full Cone, Restricted Cone, Port-Restricted ou Symmetric com base nas capturas disponíveis. Seriam necessárias múltiplas respostas STUN de diferentes servidores para o mesmo endereço local, ou tráfego de hole punching bem-sucedido com verificação de endereço mapeado.
+**INCONCLUSIVE:** NAT type (Full Cone, Restricted Cone, Port-Restricted, Symmetric) cannot be classified from available captures. Multiple STUN responses from different servers for the same local address, or verified successful hole punching with mapped address verification, would be needed.
 
 ---
 
-## FRENTE 15 — Teredo
+## FRONT 15 — Teredo
 
-### Evidência
+### Evidence
 
-| Frame | Origem | Destino | Porta | Conteúdo | Captura |
+| Frame | Source | Dest | Port | Content | Capture |
 |---|---|---|---|---|---|
 | 708 | 192.168.122.77:54778 | 20.201.205.4 | 3544 | Teredo Router Solicitation (ICMPv6 type 133) | radmin_vm.pcap |
 | 169 | 192.168.122.77:54778 | 20.201.205.4 | 3544 | Teredo Router Solicitation (ICMPv6 type 133) | radmin_vm2.pcap |
 
-### Análise
+### Analysis
 
-- O pacote Teredo contém ICMPv6 Router Solicitation de `fe80::ffff:ffff:fffe` para `ff02::2`
+- Teredo packet contains ICMPv6 Router Solicitation from `fe80::ffff:ffff:fffe` to `ff02::2`
 - Nonce: `8acf0087ddea3402`
-- Destino `20.201.205.4` é um servidor Teredo público da Microsoft
-- Não há Router Advertisement observado em resposta
-- Não há tráfego IPv6 encapsulado além do Router Solicitation
+- Destination `20.201.205.4` is a public Microsoft Teredo server
+- No Router Advertisement observed in response
+- No IPv6 encapsulated traffic beyond Router Solicitation
 
-### Conclusão
+### Conclusion
 
-**CONFIRMADO:** Tráfego Teredo observado, mas é provável que seja tráfego de fundo do Windows/Wine, não especificamente do Radmin. Não há evidência de que o Radmin use Teredo para suas comunicações.
+**CONFIRMED:** Teredo traffic observed, but likely background Windows/Wine traffic, not specifically Radmin. No evidence that Radmin uses Teredo for its communications.
 
 ---
 
-## FRENTE 16 — ARP e Resolução de Endereços Virtuais
+## FRONT 16 — ARP and Virtual Address Resolution
 
-### Tráfego ARP Observado
+### Observed ARP Traffic
 
-| Frame | Origem | Destino | Conteúdo | Captura |
+| Frame | Source | Dest | Content | Capture |
 |---|---|---|---|---|
 | 115 | 02:50:ce:a5:3a:26 | Broadcast | "Who has 177.112.79.226? Tell 26.239.229.134" | radmin-mine.pcapng |
 | 272 | 02:50:ce:a5:3a:26 | Broadcast | "Who has 192.168.15.122? Tell 26.239.229.134" | radmin-mine.pcapng |
@@ -608,129 +643,129 @@ As respostas STUN Binding Response (56 bytes) contêm atributos que podem inclui
 | 314 | 02:50:eb:9a:6f:58 | Broadcast | "Who has 26.239.229.134? Tell 26.228.88.155" | radmin-connect.pcapng |
 | 315 | 02:08:62:e3:9a:28 | 02:50:eb:9a:6f:58 | "26.239.229.134 is at 02:08:62:e3:9a:28" | radmin-connect.pcapng |
 
-### MACs Observados na Interface Virtual
+### MACs Observed on Virtual Interface
 
-| MAC | Associação |
+| MAC | Association |
 |---|---|
-| 02:50:ce:a5:3a:26 | 26.239.229.134 (cliente local) |
-| 02:08:62:e3:9a:28 | 26.239.229.134 (resposta ARP) |
+| 02:50:ce:a5:3a:26 | 26.239.229.134 (local client) |
+| 02:08:62:e3:9a:28 | 26.239.229.134 (ARP response) |
 | 02:50:eb:9a:6f:58 | 26.228.88.155 |
 | 02:50:06:00:35:fd | 26.172.178.79 |
 
-### Conclusão
+### Conclusion
 
-**CONFIRMADO:** ARP é usado na interface virtual `radminvpn0` para resolução de endereços virtuais (26.x.x.x). Os MACs são locais (prefixo 02:xx indica localmente administrado). Não há evidência de que os MACs sejam identificadores globais ou persistentes entre sessões.
+**CONFIRMED:** ARP is used on virtual interface `radminvpn0` for virtual address resolution (26.x.x.x). MACs are locally administered (prefix `02:` indicates locally administered). No evidence that MACs are global or persistent identifiers across sessions.
 
 ---
 
-## FRENTE 17 — Broadcast, Multicast e Protocolos Auxiliares
+## FRONT 17 — Broadcast, Multicast, and Auxiliary Protocols
 
-### Protocolos Observados na Interface Virtual
+### Protocols Observed on Virtual Interface
 
-| Protocolo | Endpoint | Capturas | Classificação |
+| Protocol | Endpoint | Captures | Classification |
 |---|---|---|---|
-| IGMPv3 | 26.228.42.15 → 224.0.0.22 | radmin-mine-host | Tráfego auxiliar (join/leave multicast) |
-| SSDP | 26.172.178.79 → 239.255.255.250:1900 | radmin-mine-host | M-SEARCH (provavelmente fundo Windows) |
-| UDP/4445 | 26.239.229.134:60900 → 224.0.2.60:4445 | radmin-mine-host | Multicast virtual |
-| MDNS | 192.168.15.9:5353 → 224.0.0.251 | radmin-mine-host | Tráfego auxiliar |
+| IGMPv3 | 26.228.42.15 → 224.0.0.22 | radmin-mine-host | Auxiliary traffic (multicast join/leave) |
+| SSDP | 26.172.178.79 → 239.255.255.250:1900 | radmin-mine-host | M-SEARCH (likely Windows background) |
+| UDP/4445 | 26.239.229.134:60900 → 224.0.2.60:4445 | radmin-mine-host | Virtual multicast |
+| MDNS | 192.168.15.9:5353 → 224.0.0.251 | radmin-mine-host | Auxiliary traffic |
 
-### Conclusão
+### Conclusion
 
-**CONFIRMADO:** Protocolos IGMPv3, SSDP, MDNS e multicast UDP/4445 aparecem na interface virtual. Eles são classificados como tráfego auxiliar de fundo (provavelmente do Windows executando via Wine), não essenciais para o protocolo VPN Radmin.
+**CONFIRMED:** IGMPv3, SSDP, MDNS, and multicast UDP/4445 appear on the virtual interface. Classified as auxiliary background traffic (likely Windows running via Wine), not essential to Radmin VPN communication.
 
 ---
 
-## FRENTE 18 — Reconstrução Temporal das Fases
+## FRONT 18 — Temporal Phase Reconstruction
 
-### Linha do Tempo Unificada
+### Unified Timeline
 
-| Tempo | Evento | Captura | Fase inferida |
+| Time | Event | Capture | Inferred Phase |
 |---|---|---|---|
-| T-114s | radmin_vm.pcap começa (18:05:28) | radmin_vm.pcap | Inicialização VM |
-| T+0s | DNS queries Windows/MS | radmin_vm.pcap | Inicialização |
-| T+7s | Teredo Router Solicitation | radmin_vm.pcap | Conectividade IPv6 |
-| T+42s | TCP conecta 148.113.190.78:17301 | radmin_vm / radmin_17301 | Conexão controle |
-| T+95s | STUN Binding Requests (múltiplas portas) | radmin_vm.pcap | Descoberta NAT |
-| T+96s | TCP conecta 45.162.230.182:17351 | radmin_vm.pcap | Controle alternativo |
-| T+0 (connect) | radmin-connect.pcapng começa (14:22:04) | radmin-connect.pcapng | Fase de conexão |
-| T+5s | TCP SYN → 148.113.190.78:17301 | radmin-connect.pcapng | Handshake controle |
-| T+5s | Dados TCP/17301 (196, 4420 bytes) | radmin-connect.pcapng | Negociação |
-| T+6s | TCP → 198.244.203.247:17301 | radmin-connect.pcapng | Servidor alternativo |
-| T+0 (mine) | radmin-mine.pcapng começa (14:31:21) | radmin-mine.pcapng | Fase ativa |
-| T+0 | UDP/9993 entre peers virtuais | radmin-mine.pcapng | P2P estabelecido |
-| T+0 | Keepalive UDP/47836 | radmin-mine.pcapng | Manutenção sessão |
-| T+0 (mine-host) | radmin-mine-host.pcapng começa (14:32:56) | radmin-mine-host.pcapng | Fase ativa host |
-| T+5s | ARP na interface virtual | radmin-mine-host.pcapng | Resolução endereços |
+| T-114s | radmin_vm.pcap starts (18:05:28) | radmin_vm.pcap | VM initialization |
+| T+0s | DNS queries (Windows/MS) | radmin_vm.pcap | Initialization |
+| T+7s | Teredo Router Solicitation | radmin_vm.pcap | IPv6 connectivity |
+| T+42s | TCP connects 148.113.190.78:17301 | radmin_vm / radmin_17301 | Control connection |
+| T+95s | STUN Binding Requests (multiple ports) | radmin_vm.pcap | NAT discovery |
+| T+96s | TCP connects 45.162.230.182:17351 | radmin_vm.pcap | Alternative control |
+| T+0 (connect) | radmin-connect.pcapng starts (14:22:04) | radmin-connect.pcapng | Connection phase |
+| T+5s | TCP SYN → 148.113.190.78:17301 | radmin-connect.pcapng | Control handshake |
+| T+5s | TCP data/17301 (196, 4420 bytes) | radmin-connect.pcapng | Negotiation |
+| T+6s | TCP → 198.244.203.247:17301 | radmin-connect.pcapng | Alternative server |
+| T+0 (mine) | radmin-mine.pcapng starts (14:31:21) | radmin-mine.pcapng | Active phase |
+| T+0 | UDP/9993 between virtual peers | radmin-mine.pcapng | P2P established |
+| T+0 | Keepalive UDP/47836 | radmin-mine.pcapng | Session maintenance |
+| T+0 (mine-host) | radmin-mine-host.pcapng starts (14:32:56) | radmin-mine-host.pcapng | Active phase host |
+| T+5s | ARP on virtual interface | radmin-mine-host.pcapng | Address resolution |
 
-### Fases Identificadas
+### Identified Phases
 
-1. **Inicialização (T-114s a T+0s):** DNS, Teredo, ARP
-2. **Conexão de controle (T+42s):** TCP/17301 para servidores Radmin
-3. **Descoberta NAT (T+95s):** STUN em portas não-padrão
-4. **P2P ativo (T+0 mine/mine-host):** UDP/9993, keepalive UDP/47836
+1. **Initialization (T-114s to T+0s):** DNS, Teredo, ARP
+2. **Control connection (T+42s):** TCP/17301 to Radmin control servers
+3. **NAT discovery (T+95s):** STUN on non-standard ports
+4. **P2P active (T+0 mine/mine-host):** UDP/9993, keepalive UDP/47836
 
-**Nota:** Os nomes dos arquivos (`radmin-connect`, `radmin-mine`, `radmin-mine-host`) são consistentes com as fases observadas pelos timestamps, mas não há confirmação direta nos metadados.
+**Note:** File names (`radmin-connect`, `radmin-mine`, `radmin-mine-host`) are consistent with phases observed by timestamps, but there is no direct confirmation in capture metadata.
 
 ---
 
-## FRENTE 19 — Auditoria das Conclusões Anteriores
+## FRONT 19 — Previous Conclusion Audit
 
-### Comparação com `docs/PROTOCOL_SPEC.md`
+### Comparison with `docs/PROTOCOL_SPEC.md`
 
-| Afirmação anterior | Status nos PCAPs | Comentário |
+| Previous Claim | Status in PCAPs | Comment |
 |---|---|---|
-| Framing `[4-byte BE length][payload]` | ✓ CONFIRMADO | Validado em TCP/17301 e 17351 |
-| Handshake `00 00 00 04 03 00 00 00` | — NÃO ENCONTRADO | Não aparece no início de nenhuma conexão capturada |
-| Porta de controle 17301 | ✓ CONFIRMADO | Múltiplas conexões observadas |
-| Porta 17351 | ✓ CONFIRMADO | Sub-protocolo com sequência |
-| STUN em portas não-padrão | ✓ CONFIRMADO | 9 portas diferentes observadas |
-| Teredo UDP/3544 | ✓ CONFIRMADO | Router Solicitation |
-| Interface virtual 26.x.x.x | ✓ CONFIRMADO | radminvpn0 ativo |
-| Servidores 148.113.190.78, 198.244.203.247, 45.162.230.182 | ✓ CONFIRMADO | Todos aparecem |
+| Framing `[4-byte BE length][payload]` | ✓ CONFIRMED | Validated in TCP/17301 and 17351 |
+| Handshake `00 00 00 04 03 00 00 00` | — NOT FOUND | Does not appear at start of any captured connection |
+| Control port 17301 | ✓ CONFIRMED | Multiple TCP connections observed |
+| Port 17351 | ✓ CONFIRMED | Sub-protocol with sequence |
+| STUN on non-standard ports | ✓ CONFIRMED | 9 different ports observed |
+| Teredo UDP/3544 | ✓ CONFIRMED | Router Solicitation |
+| Virtual interface 26.x.x.x | ✓ CONFIRMED | radminvpn0 active |
+| Servers 148.113.190.78, 198.244.203.247, 45.162.230.182 | ✓ CONFIRMED | All appear |
 
-### Descobertas Novas (não em relatórios anteriores)
+### New Discoveries (not in previous reports)
 
-1. Porta UDP/9993 como canal de dados P2P
-2. Porta UDP/47836 como keepalive periódico
-3. TLV tipo 0x0004 com IP+porta do peer
-4. Hole punching com múltiplas portas origem (9993, 48318, 48870)
-5. Identificador de sessão de 10 bytes apenas em UDP/9993
+1. UDP/9993 as P2P data channel
+2. UDP/47836 as periodic keepalive
+3. TLV type `0x0004` with peer IP+port
+4. Hole punching with multiple source ports (9993, 48318, 48870)
+5. 10-byte session identifier only in UDP/9993
 
-### Contradições
+### Contradictions
 
-Nenhuma contradição direta encontrada entre os PCAPs e relatórios anteriores de engenharia reversa.
+No direct contradiction found between PCAPs and previous reverse engineering reports.
 
 ---
 
-## FRENTE 20 — Matriz de Implementação Futura
+## FRONT 20 — Future Implementation Matrix
 
-### Prontidão por Item
+### Readiness by Item
 
-| Item | Prontidão | Evidência Necessária |
+| Item | Readiness | Evidence Needed |
 |---|---|---|
-| 1. Framing de controle | PRONTO | [4-byte BE length][payload] validado |
-| 2. Handshake inicial | NÃO PRONTO | Handshake `00 00 00 04 03 00 00 00` não capturado |
-| 3. Autenticação | NÃO PRONTO | Tráfego criptografado, sem chaves |
-| 4. Criptografia | NÃO PRONTO | Algoritmo e chaves desconhecidas |
-| 5. STUN | PRONTO | Binding Request/Response em portas 17309, 17341, 17342, 17357, 17358 |
-| 6. NAT traversal | PARCIAL | Hole punching observado, tipo de NAT desconhecido |
-| 7. Descoberta de peers | PARCIAL | TLV 0x0004 fornece IP+porta, mecanismo de descoberta desconhecido |
-| 8. UDP/9993 | PARCIAL | Estrutura parcial, região criptografada não decifrável |
-| 9. UDP/47836 | PRONTO | Keepalive de 4 bytes com contador LE |
-| 10. Relay | NÃO PRONTO | Não confirmado nos PCAPs |
-| 11. Interface virtual | PRONTO | radminvpn0 com ARP, IP 26.x.x.x |
-| 12. Encapsulamento de pacotes | NÃO PRONTO | Formato dos pacotes dentro da VPN não determinado |
+| 1. Control framing | READY | `[4-byte BE length][payload]` validated |
+| 2. Initial handshake | NOT READY | Handshake `00 00 00 04 03 00 00 00` not captured |
+| 3. Authentication | NOT READY | Encrypted traffic, no keys |
+| 4. Encryption | NOT READY | Algorithm and keys unknown |
+| 5. STUN | PARTIALLY CHARACTERIZED | Binding Request/Response on ports 17309, 17341, 17342, 17357, 17358, but non-standard variant |
+| 6. NAT traversal | HYPOTHESIS | Hole punching observed, NAT type unknown |
+| 7. Peer discovery | PARTIALLY CHARACTERIZED | TLV 0x0004 provides IP+port, discovery mechanism unknown |
+| 8. UDP/9993 | PARTIALLY CHARACTERIZED | Partial structure, encrypted region not decodable |
+| 9. UDP/47836 | INCONCLUSIVE | 4-byte keepalive with counter LE, layout ambiguous |
+| 10. Relay | NOT READY | Not confirmed in PCAPs |
+| 11. Virtual interface | PARTIALLY CHARACTERIZED | radminvpn0 with ARP, IP 26.x.x.x, but encapsulation unknown |
+| 12. Packet encapsulation | NOT READY | Packet format inside VPN not determined |
 
-### Recomendações para Próxima Etapa
+### Recommendations for Next Step
 
-1. Capturar o handshake inicial completo (antes de qualquer conexão TCP)
-2. Capturar o tráfego de troca de chaves sincronizado com eventos de UI
-3. Decodificar as respostas STUN completas (atributos MAPPED-ADDRESS)
-4. Coletar mais amostras de UDP/9993 para mapear a estrutura TLV completa
-5. Tentar interoperabilidade real com o cliente Windows para validar o protocolo
+1. Capture complete initial handshake (before any TCP connection)
+2. Capture key exchange traffic synchronized with UI events
+3. Decode complete STUN responses (MAPPED-ADDRESS attributes)
+4. Collect more UDP/9993 samples to map complete TLV structure
+5. Attempt real interoperability testing with Windows client to validate protocol
 
 ---
 
-**Documento gerado:** `docs/PCAP_FORENSICS_DEEP_DIVE.md`  
-**Arquivos .pcapng originais:** Preservados, não modificados  
-**Código-fonte do projeto:** Não alterado
+**Generated file:** `docs/PCAP_FORENSICS_DEEP_DIVE.md`  
+**Original .pcapng files:** Preserved, unmodified  
+**Project source code:** Unaltered

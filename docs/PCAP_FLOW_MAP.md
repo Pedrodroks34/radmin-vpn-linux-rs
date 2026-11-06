@@ -1,75 +1,76 @@
 # PCAP Flow Map — Radmin VPN Traffic Analysis
 
-**Projeto:** Radmin VPN Linux client (Rust, independente)  
-**Diretório de capturas:** `claude-handoff/pcaps/`  
-**Data da análise:** 06 nov 2026  
+**Project:** Radmin VPN Linux client (Rust, independent)  
+**Capture directory:** `claude-handoff/pcaps/`  
+**Analysis date:** 06 nov 2026  
+**Language:** English  
 
 ---
 
-## Visão Geral do Fluxo de Comunicação
+## Communication Flow Overview
 
-O diagrama abaixo mostra os caminhos de comunicação identificados nas capturas, diferenciando caminhos confirmados (CONFIRMADO) e hipotéticos (HIPÓTESE).
+The diagram below shows communication paths identified in the captures, differentiating confirmed paths (CONFIRMED) from hypothetical paths (HYPOTHESIS).
 
 ```mermaid
 graph TB
-    subgraph Cliente["Cliente Radmin (radminvpn0)"]
-        C1[IP Virtual: 26.239.229.134/8]
-        C2[IP Físico: 192.168.15.15]
+    subgraph Client["Radmin Client (radminvpn0)"]
+        C1[Virtual IP: 26.239.229.134/8]
+        C2[Physical IP: 192.168.15.15]
         C3[Interface: enp7s0]
         C4[Interface: radminvpn0]
     end
 
-    subgraph Controle["Servidores de Controle Radmin"]
+    subgraph Controle["Radmin Control Servers"]
         S1[148.113.190.78:17301]
         S2[198.244.203.247:17301]
         S3[45.162.230.182:17301/17351]
     end
 
-    subgraph STUN["Servidores STUN (portas não-padrão)"]
+    subgraph STUN["STUN Servers (non-standard ports)"]
         ST1[135.181.75.11:17357/17358]
         ST2[148.113.190.78:17341/17342]
         ST3[162.19.169.168:17309/17310]
         ST4[15.204.183.160:17342]
     end
 
-    subgraph Peer["Peer Remoto"]
-        P1[IP Virtual: 26.172.178.79]
-        P2[IP Físico: [IP_PUBLICO_MASCARADO}]
-        P3[IP Virtual: 26.228.42.15]
-        P4[IP Físico: 103.195.103.66]
-        P5[IP Virtual: 26.228.88.155]
+    subgraph Peer["Remote Peer"]
+        P1[Virtual IP: 26.172.178.79]
+        P2[Physical IP: [IP_PUBLICO_MASCARADO]]
+        P3[Virtual IP: 26.228.42.15]
+        P4[Physical IP: 103.195.103.66]
+        P5[Virtual IP: 26.228.88.155]
     end
 
-    subgraph Teredo["Servidor Teredo"]
+    subgraph Teredo["Teredo Server"]
         T1[20.201.205.4:3544]
     end
 
-    %% Fluxos de controle
-    C2 -.->|TCP SYN → 17301<br/>CONFIRMADO| S1
-    C2 -.->|TCP SYN → 17301<br/>CONFIRMADO| S2
-    C2 -.->|TCP → 17351<br/>CONFIRMADO| S3
+    %% Control flows
+    C2 -.->|TCP SYN → 17301<br/>CONFIRMED| S1
+    C2 -.->|TCP SYN → 17301<br/>CONFIRMED| S2
+    C2 -.->|TCP → 17351<br/>CONFIRMED| S3
 
-    %% Fluxos STUN
-    C2 -.->|UDP Binding Request<br/>CONFIRMADO| ST1
-    C2 -.->|UDP Binding Request<br/>CONFIRMADO| ST2
-    C2 -.->|UDP Binding Request<br/>CONFIRMADO| ST3
-    C2 -.->|UDP Binding Request<br/>CONFIRMADO| ST4
+    %% STUN flows
+    C2 -.->|UDP Binding Request<br/>CONFIRMED| ST1
+    C2 -.->|UDP Binding Request<br/>CONFIRMED| ST2
+    C2 -.->|UDP Binding Request<br/>CONFIRMED| ST3
+    C2 -.->|UDP Binding Request<br/>CONFIRMED| ST4
 
-    %% Fluxos Teredo
-    C2 -.->|UDP Router Solicitation<br/>CONFIRMADO| T1
+    %% Teredo flows
+    C2 -.->|UDP Router Solicitation<br/>CONFIRMED| T1
 
-    %% Fluxos P2P
-    C1 -.->|UDP/9993 Setup<br/>CONFIRMADO| P1
-    C2 -.->|UDP/9993 Setup<br/>CONFIRMADO| P2
-    C1 -.->|UDP/47836 Keepalive<br/>CONFIRMADO| P5
+    %% P2P flows
+    C1 -.->|UDP/9993 Setup<br/>CONFIRMED| P1
+    C2 -.->|UDP/9993 Setup<br/>CONFIRMED| P2
+    C1 -.->|UDP/47836 Keepalive<br/>CONFIRMED| P5
 
-    %% Encapsulamento físico↔virtual
-    C1 ==>|Mesmo payload, IP virtual<br/>CONFIRMADO| C2
-    P1 ==>|Mesmo payload, IP físico<br/>CONFIRMADO| P2
+    %% Physical↔Virtual encapsulation
+    C1 ==>|Same payload, virtual IP<br/>CONFIRMED (limited)| C2
+    P1 ==>|Same payload, physical IP<br/>CONFIRMED (limited)| P2
 
-    %% Hipóteses
-    P2 -.->|UDP/9993 Relay?<br/>HIPÓTESE| P4
-    S3 -.->|Relay?<br/>HIPÓTESE| P1
+    %% Hypotheses
+    P2 -.->|UDP/9993 Relay?<br/>HYPOTHESIS| P4
+    S3 -.->|Relay?<br/>HYPOTHESIS| P1
 
     classDef confirmed fill:#e1f5e1,stroke:#2e7d32
     classDef hypothesis fill:#fff3e0,stroke:#ef6c00
@@ -78,199 +79,199 @@ graph TB
 
 ---
 
-## Fluxo Detalhado por Fase
+## Detailed Flow by Phase
 
-### Fase 1 — Inicialização e Conectividade (T-114s a T+0s)
+### Phase 1 — Initialization and Connectivity (T-114s to T+0s)
 
 ```mermaid
 sequenceDiagram
-    participant C as Cliente (192.168.15.15)
+    participant C as Client (192.168.15.15)
     participant DNS as DNS (192.168.122.1)
     participant T as Teredo (20.201.205.4:3544)
 
-    C->>DNS: UDP/53 Queries (Windows/MS domínios)
-    DNS-->>C: Respostas DNS
+    C->>DNS: UDP/53 Queries (Windows/MS domains)
+    DNS-->>C: DNS responses
     C->>T: UDP/3544 Teredo Router Solicitation
-    note over C,T: ICMPv6 Router Solicitation encapsulado
-    note over C: Não há Router Advertisement observado
+    note over C,T: ICMPv6 Router Solicitation encapsulated
+    note over C: No Router Advertisement observed
 ```
 
-**Evidências:**
-- `radmin_vm.pcap`: DNS queries para `api.msn.com`, `c.bing.com`, `config.edge.skype.com`, etc.
-- `radmin_vm.pcap` frame 708: Teredo Router Solicitation para `20.201.205.4:3544`
-- Classificação: CONFIRMADO (tráfego observado), mas provavelmente fundo Windows/Wine, não Radmin específico
+**Evidence:**
+- `radmin_vm.pcap`: DNS queries for `api.msn.com`, `c.bing.com`, `config.edge.skype.com`, etc.
+- `radmin_vm.pcap` frame 708: Teredo Router Solicitation to `20.201.205.4:3544`
+- Classification: CONFIRMED (traffic observed), but likely Windows/Wine background traffic, not Radmin-specific
 
 ---
 
-### Fase 2 — Conexão de Controle (T+42s a T+95s)
+### Phase 2 — Control Connection (T+42s to T+95s)
 
 ```mermaid
 sequenceDiagram
-    participant C as Cliente (192.168.15.15:44340)
-    participant S1 as Controle (148.113.190.78:17301)
-    participant S2 as Controle Alt (198.244.203.247:17301)
+    participant C as Client (192.168.15.15:44340)
+    participant S1 as Control (148.113.190.78:17301)
+    participant S2 as Control Alt (198.244.203.247:17301)
 
     C->>S1: TCP SYN
     S1-->>C: SYN-ACK
     C->>S1: ACK
-    C->>S1: TCP/17301 Dados [4-byte BE length][payload] (196 bytes)
-    S1->>C: TCP/17301 Dados (260 bytes, fragmentado)
-    C->>S2: TCP SYN (nova conexão paralela)
+    C->>S1: TCP/17301 data [4-byte BE length][payload] (196 bytes)
+    S1->>C: TCP/17301 data (260 bytes, fragmented)
+    C->>S2: TCP SYN (new parallel connection)
     S2-->>C: SYN-ACK
 ```
 
-**Evidências:**
-- `radmin-connect.pcapng` frames 70-72: TCP handshake com 148.113.190.78:17301
-- `radmin-connect.pcapng` frame 77: Dados 192 bytes payload (length=0x000000c0)
-- `radmin-connect.pcapng` frame 110: TCP SYN para 198.244.203.247:17301
-- Classificação: CONFIRMADO
+**Evidence:**
+- `radmin-connect.pcapng` frames 70–72: TCP handshake with 148.113.190.78:17301
+- `radmin-connect.pcapng` frame 77: Data 192 bytes payload (length=0x000000c0)
+- `radmin-connect.pcapng` frame 110: TCP SYN to 198.244.203.247:17301
+- Classification: CONFIRMED
 
 ---
 
-### Fase 3 — Descoberta NAT via STUN (T+95s a T+97s)
+### Phase 3 — NAT Discovery via STUN (T+95s to T+97s)
 
 ```mermaid
 sequenceDiagram
-    participant C as Cliente (192.168.122.77)
+    participant C as Client (192.168.122.77)
     participant ST1 as STUN (135.181.75.11:17357)
     participant ST2 as STUN (148.113.190.78:17341)
 
     C->>ST1: UDP Binding Request (0x0001)
-    C->>ST1: UDP Binding Request (retry, ~100ms depois)
-    ST1-->>C: UDP Binding Response (0x0101, 98 bytes)
+    C->>ST1: UDP Binding Request (retry, ~100ms later)
+    ST1-->>C: UDP Binding Response (0x0101, 56 bytes)
     C->>ST2: UDP Binding Request (0x0001)
-    ST2-->>C: UDP Binding Response (0x0101, 98 bytes)
+    ST2-->>C: UDP Binding Response (0x0101, 56 bytes)
 ```
 
-**Evidências:**
-- `radmin_vm.pcap` frame 5477: Binding Request para 135.181.75.11:17357
-- `radmin_vm.pcap` frame 5489: Binding Response de 135.181.75.11:17357
-- `radmin_vm.pcap` frame 5551: Binding Request para 148.113.190.78:17341
-- `radmin_vm.pcap` frame 5575: Binding Response de 148.113.190.78:17341
-- Classificação: CONFIRMADO (STUN observado), portas não-padrão
+**Evidence:**
+- `radmin_vm.pcap` frame 5477: Binding Request to 135.181.75.11:17357
+- `radmin_vm.pcap` frame 5489: Binding Response from 135.181.75.11:17357
+- `radmin_vm.pcap` frame 5551: Binding Request to 148.113.190.78:17341
+- `radmin_vm.pcap` frame 5575: Binding Response from 148.113.190.78:17341
+- Classification: CONFIRMED (STUN observed), non-standard ports
 
 ---
 
-### Fase 4 — Controle Alternativo (T+96s em diante)
+### Phase 4 — Alternative Control (T+96s onward)
 
 ```mermaid
 sequenceDiagram
-    participant C as Cliente (192.168.122.77:49497)
-    participant S3 as Controle (45.162.230.182:17351)
+    participant C as Client (192.168.122.77:49497)
+    participant S3 as Control (45.162.230.182:17351)
 
     C->>S3: TCP SYN
     S3-->>C: SYN-ACK
     C->>S3: TCP/17351 [4-byte BE length][payload]
-    S3->>C: TCP/17351 Resposta (seq=2)
-    S3->>C: TCP/17351 Resposta (seq=3)
-    S3->>C: TCP/17351 Resposta (seq=4)
+    S3->>C: TCP/17351 Response (seq=2)
+    S3->>C: TCP/17351 Response (seq=3)
+    S3->>C: TCP/17351 Response (seq=4)
 ```
 
-**Evidências:**
-- `radmin_vm.pcap` frame 5483-5486: TCP handshake com 45.162.230.182:17351
-- `radmin_vm.pcap` frame 5487: Resposta com seq=2
-- `radmin_vm.pcap` frame 5494: Resposta com seq=3
-- `radmin_vm.pcap` frame 5501: Resposta com seq=4
-- Classificação: CONFIRMADO (framing e sequência)
+**Evidence:**
+- `radmin_vm.pcap` frames 5483–5486: TCP handshake with 45.162.230.182:17351
+- `radmin_vm.pcap` frame 5487: Response with seq=2
+- `radmin_vm.pcap` frame 5494: Response with seq=3
+- `radmin_vm.pcap` frame 5501: Response with seq=4
+- Classification: CONFIRMED (framing and sequence)
 
 ---
 
-### Fase 5 — P2P Ativo (UDP/9993 entre peers)
+### Phase 5 — P2P Active (UDP/9993 between peers)
 
 ```mermaid
 sequenceDiagram
     participant A as Peer A (26.239.229.134 / 192.168.15.15)
     participant B as Peer B (26.172.178.79 / [IP_PUBLICO_MASCARADO])
 
-    note over A: Hole Punching - mesma mensagem de múltiplas portas
-    A->>B: UDP/9993 Setup (137 bytes) de porta 9993
-    A->>B: UDP/9993 Setup (137 bytes) de porta 48318
-    A->>B: UDP/9993 Setup (137 bytes) de porta 48870
-    B->>A: UDP/9993 Resposta (59 bytes)
-    A->>B: UDP/9993 Dados (137 bytes)
-    B->>A: UDP/9993 Dados (99 bytes)
-    
+    note over A: Hole punching attempt — same message from multiple ports
+    A->>B: UDP/9993 Setup (137 bytes) from port 9993
+    A->>B: UDP/9993 Setup (137 bytes) from port 48318
+    A->>B: UDP/9993 Setup (137 bytes) from port 48870
+    B->>A: UDP/9993 Response (59 bytes)
+    A->>B: UDP/9993 Data (137 bytes)
+    B->>A: UDP/9993 Data (99 bytes)
+
     note over A,P5: Keepalive
     participant P5 as Peer C (26.228.88.155)
-    P5->>A: UDP/47836 Keepalive (4 bytes, contador seq)
-    P5->>A: UDP/47836 Keepalive (4 bytes, contador seq+1)
+    P5->>A: UDP/47836 Keepalive (4 bytes, counter seq)
+    P5->>A: UDP/47836 Keepalive (4 bytes, counter seq+1)
 ```
 
-**Evidências:**
-- `radmin-mine.pcapng` frames 116-118: Mesmo payload de portas 9993, 48318, 48870
-- `radmin-mine.pcapng` frame 269: Resposta 59 bytes de 26.172.178.79:9993
-- `radmin-mine.pcapng` frames 66-2295: Keepalive UDP/47836 com contador sequencial
-- Classificação: CONFIRMADO (P2P direto com hole punching)
+**Evidence:**
+- `radmin-mine.pcapng` frames 116–118: Same payload from ports 9993, 48318, 48870
+- `radmin-mine.pcapng` frame 269: Response 59 bytes from 26.172.178.79:9993
+- `radmin-mine.pcapng` frames 66–2295: Keepalive UDP/47836 with sequential counter
+- Classification: CONFIRMED for transmission attempts; HYPOTHESIS for successful NAT traversal
 
 ---
 
-## Correlação Física ↔ Virtual
+## Physical-Virtual Correlation
 
-### Mapeamento de Endereços
+### Address Mapping
 
-| IP Virtual | IP Físico | MAC Virtual | Capturas |
+| Virtual IP | Physical IP | Virtual MAC | Captures |
 |---|---|---|---|
 | 26.239.229.134 | 192.168.15.15 | 02:50:ce:a5:3a:26 | radmin-mine, radmin-mine-host, radmin-connect |
-| 26.172.178.79 | [IP_PUBLICO_MASCARADO} | 02:50:06:00:35:fd | radmin-mine, radmin-mine-host |
+| 26.172.178.79 | [IP_PUBLICO_MASCARADO] | 02:50:06:00:35:fd | radmin-mine, radmin-mine-host |
 | 26.228.42.15 | — | — | radmin-mine, radmin-mine-host |
 | 26.228.88.155 | — | 02:50:eb:9a:6f:58 | radmin-mine, radmin-mine-host, radmin-connect |
 
-### Correlação de Payload
+### Payload Correlation
 
-O mesmo payload UDP/9993 (137 bytes) aparece em ambas as interfaces com apenas diferença nos endereços IP do cabeçalho e nos campos TLV 0x0004:
+The same UDP/9993 payload (137 bytes) appears on both interfaces with differences only in the IP header addresses and TLV 0x0004 fields:
 
 ```
-Interface Virtual (frame 116):
+Virtual Interface (frame 116):
 26.239.229.134:9993 → 26.172.178.79:9993
 Payload: [identical 137 bytes]
 
-Interface Física (frame 130):
-192.168.15.15:9993 → [IP_PUBLICO_MASCARADO}:9993
+Physical Interface (frame 130):
+192.168.15.15:9993 → [IP_PUBLICO_MASCARADO]:9993
 Payload: [identical 137 bytes]
 ```
 
-**Conclusão:** CONFIRMADO — a interface virtual encapsula o mesmo protocolo que a interface física. Os IPs virtuais são traduzidos para IPs físicos antes de sair na rede.
+**Conclusion:** CONFIRMED (limited) — the virtual interface carries real Radmin traffic between peers, with ARP for virtual address resolution. Based on 3 frame pairs from a single capture.
 
 ---
 
-## Fluxos de Dados por Protocolo
+## Data Flows by Protocol
 
-### TCP/17301 — Controle Primário
+### TCP/17301 — Primary Control
 
 ```
-Cliente:192.168.15.15:44340 ↔ 148.113.190.78:17301
-Cliente:192.168.15.15:57924 ↔ 198.244.203.247:17301
-Cliente:192.168.15.15:44342 ↔ 148.113.190.78:17301
+Client:192.168.15.15:44340 ↔ 148.113.190.78:17301
+Client:192.168.15.15:57924 ↔ 198.244.203.247:17301
+Client:192.168.15.15:44342 ↔ 148.113.190.78:17301
 ```
 
-- Múltiplas conexões TCP paralelas
+- Multiple parallel TCP connections
 - Framing: [4-byte BE length][payload]
-- Fragmentação para mensagens > MSS
-- Classificação: CONFIRMADO
+- Fragmentation for messages > MSS
+- Classification: CONFIRMED
 
-### TCP/17351 — Controle Alternativo
+### TCP/17351 — Alternative Control
 
 ```
-Cliente:192.168.122.77:49497 ↔ 45.162.230.182:17351
+Client:192.168.122.77:49497 ↔ 45.162.230.182:17351
 ```
 
-- Sub-protocolo com versão `10 00 00 04` e sequência incremental
-- Servidor único observado: 45.162.230.182
-- Classificação: CONFIRMADO (framing e sequência), papel não determinado
+- Sub-protocol with version `10 00 00 04` and incremental sequence
+- Single server observed: 45.162.230.182
+- Classification: CONFIRMED (framing and sequence), function not determined
 
-### UDP/9993 — Dados P2P
+### UDP/9993 — P2P Data
 
 ```
 26.239.229.134:9993 ↔ 26.172.178.79:9993 (virtual)
-192.168.15.15:9993 ↔ [IP_PUBLICO_MASCARADO}:9993 (físico)
-192.168.15.15:48318 ↔ 103.195.103.66:9993 (físico)
-192.168.15.15:9993 ↔ 25.33.236.186:9993 (físico)
+192.168.15.15:9993 ↔ [IP_PUBLICO_MASCARADO]:9993 (physical)
+192.168.15.15:48318 ↔ 103.195.103.66:9993 (physical)
+192.168.15.15:9993 ↔ 25.33.236.186:9993 (physical)
 ```
 
-- Múltiplos tamanhos de mensagem: 28, 33, 99, 137 bytes
-- Hole punching: mesma mensagem de portas 9993, 48318, 48870
-- TLV 0x0004: IP + porta do peer
-- Classificação: CONFIRMADO
+- Multiple message sizes: 28, 33, 99, 137 bytes
+- Hole punching: same message from ports 9993, 48318, 48870
+- TLV 0x0004: IP + port of peer
+- Classification: CONFIRMED
 
 ### UDP/47836 — Keepalive
 
@@ -278,12 +279,12 @@ Cliente:192.168.122.77:49497 ↔ 45.162.230.182:17351
 26.228.88.155:47836 → 26.239.229.134:47836
 ```
 
-- 4 bytes de payload, contador sequencial little-endian
-- Interval ~1 segundo
-- Apenas uma direção observada
-- Classificação: CONFIRMADO
+- 4-byte payload, sequential little-endian counter
+- Interval ~1 second
+- One direction only observed
+- Classification: CONFIRMED (format), INCONCLUSIVE (uint16 vs uint32 layout)
 
-### STUN — Descoberta NAT
+### STUN — NAT Discovery
 
 ```
 192.168.122.77:54527 → 135.181.75.11:17357
@@ -292,65 +293,64 @@ Cliente:192.168.122.77:49497 ↔ 45.162.230.182:17351
 ```
 
 - Binding Request (20 bytes) / Binding Response (56 bytes)
-- Portas não-padrão Radmin
-- Classificação: CONFIRMADO
+- Non-standard Radmin ports
+- Classification: CONFIRMED (protocol variant), non-standard RFC 5389
 
-### Teredo — Conectividade IPv6
+### Teredo — IPv6 Connectivity
 
 ```
 192.168.122.77:54778 → 20.201.205.4:3544
 ```
 
-- Router Solicitation encapsulado
-- Provavelmente fundo Windows/Wine
-- Classificação: CONFIRMADO (observado), não confirmado como Radmin
+- Router Solicitation encapsulated
+- Likely Windows/Wine background traffic
+- Classification: CONFIRMED (observed), not confirmed as Radmin
 
 ---
 
-## Caminhos Confirmados vs Hipotéticos
+## Confirmed vs Hypothetical Paths
 
-### Confirmados (CONFIRMADO)
+### Confirmed (CONFIRMED)
 
-| Caminho | Protocolo | Evidência |
+| Path | Protocol | Evidence |
 |---|---|---|
-| Cliente → Servidor Controle 17301 | TCP | Handshake + dados em múltiplas capturas |
-| Cliente → Servidor Controle 17351 | TCP | Handshake + dados com sequência |
-| Cliente → Servidores STUN | UDP | Binding Request/Response em 9 portas |
-| Cliente → Servidor Teredo | UDP | Router Solicitation para 20.201.205.4:3544 |
-| Peer ↔ Peer (virtual) | UDP/9993 | Mesma carga em ambas as interfaces |
-| Peer ↔ Peer (físico) | UDP/9993 | Mesma carga que virtual |
-| Peer → Peer keepalive | UDP/47836 | Contador sequencial, ~1s intervalo |
-| Interface virtual ↔ física | Encapsulamento | Mesmo payload, IPs diferentes |
+| Client → Control Server 17301 | TCP | Handshake + data in multiple captures |
+| Client → Control Server 17351 | TCP | Handshake + data with sequence |
+| Client → STUN Servers | UDP | Binding Request/Response on 9 ports |
+| Client → Teredo Server | UDP | Router Solicitation to 20.201.205.4:3544 |
+| Peer ↔ Peer (virtual) | UDP/9993 | Same payload on both interfaces |
+| Peer ↔ Peer (physical) | UDP/9993 | Same payload as virtual |
+| Peer → Peer keepalive | UDP/47836 | Sequential counter, ~1s interval |
+| Virtual interface ↔ Physical | Encapsulation | Same payload, different IPs |
 
-### Hipotéticos (HIPÓTESE)
+### Hypothetical (HYPOTHESIS)
 
-| Caminho | Protocolo | Justificativa |
+| Path | Protocol | Justification |
 |---|---|---|
-| Peer → Relay → Peer | UDP/9993 | Fluxo de grande volume (3,1 MB) para [IP_PUBLICO_MASCARADO}:58358, mas não confirmado como relay Radmin |
-| Servidor Controle → Relay | TCP/17301/17351 | Não há evidência de relay nos servidores de controle |
-| NAT Traversal via STUN | UDP | STUN observado, mas não há prova de traversal bem-sucedido |
+| Peer → Relay → Peer | UDP/9993 | High-volume flow (3.1 MB) to [IP_PUBLICO_MASCARADO]:58358, not confirmed as Radmin relay |
+| Control Server → Relay | TCP/17301/17351 | No evidence of relay on control servers |
+| NAT Traversal via STUN | UDP | STUN observed, but no proof of successful traversal |
+| Hole punching success | UDP/9993 | Transmission attempts observed, success not proven |
 
-### Não Confirmados
+### Not Confirmed
 
-| Caminho | Protocolo | Motivo |
+| Path | Protocol | Reason |
 |---|---|---|
-| Handshake inicial `00 00 00 04 03 00 00 00` | TCP/17301 | Não aparece no início de nenhuma conexão capturada |
-| Troca de chaves AES | TCP/UDP | Tráfego criptografado, sem chaves visíveis |
-| Campo TLV 0x30 (192 bytes) | Qualquer | Não encontrado em nenhuma captura |
+| Initial handshake `00 00 00 04 03 00 00 00` | TCP/17301 | Does not appear at start of any captured connection |
+| AES key exchange | TCP/UDP | Encrypted traffic, no keys visible |
+| TLV `0x30` (192 bytes) | Any | Not found in any capture |
 
 ---
 
-## Limitações do Mapa de Fluxos
+## Flow Map Limitations
 
-1. **Tráfego criptografado:** O conteúdo de TCP/17301, TCP/17351 e UDP/9993 (região 0x2E-0x5D) está criptografado. Não é possível determinar o protocolo de aplicação dentro desses fluxos.
-
-2. **Handshake não capturado:** O handshake inicial de 8 bytes (`00 00 00 04 03 00 00 00`) mencionado em relatórios anteriores não aparece no início de nenhuma conexão TCP capturada. Pode ocorrer antes do início da captura.
-
-3. **Relay não confirmado:** O fluxo de grande volume para [IP_PUBLICO_MASCARADO}:58358 pode ser relay, P2P direto ou tráfego de outro serviço. Não há evidência suficiente para classificar.
-
-4. **Tipo de NAT não determinado:** Uma única resposta STUN por servidor é insuficiente para classificar o comportamento de NAT.
+1. **Encrypted traffic:** TCP/17301, TCP/17351, and UDP/9993 (region 0x2e–0x5d) content is encrypted. Application protocol inside these flows cannot be determined.
+2. **Handshake not captured:** The initial 8-byte handshake (`00 00 00 04 03 00 00 00`) mentioned in previous reports does not appear at the start of any captured TCP connection. May occur before capture start.
+3. **Relay not confirmed:** High-volume flow to [IP_PUBLICO_MASCARADO]:58358 may be relay, direct P2P, or another service. Insufficient evidence to classify.
+4. **NAT type not determined:** Single STUN response per server is insufficient to classify NAT behavior.
+5. **Limited frame pairs:** Only 3 virtual↔physical frame pairs compared for encapsulation analysis.
 
 ---
 
-**Documento gerado:** `docs/PCAP_FLOW_MAP.md`  
-**Arquivos .pcapng originais:** Preservados, não modificados
+**Generated file:** `docs/PCAP_FLOW_MAP.md`  
+**Original .pcapng files:** Preserved, unmodified
