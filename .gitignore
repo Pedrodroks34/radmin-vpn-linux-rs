@@ -20,6 +20,9 @@
 # OpenCode Swarm runtime and planning state
 .swarm/*
 
+# Antigravity local skills
+.agent/
+
 # Proprietary binaries and captures
 *.exe
 *.dll

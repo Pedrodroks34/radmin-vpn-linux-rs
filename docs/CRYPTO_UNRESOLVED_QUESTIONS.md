@@ -540,20 +540,130 @@ captured PCAP traffic.
 
 ---
 
-## 8. Consolidated Priority List for Implementation
+## 8. Key Lifecycle Unresolved Questions (Investigations A–D)
+
+### A — SRP Control Key Derivation
+
+#### A-i: Exact operands of `0x10060810`
+**Question:** Is `[obj+0xc]` N and `[obj+0x10]` the padded-g buffer, or vice versa?  
+**Impact:** Blocks byte-exact `k` formula statement.  
+**Where:** `shelper.dll` `0x10060810` full disassembly.  
+**Status:** UNVERIFIED.
+
+#### A-ii: Slot `+0x1c` role
+**Question:** Is slot `+0x1c` the combined S method (k computed inline) or a standalone `k` accessor?  
+**Impact:** Affects understanding of key derivation architecture.  
+**Where:** Review `0x10060810` caller chain.  
+**Status:** UNVERIFIED.
+
+#### A-iii: `0x10060510` (S/u core)
+**Question:** Does it implement `S = (B − k·g^x)^(a + u·x) mod N`? Where is S stored?  
+**Impact:** Shared secret computation unverified.  
+**Where:** `objdump -d --start-address=0x10060510 --stop-address=0x100606a0 shelper.dll`.  
+**Status:** NOT DISASSEMBLED (budget expired).
+
+#### A-iv: `0x10061790` (KDF)
+**Question:** KDF = `H(S ‖ BE32(i))`, 40 bytes? Domain/order of A‖B in u?  
+**Impact:** KDF correctness unverified.  
+**Where:** `objdump -d --start-address=0x10061790 --stop-address=0x10061860 shelper.dll`.  
+**Status:** NOT DISASSEMBLED.
+
+#### A-v: `0x100609a0` (M2 generation) and server `0x10060fa0`/`0x100612f0`/`0x10061450`
+**Question:** Server M1 verify/M2 generation paths not traced.  
+**Impact:** Server-side proof verification unverified.  
+**Where:** `objdump -d` ranges at those addresses.  
+**Status:** NOT DISASSEMBLED.
+
+### B — RSession 64-Byte Secret Lifecycle
+
+#### B-i: GetKey consumer location
+**Question:** Where is `SHelper_RSession_GetKey` (`0x1006ba80`) called? disp8 sweep incomplete.  
+**Impact:** Cannot determine key mapping or consumer architecture.  
+**Where:** Complete `call [reg+disp8]` sweep (`FF 50..57 B0`) in `RvROLClient.dll`, `RvControlSvc.exe`, `RvRvpnGui.exe`; filter `disp8 ∈ {0xb0, 0xb4, 0xc0, 0xc4, 0xc8}`.  
+**Status:** UNKNOWN (sweep cut short by budget).
+
+#### B-ii: 64→32+32 AES key mapping
+**Question:** Split `[0..32]`/`[32..64]`, reversed, identical both directions, or KDF?  
+**Impact:** Rust `derive_aes256_key_ref()` uses `[..32]` for both — CONFIRMED_MISMATCH (unsupported).  
+**Where:** Trace between `GetKey` and `SetKeyEnc`/`SetKeyDec`; `lea reg,[key+0x20]` = split fingerprint.  
+**Status:** UNKNOWN.
+
+#### B-iii: `SetKeyEnc`/`SetKeyDec` re-disassembly
+**Question:** Confirm 32-byte length enforcement and `AES_set_*_key` call.  
+**Impact:** Confirm two-key contract.  
+**Where:** `shelper.dll` `0x1006ab00` / `0x1006aac0`.  
+**Status:** UNVERIFIED (prior session only).
+
+#### B-iv: Client RSA public key provenance
+**Question:** Where does the client obtain `(n, e)` for `CreateClient`?  
+**Impact:** Cannot replicate client side.  
+**Where:** Search `.rdata` for modulus blobs; trace `CreateClient` (`0x1006b860`) callers.  
+**Status:** UNKNOWN.
+
+#### B-v: Server private key provenance
+**Question:** Which component supplies the 8 component buffers to `CreateServer` (`0x1006b8f0`)?  
+**Impact:** Cannot replicate server side.  
+**Where:** Search `.rdata` for private key components; trace `CreateServer` callers.  
+**Status:** UNKNOWN.
+
+#### B-vi: Header field semantics (`+0x04..+0x0c`, `+0x14..+0x1c`)
+**Question:** What do the 12-byte header fields represent semantically?  
+**Impact:** If they encode version/flags/session IDs, Rust must set them correctly.  
+**Where:** `shelper.dll` `FUN_1006a690` / server store path.  
+**Status:** UNKNOWN.
+
+### C — AES Installation and Cipher Consumers
+
+#### C-i: Peer data channel key source
+**Question:** How are UDP/9993 peer data channel keys established?  
+**Impact:** Unknown how peer data encryption keys are derived.  
+**Where:** Trace UDP/9993 crypto setup in `RvROLClient.dll`.  
+**Status:** UNKNOWN.
+
+#### C-ii: Relay channel cipher
+**Question:** What cipher is used for relay traffic?  
+**Impact:** Unknown relay encryption.  
+**Where:** Investigate relay module.  
+**Status:** UNKNOWN.
+
+### D — RSA Key Provenance
+
+#### D-i: Client public key source
+**Question:** Embedded in binary, received over network, or from config?  
+**Impact:** Cannot implement client without the server's public key.  
+**Where:** Search `.rdata` for modulus blobs in `RvROLClient.dll`/`RvControlSvc.exe`/`RvRvpnGui.exe`.  
+**Status:** UNKNOWN.
+
+#### D-ii: Server private key source
+**Question:** Embedded, loaded from file, or supplied by another component?  
+**Impact:** Cannot implement server without the private key.  
+**Where:** Trace `CreateServer` (`0x1006b8f0`) callers; search `.rdata` for key components.  
+**Status:** UNKNOWN.
+
+#### D-iii: Key rotation
+**Question:** Does the server rotate its RSA key pair?  
+**Impact:** Session security and backward compatibility.  
+**Where:** Trace key reload logic after `CreateServer`.  
+**Status:** UNKNOWN.
+
+---
+
+## 9. Consolidated Priority List for Implementation
 
 | Priority | Issue | Investigation | Binary Address(es) | Rust Location |
 |----------|-------|---------------|-------------------|---------------|
-| 1 (Critical) | Step value endianness | B-5 / G-1 | `0x100626e0` | `control_handshake.rs` L670, 780, 910, 1267, 1399, 1456 |
-| 2 (Critical) | Identity/password encoding in x | B-4 / G-2 | `0x10060340`, `0x10060c80` | `control_handshake.rs` L269-286 |
-| 3 (Critical) | Multiplier k class | B-1 / G-3 | `0x10060810`, `0x100ad760`, `0x100ad7b8` | `control_handshake.rs` L16 |
-| 4 (High) | 64 → two 32-byte AES key split | C-1 / G- (gap) | `0x1006ba80`, `0x1006ab00`, `0x1006aac0` | `famatech.rs` `derive_aes256_key_ref` |
-| 5 (High) | Public value length check | B-5 / G-4 | `0x100699e0` | `control_handshake.rs` L330-337 |
-| 6 (Medium) | Version endianness | B-5 / G-5 | `0x1006b1d0` | `control_handshake.rs` L588 |
-| 7 (Medium) | Public value padding in M1 | B-3 / G-6 | `0x10060410`, `0x10060510` | `control_handshake.rs` `compute_srp_m1` callers |
-| 8 (Low) | Control message integration | G-7 | N/A | `src/protocol/control.rs` |
-| 9 (Low) | RSession transport integration | G-8 | `0x1006b8f0`, `0x1006b860` | `src/session/handshake.rs` `RSessionServer` |
-| 10 (Low) | Interop test with original key | G-9 | `RvROLClient.dll` RSA public key | `src/session/*` test modules |
+| 1 (Critical) | Step value endianness | A / G-1 | `0x100626e0` | `control_handshake.rs` L670, 780, 910, 1267, 1399, 1456 |
+| 2 (Critical) | Identity/password encoding in x | A / G-2 | `0x10060340`, `0x10060c80` | `control_handshake.rs` L269-286 |
+| 3 (Critical) | Multiplier `k` class | A / G-3 | `0x10060810`, `0x100ad760`, `0x100ad7b8` | `control_handshake.rs` L16 |
+| 4 (High) | 64 → two 32-byte AES key split | B / C | `0x1006ba80`, `0x1006ab00`, `0x1006aac0` | `famatech.rs` `derive_aes256_key_ref` |
+| 5 (High) | GetKey consumer location | B | disp8 sweep in ROLClient/ControlSvc | N/A (consumer not found) |
+| 6 (High) | Client/server RSA key provenance | D | `0x1006b860`/`0x1006b8f0` callers | `handshake.rs` `create_client`/`create_server` |
+| 7 (Medium) | Public value length check | A / G-4 | `0x100699e0` | `control_handshake.rs` L330-337 |
+| 8 (Medium) | Version endianness | A / G-5 | `0x1006b1d0` | `control_handshake.rs` L588 |
+| 9 (Medium) | Public value padding in M1 | A / G-6 | `0x10060410`, `0x10060510` | `control_handshake.rs` `compute_srp_m1` callers |
+| 10 (Low) | Control message integration | G-7 | N/A | `src/protocol/control.rs` |
+| 11 (Low) | RSession transport integration | G-8 | `0x1006b8f0`, `0x1006b860` | `src/session/handshake.rs` `RSessionServer` |
+| 12 (Low) | Interop test with original key | G-9 | `RvROLClient.dll` RSA public key | `src/session/*` test modules |
 
 ---\n\n**Generated file:** `docs/CRYPTO_UNRESOLVED_QUESTIONS.md`  
 **Original binaries and PCAPs:** Preserved, unmodified  
