@@ -12,7 +12,7 @@
 - `/tmp/opencode/ghidra_project/radmin_project.rep` (RvROLClient.dll)
 - `/tmp/opencode/ghidra_project3/shelper_project.rep` (shelper.dll)
 
-**Important:** Everything in this document is **static** evidence (code, RTTI, vtables, constants). Nothing here has been confirmed against encrypted traffic. Where this document and `PROTOCOL_SPEC.md` disagree, see the reconciliation notes in each section.
+**Important:** Everything in this document is **static** evidence (code, RTTI, vtables, constants). Nothing here has been confirmed against encrypted traffic. Where this document and `PROTOCOL_SPEC.md` disagree, see the reconciliation notes in each section. The key-exchange call graph, AES key flows, and RSA operations are consolidated in `KEY_EXCHANGE_ANALYSIS.md` (Phase 1 Wave 3 register; confirmed items from Wave 1, Tasks 1.1 to 1.3 and 2.1).
 
 ---
 
@@ -168,21 +168,20 @@ Based on OpenSSL 1.0.1f (the string "AES part of OpenSSL 1.0.1f" confirms it).
 
 - Size: 16 bytes.
 - Stored at: `AESCryptor+0x1ec` (encrypt) and `AESCryptor+0x1fc` (decrypt).
+- Lifecycle: both IVs are zero-initialized when the AESCryptor object (0x20c bytes, constructor `FUN_10062b60`, vtable `0x100832a0`) is created, persist across frames, and are updated from the last ciphertext block. The encrypt and decrypt directions keep independent IVs.
 - Set by: `FUN_10062ff0` (encrypt, copies 16 bytes to `this+4` or `this+0x1ec`, unclear) and `FUN_10062f80` (decrypt).
 - `FUN_100633d0` copies 16 bytes (`FUN_10065150`, size 0x10).
 
 **Unknown:**
 
-- How the IV is generated (fixed, derived from the key, or random).
-- Whether it is sent with the ciphertext.
-- Whether it is per session or per message.
-- Initial value (global constant `_DAT_100832f0`, used in `FUN_10063470` and `FUN_100633e0`).
+- Whether the IV is sent with the ciphertext (the confirmed flow keeps it in local object state; no wire copy observed).
+- The role, if any, of the global constant `_DAT_100832f0` referenced in the earlier read of `FUN_10063470` and `FUN_100633e0`; superseded as the IV origin by the confirmed zero-initialized local state.
 
 **Inferred:**
 
-- `FUN_10063470` (CBC encrypt) initializes the IV from the global `_DAT_100832f0` and XORs it with the plaintext block by block.
-- `FUN_100633e0` (CBC decrypt) initializes the IV from `_DAT_100832f0` and XORs with the previous ciphertext block.
-- The global `_DAT_100832f0` may be a default or fixed IV.
+- The confirmed lifecycle (zero-initialized, per direction, carried across frames) means the IV is per-channel state, not per-message.
+
+**Evidence:** `KEY_EXCHANGE_ANALYSIS.md` §6.2 (Wave 1 register); `CRYPTO_AES_CONSUMER_TRACE.md`.
 
 ### 6.5 Custom padding (confirmed)
 
@@ -191,32 +190,37 @@ Based on OpenSSL 1.0.1f (the string "AES part of OpenSSL 1.0.1f" confirms it).
 1. Padded size: `sVar3 = ((param_4 + 8 + param_3) / param_4) * param_4`
    - `param_4` is the block size (16).
    - `param_3` is the data size.
-   - Overhead: 9 bytes (8-byte checksum plus 1 size byte).
+   - Overhead: 9 bytes minimum (8-byte trailer digest plus 1-byte pad length).
 2. Allocate a buffer of size `sVar3`.
 3. Copy the original data (`param_3` bytes).
-4. Fill the rest with `0xcc`.
-5. Compute the checksum (`FUN_1006a0c0`): 64-bit sum of 8-byte blocks.
-6. Store the checksum (8 bytes) and `(block_size - data_size mod block_size)` (1 byte) in the last 9 bytes.
+4. Choose a pad length `pad_len` in the range `[9, 24]` and fill the region between the payload end and `sVar3 - 9` with `0xcc` (`pad_len - 9` bytes; it may be empty when `pad_len = 9`).
+5. Compute the additive checksum (`FUN_1006a0c0`): 64-bit little-endian word-additive sum over `buf[0 .. sVar3 - 9]`, with zero-fill of a residual tail shorter than 8 bytes.
+6. Compute `digest = MD5(LE64(sum))` over the 8-byte little-endian encoding of that sum (context `FUN_100638f0` → MD5 `0x10005250` / `0x10004e50` / `0x10004f30`; exactly one compression block).
+7. Fold the 16-byte digest to 8 bytes: `fold[i] = digest[i] + digest[i+8] mod 256` (`0x10069ce0`–`0x10069d15`), and write the 8 folded bytes plus `pad_len` in the last 9 bytes.
 
 **`FUN_10069f90` (validation on decryption):**
 
-1. Read the last byte as the padding count (`uVar3`).
-2. Validate: `9 < uVar3 < param_5 + 9` (`param_5` is the block size).
-3. Compute the checksum and compare it with the stored value.
-4. If valid: `data_ptr = param_3`, `data_size = param_4 - uVar3`.
+1. Read the last byte as the pad length; required range `[9, 24]` (gate `0x10069fe5`).
+2. Validate: every byte in `buf[payload_len .. total - 9]` must be `0xcc`.
+3. Recompute the same sequence (additive checksum → MD5 → fold) and compare the 8 folded bytes with the stored trailer.
+4. If valid: `data_ptr = param_3`, `data_size = total - pad_len`.
 
-**Overhead:** 9 bytes per message (8 checksum, 1 size).
+The CBC decrypt runs **before** validation (confirmed: `call [eax+8]` at `0x10069d9b`–`0x10069dab` precedes the check in `FUN_10069f90`).
 
-**Padding classification:** proprietary, not PKCS#7. Filled with `0xcc` plus a 9-byte trailer.
+**Overhead:** `pad_len` bytes per frame (9 to 24): the `0xcc` fill plus the 9-byte trailer.
 
-### 6.6 Checksum (`FUN_1006a0c0`)
+**Padding classification:** proprietary, not PKCS#7. Filled with `0xcc` plus a 9-byte trailer (8-byte folded MD5, 1-byte pad length).
 
-- **Type:** 64-bit sum, not a cryptographic MAC.
-- **Algorithm:** accumulates 8-byte blocks (little-endian uint64) into a 64-bit sum.
-- **Size:** 8 bytes (64 bits).
-- **Use:** integrity of the padding, not of the full payload.
+**Evidence:** `KEY_EXCHANGE_ANALYSIS.md` §6.2 (Wave 1 register, Tasks 1.3 and Investigations B/D); `CRYPTO_AES_CONSUMER_TRACE.md` items 12 to 15; `CRYPTO_MD5_ANALYSIS.md` E10 and E14.
 
-**Unknown:** whether it is used as a MAC or only to validate the padding.
+### 6.6 Checksum (`FUN_1006a0c0`) and folded MD5 trailer
+
+- **Type:** 64-bit little-endian word-additive sum, implemented as an `add`/`adc` chain over 8-byte words (not a cryptographic MAC).
+- **Role:** the additive checksum is an **intermediate input**, not the stored trailer. The 8 trailer bytes are the **folded MD5** of that sum's 8-byte LE encoding: MD5 via `FUN_100638f0` (`0x10005250` / `0x10004e50` / `0x10004f30`), folded by `out[i] = digest[i] + digest[i+8] mod 256` (`0x10069ce0`–`0x10069d15`).
+- **Verifier:** `FUN_10069f90` recomputes the same sequence (additive checksum → MD5 → fold) and compares the folded value against the stored 8 bytes.
+- **Not a MAC (confirmed):** the computation is unkeyed — no key material enters the checksum, MD5, or fold. It provides corruption detection only, not authenticity.
+
+**Evidence:** `KEY_EXCHANGE_ANALYSIS.md` §6.2 (Wave 1 register); `CRYPTO_AES_CONSUMER_TRACE.md` items 12 to 15; `CRYPTO_MD5_ANALYSIS.md` E10, E14; `CRYPTO_KEY_LIFECYCLE_GAP_ANALYSIS.md` C7, C12.
 
 ### 6.7 Key exchange: RSA (confirmed)
 
@@ -228,7 +232,18 @@ Based on OpenSSL 1.0.1f (the string "AES part of OpenSSL 1.0.1f" confirms it).
 - `DecryptBuffer_Public` / `DecryptBuffer_Private`: decrypt with RSA.
 - Used to exchange the AES-256 key securely.
 
-**RSA padding:** unknown. The strings `rsaesOaep` and `RSAES-OAEP` are present in `shelper.dll`, but the padding mode in use is not confirmed.
+**RSA operations and parameters (confirmed, Wave 1 register — `KEY_EXCHANGE_ANALYSIS.md` §5.1, §5.3; Task 1.3):**
+
+- `RSA_public_encrypt` wrapper `FUN_10065ec0`: `flen = 0x4c` (76 bytes), `pad = 1` (constant `push 1` at `0x10065f05`).
+- `RSA_private_decrypt` wrapper `FUN_10065db0`.
+- RSession client/server state machine `FUN_1006a2b0` (role 0 = client, role 1 = server; the server requires plaintext length exactly `0x4c`).
+- Modulus: 2048 bits — `RSA_size` (`0x100092a0`) returns `0x100` (256 bytes); ciphertext block 256 bytes.
+- Key import: raw big-endian components via `BN_bin2bn` (`0x10008a40`), no DER/PEM.
+- Transported plaintext: 76 bytes = 12-byte header (3 × LE u32) plus 64-byte key material; the server copies `plaintext[12..76]` into the session object (`obj+0x30`, length `0x40`).
+
+**RSA padding mode: unverified (contradiction C3).** The `pad = 1` constant at `0x10065f05` is confirmed; its interpretation is not. Prior traces favor PKCS#1 v1.5 (`RSA_PKCS1_PADDING`); no OAEP/MGF code was found in Wave 1, but the padding mode was explicitly not re-verified (circuit breaker, Task 1.3). The strings `rsaesOaep` and `RSAES-OAEP` are present in `shelper.dll` with no re-verified cross-references. See `KEY_EXCHANGE_ANALYSIS.md` §5.2 and §8.2 (C3).
+
+**Key provenance gap (unverified):** the 64-byte RSession secret (session object `obj+0x30`, length `0x40`) has no located consumer in `RvROLClient.dll`; the hand-off into `CChannel_SetKeyEnc`/`SetKeyDec` — including the proposed 64→32+32 split into two 32-byte AES keys — is unverified. The composition point is likely in `RvControlSvc.exe` (untraced). See `KEY_EXCHANGE_ANALYSIS.md` §4.2, §7, and §8 (U1, U2, C1, C2).
 
 ### 6.8 RSession (confirmed)
 
@@ -260,9 +275,9 @@ Based on OpenSSL 1.0.1f (the string "AES part of OpenSSL 1.0.1f" confirms it).
 ```
 SEND:
 1. CPacket_*::vtable[3] serializes to PRECEX (0x1311, 0x1312, or 0x1313)
-2. RSA exchanges the AES-256 key (SHelper_RSAHelper_*)
+2. RSA transports a 64-byte secret via the RSession functions (SHelper_RSAHelper_* / SHelper_RSession_*); the two 32-byte AES keys are installed through CChannel_SetKeyEnc / SetKeyDec (the 64→32+32 split is unverified, see §6.7)
 3. SHelper_CChannel_EncryptBuffer:
-   a. FUN_10069c20: padding (0xcc fill, 8-byte checksum, 1-byte size)
+   a. FUN_10069c20: 0xcc fill, additive checksum, MD5, fold to 8 bytes, 1-byte pad length (see §6.5)
    b. vtable[1] (FUN_10062e00 to FUN_10003b30): AES-256-CBC encrypt
    c. FUN_10062ad0: store result
 4. TCP frame: 4-byte big-endian uint32 (size) plus encrypted payload
@@ -272,7 +287,7 @@ RECEIVE:
 1. TCP receive (4-byte big-endian frame header plus payload)
 2. SHelper_CChannel_DecryptBuffer:
    a. vtable[2] (FUN_10062d60 to FUN_10003b30): AES-256-CBC decrypt
-   b. FUN_10069f90: validate padding and checksum
+   b. FUN_10069f90: validate pad length, 0xcc fill, additive checksum, and folded MD5 (see §6.5)
    c. FUN_10068230: bounds check
    d. FUN_10062800: copy result
    e. FUN_10062ad0: store result
@@ -302,7 +317,8 @@ RECEIVE:
 
 ### 7.3 Frame sizes
 
-- Encryption overhead: up to 16 bytes of padding plus 9 bytes of trailer, 25 bytes in total.
+- Encryption overhead: `pad_len` bytes per frame, in the range `[9, 24]` — the `0xcc` fill plus the 9-byte trailer (8-byte folded MD5 plus 1-byte pad length; see §6.5).
+- Observed payload sizes are multiples of 16 (only exception: the 4-byte control frame), consistent with 16-byte-block AES-CBC (`KEY_EXCHANGE_ANALYSIS.md` §6.2; frames f32, f35, f40, f44 of `radmin_17301.pcap`).
 - This explains the variety of observed sizes (32, 36, 48, 64, 96, and so on).
 
 ### 7.4 Ports
@@ -319,12 +335,12 @@ RECEIVE:
 ## 8. Limitations of the analysis
 
 1. **`FUN_10003b30`:** not confirmed whether it is OpenSSL EVP or a custom implementation. The lookup tables suggest AES T-tables. Classified as inferred.
-2. **IV:** how it is generated or whether it is transmitted is not known. The global constant `_DAT_100832f0` is used as the initial IV. Classified as unknown.
-3. **RSA padding:** the string "RSAES-OAEP" was found, but which mode is used is not confirmed. Classified as inferred.
+2. **IV:** generation is confirmed for the encrypted-buffer path — both IVs are zero-initialized in the AESCryptor object and persist across frames (§6.4, `KEY_EXCHANGE_ANALYSIS.md` §6.2). Whether an initial IV ever crosses the wire is not known. The global constant `_DAT_100832f0` is superseded as the initial-IV origin by the confirmed zero-initialized local state. Initial-IV origin beyond the zero-init: classified as unknown (supersedes, from Wave 1).
+3. **RSA padding:** the `pad = 1` constant at `0x10065f05` is confirmed; its interpretation is not. Prior traces favor PKCS#1 v1.5, but the mode was not re-verified in Wave 1 (circuit breaker, Task 1.3). Classified as unverified (contradiction C3, `KEY_EXCHANGE_ANALYSIS.md` §5.2 and §8.2) — this supersedes the older "OAEP?" inference.
 4. **Semantic meaning of the CPacket fields** (offsets): not determined. Classified as unknown.
 5. **Field tags** (0x0302, 0x0303, 0x01e1, 0x0304): meaning not confirmed. Classified as unknown.
-6. **Checksum:** not known whether it is a MAC or only used to validate padding. Classified as unknown.
-7. **IV per session or per message:** not determined. Classified as unknown.
+6. **Checksum:** confirmed not to be a MAC — the computation is unkeyed (no key material enters the checksum, MD5, or fold); it provides corruption detection only (§6.6; `KEY_EXCHANGE_ANALYSIS.md` §6.2). Scope confirmed as validation of the padding trailer.
+7. **IV scope:** per-direction channel state carried across frames is confirmed (§6.4). Behavior of the IVs across reconnects/new channel objects is not determined. Classified as confirmed (per-direction persistence) / unknown (cross-session).
 8. **No dynamic execution:** no debugging or replay.
 
 ---
@@ -333,23 +349,66 @@ RECEIVE:
 
 | Item | Status | Needed to |
 |---|---|---|
-| IV generation and exchange | Unknown | Reproduce the encryption |
-| RSA padding mode | Inferred (OAEP?) | Reproduce the key exchange |
+| IV generation and exchange | Generation confirmed per direction (zero-initialized, persistent); exchange/transmission unknown | Reproduce the encryption |
+| RSA padding mode | Unverified — pad = 1 constant confirmed; interpretation unverified (contradiction C3; prior traces favor PKCS#1 v1.5) | Reproduce the key exchange |
 | Identity of `FUN_10003b30` | Inferred (custom AES) | Confirm the implementation |
 | Semantic fields (CPacket) | Unknown | Implement the packets |
 | Field tags | Unknown | Implement serialization |
-| IV per session or per message | Unknown | Reproduce the encryption |
-| Checksum use (MAC?) | Unknown | Implement validation |
+| IV per session or per message | Per-direction channel state confirmed; cross-session behavior unknown | Reproduce the encryption |
+| Checksum use (MAC?) | Confirmed not a MAC — corruption detection only (§6.6) | Implement validation |
 
 ---
 
-## 10. Next steps
+## 10. Confirmed cross-module linkage and crypto-free boundaries (Wave 1 register)
 
-1. **Identify the IV:** decompile `FUN_10062ff0` and `FUN_10062f80` more deeply, or use the Ghidra GUI.
+**Status:** Confirmed items from Wave 1 (Tasks 1.1, 1.2, 1.3; consolidated in `KEY_EXCHANGE_ANALYSIS.md` §3). Slot *names* and *resolution* are confirmed; several underlying *implementations* rest on prior traces and are marked UNVERIFIED. Nothing here contradicts §6 (cryptography) or §7 (capture correlation).
+
+### 10.1 RvROLClient.dll → shelper.dll linkage (CONFIRMED)
+
+- **Static import:** `RvROLClient.dll` imports exactly one function from `shelper.dll`: `SHelper_Init` (hint/ordinal 22), at IAT `0x1011121c` (Task 1.2, CONFIRMED).
+- **Dynamic resolution:** `InitDll` at `0x10041010` → global object `0x10187030` (vtable `0x10115d6c`) → `vtable[1] = FUN_1003fbd0` → 38× `GetProcAddress` against `shelper.dll` → resolved pointers stored into the global object's API table, slots `+0x58` .. `+0xec` (Task 1.2, CONFIRMED). Correction carried forward: addresses `0x1003fd48` / `0x1003fd56` inside `FUN_1003fbd0` are name pushes feeding `GetProcAddress`, not indirect calls.
+
+### 10.2 API-table slot map (slot names CONFIRMED; implementations as noted)
+
+| API-table slot (RvROLClient.dll) | Resolved shelper export | shelper implementation | Status |
+|---|---|---|---|
+| `SHelper_Init` +0x58 | `SHelper_Init` | static import | CONFIRMED |
+| +0x98 | `SHelper_RSession_CreateClient` | `0x1006b860` (ord 31) | CONFIRMED (Task 1.3) |
+| +0x9c / +0xa0 | `SHelper_RSession_CreateServer` / `_Delete` | `0x1006b8f0` (ord 32) / `0x1006b9e0` (ord 33) | CONFIRMED (Task 1.3) |
+| +0xc0 | `CChannel_SetKeyEnc` | `0x1006ab00` | slot CONFIRMED; implementation UNVERIFIED (prior trace) |
+| +0xc4 | `CChannel_SetKeyDec` | `0x1006aac0` | slot CONFIRMED; implementation UNVERIFIED (prior trace) |
+| +0xc8 | `CChannel_EncryptBuffer` | AESCryptor path | slot name CONFIRMED; call sites UNKNOWN |
+| +0xcc | `CChannel_DecryptBuffer` | AESCryptor path | slot name CONFIRMED; call sites UNKNOWN |
+| +0xd0 | `RSAHelper_CreateWithPublicKey` | address mapping UNKNOWN | name string CONFIRMED (`0x100ab06f`) |
+| +0xd4 | `RSAHelper_CreateWithPrivateKey` | address mapping UNKNOWN | name string CONFIRMED (`0x100ab048`) |
+
+Name-string anchors in `shelper.dll` `.rdata` (CONFIRMED, Task 1.3): `RSAHelper_CreateWithPrivateKey` @ `0x100ab048`, `RSAHelper_CreateWithPublicKey` @ `0x100ab06f`.
+
+**Unlocated:** No call site in `RvROLClient.dll` was located for `CChannel_CreateClient` / `SetKeyEnc` / `SetKeyDec`; the consumer hand-off point is UNKNOWN (likely `RvControlSvc.exe`, untraced). See `KEY_EXCHANGE_ANALYSIS.md` §7, §8 (U1, C1).
+
+### 10.3 Named-pipe boundary — crypto-free (CONFIRMED)
+
+`\\.\pipe\RadminVpnGuiChannel` (GUI ↔ service) uses plain named-pipe I/O (`CreateFileW`, `WaitNamedPipeW`, `WriteFile`, `ReadFile`, `TransactNamedPipe`) and contains **no** `ROLClient` imports and **no** crypto calls. The pipe is an unencrypted brokerage channel; the RSA/SRP/AES path lives deeper in the service stack (Task 1.1, CONFIRMED). It is not the TCP/17301 control channel.
+
+### 10.4 Random sources (CONFIRMED / prior trace)
+
+- `RvROLClient.dll`: only random source is ADVAPI32 `CryptGenRandom`, 4 bytes per call (`CryptAcquireContext`/`CryptGenRandom`/`CryptReleaseContext`) — CONFIRMED (Task 1.2). No 32-byte AES key is generated inside `RvROLClient.dll`.
+- `shelper.dll`: statically linked OpenSSL 1.0.1f `RAND_METHOD.bytes`; 64-byte draws on the RSession path (`FUN_10063530` → `FUN_10005410`) — CONFIRMED for RSession; SRP draw shape is prior trace.
+
+### 10.5 Two-key CChannel contract (CONFIRMED at shelper level)
+
+`CChannel_CreateClient` (`0x1006a8b0`, inner `FUN_1006a630`) requires two exactly-32-byte keys; `CChannel_SetKeyEnc` (`0x1006ab00`) / `CChannel_SetKeyDec` (`0x1006aac0`) both reject length ≠ `0x20` (32). Slot pointers `+0xc0`/`+0xc4`/`+0xc8`/`+0xcc` are installed by `FUN_1003fbd0`. The composition point `source → SetKeyEnc/SetKeyDec` (including the 64→32+32 split of the RSession secret) is UNVERIFIED — no consumer call site located; likely in `RvControlSvc.exe`. See `KEY_EXCHANGE_ANALYSIS.md` §4.2, §7, §8 (U2, C1, C2).
+
+**Relationship to this document:** this section consolidates confirmed linkage facts from `KEY_EXCHANGE_ANALYSIS.md`; it does not change §6 (cryptography) or §7 (capture correlation), which remain consistent with these findings.
+
+## 11. Next steps
+
+1. **Confirm the IV transmission:** the IV lifecycle inside the AESCryptor object is confirmed (zero-initialized, per direction, persistent; §6.4). What remains is whether an initial IV crosses the wire at channel setup (decompile `FUN_10062ff0` and `FUN_10062f80` more deeply, or use the Ghidra GUI).
 2. **Confirm `FUN_10003b30`:** compare with OpenSSL's `AES_cbc_encrypt`.
-3. **Decrypt traffic:** use the extracted keys to decrypt the captures. This is the step that would move the cryptography from static to confirmed.
-4. **Correlate packets:** map `CPacket_*` to network frames.
-5. **Only then** implement in `src/protocol/packets.rs` and `src/crypto/mod.rs`.
+3. **Resolve RSA padding mode:** re-disassemble the context around the confirmed `pad = 1` constant at `0x10065f05` (contradiction C3) before any key-exchange implementation.
+4. **Decrypt traffic:** use the extracted keys to decrypt the captures. This is the step that would move the cryptography from static to confirmed.
+5. **Correlate packets:** map `CPacket_*` to network frames.
+6. **Only then** implement in `src/protocol/packets.rs` and `src/crypto/mod.rs`.
 
 **Do not implement the Rust packets until the specification is complete.**
 
