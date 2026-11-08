@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.13",
+    "description": "Byte-level compatibility vectors for P0 blockers: AES split, identity encoding, password encoding",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "format": "PE32 i386 DLL"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+        "format": "PE32 i386 DLL"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+        "format": "PE32 i386 EXE"
+      }
+    },
+    "tools_used": [
+      "objdump (GNU binutils)",
+      "python3 (independent computation)"
+    ],
+    "analysis_method": "Static binary analysis only (objdump). No dynamic execution."
+  },
+  "aes_mapping": {
+    "status": "RESOLVED_STRONGLY_SUPPORTED",
+    "mapping": "SAME_32_BYTE_MATERIAL_BOTH_DIRECTIONS",
+    "description": "Both AES encryption and decryption keys are the first 32 bytes of the 64-byte secret",
+    "evidence_paths": [
+      {
+        "path_id": "AES-01",
+        "caller_chain": "0x10096e1a (GetKey 0x100dce30) -> 0x10096f21 (SetKeyPair 0x100df250)",
+        "enc_pointer_expression": "-0x24(%ebp) (local_buf data ptr)",
+        "dec_pointer_expression": "-0x24(%ebp) (same local_buf data ptr)",
+        "same_pointer": true,
+        "evidence": "objdump disassembly of 0x10096f03-0x10096f21: push -0x24(%ebp) twice"
+      },
+      {
+        "path_id": "AES-02",
+        "caller_chain": "0x1003de50 (SetKeyPair 0x100df250)",
+        "enc_pointer_expression": "%edi (buf_ptr from -0x18(%ebp))",
+        "dec_pointer_expression": "%edi (same buf_ptr)",
+        "same_pointer": true,
+        "evidence": "objdump disassembly of 0x1003de1a-0x1003de3e: push %edi twice"
+      }
+    ],
+    "setkeypair_normalization": {
+      "function": "0x100df250",
+      "behavior": "Both lengths normalized to 0x20 before SetKeyPair call",
+      "evidence": "push $0x20; push %edi; push $0x20; push %ebx; call *%eax"
+    },
+    "test_vector": {
+      "id": "AES-VECTOR-1",
+      "type": "synthetic",
+      "secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "description": "Each byte = its index, so enc/dec halves are visually distinguishable",
+      "expected_enc_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expected_dec_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expected_second_half_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "second_half_used": false
+    },
+    "rust_comparison": {
+      "rust_location": "src/crypto/famatech.rs:181-186",
+      "rust_enc_key": "key_material[..32]",
+      "rust_dec_key": "key_material[..32]",
+      "classification": "COMPATIBLE"
+    }
+  },
+  "identity_encoding": {
+    "status": "RESOLVED_STRONGLY_SUPPORTED",
+    "hash_input_encoding": "UTF-16LE",
+    "wire_encoding": "UTF-16BE",
+    "description": "SRP hash consumes internal obj+0x8 buffer (UTF-16LE); wire serialization byte-swaps to UTF-16BE",
+    "hash_evidence": {
+      "function": "shelper.dll!0x10060340",
+      "instruction": "mov 0x8(%esi),%eax; mov 0x4(%eax),%ecx; mov (%eax),%edx; call SHA1_Update",
+      "description": "Hash reads obj+0x8 raw bytes, no swap",
+      "classification": "CONFIRMED"
+    },
+    "wire_evidence": {
+      "function": "shelper.dll!0x100667b0",
+      "instruction": "mov (%edi,%edx,2),%ax; shl $0x8,%ax; or %ax,%cx; mov %cx,(%edi,%edx,2)",
+      "description": "Per-u16 byte swap on a copy, then TLV serialize with TAG_IDENTITY 0x20000000",
+      "classification": "CONFIRMED"
+    },
+    "test_vectors": [
+      {
+        "id": "ID-VECTOR-1",
+        "type": "synthetic",
+        "identity": "José",
+        "description": "Non-ASCII identity to expose endianness (é = U+00E9)",
+        "utf8_hex": "4a6f73c3a9",
+        "utf16le_hex": "4a006f007300e900",
+        "utf16be_hex": "004a006f007300e9",
+        "hash_input_expected": "4a006f007300e900 (UTF-16LE)",
+        "wire_expected": "004a006f007300e9 (UTF-16BE)"
+      },
+      {
+        "id": "ID-VECTOR-2",
+        "type": "synthetic",
+        "identity": "A",
+        "description": "Minimal test: single ASCII char",
+        "utf8_hex": "41",
+        "utf16le_hex": "4100",
+        "utf16be_hex": "0041",
+        "hash_input_expected": "4100",
+        "wire_expected": "0041"
+      }
+    ],
+    "rust_comparison": {
+      "rust_encode_identity": "UTF-16BE (confirmed from source)",
+      "rust_hash_input": "UTF-16BE via encode_identity()",
+      "rust_wire_input": "UTF-16BE via encode_identity()",
+      "classification": "PARTIAL",
+      "notes": "Wire matches; hash does NOT match (Rust feeds BE, binary feeds LE)"
+    }
+  },
+  "password_encoding": {
+    "status": "REQUIRES_DYNAMIC_ANALYSIS",
+    "hash_input_encoding": null,
+    "description": "Password is caller-supplied raw (ptr,len) at shelper.dll!0x10060340; encoding set outside shelper.dll",
+    "hash_evidence": {
+      "function": "shelper.dll!0x10060340",
+      "instruction": "mov 0x10(%ebp),%edx; push %edx; call SHA1_Update",
+      "description": "Password ptr from caller stack, hashed raw, no transform",
+      "classification": "CONFIRMED"
+    },
+    "possible_encodings": [
+      {"encoding": "UTF-16LE", "likelihood": "HIGH"},
+      {"encoding": "UTF-8", "likelihood": "MEDIUM"},
+      {"encoding": "ANSI/code page", "likelihood": "LOW"},
+      {"encoding": "UTF-16BE", "likelihood": "VERY LOW"}
+    ],
+    "test_vectors": [
+      {
+        "id": "PW-VECTOR-1",
+        "type": "synthetic",
+        "password": "päss",
+        "description": "Non-ASCII password to expose encoding differences",
+        "utf8_hex": "70c3a47373",
+        "utf16le_hex": "7000e40073007300",
+        "utf16be_hex": "007000e400730073",
+        "ansi_windows1252_hex": "70e47373"
+      },
+      {
+        "id": "PW-VECTOR-2",
+        "type": "synthetic",
+        "password": "test",
+        "description": "ASCII only (all encodings differ only in null bytes)",
+        "utf8_hex": "74657374",
+        "utf16le_hex": "7400650073007400",
+        "utf16be_hex": "0074006500730074",
+        "ansi_windows1252_hex": "74657374"
+      }
+    ],
+    "rust_comparison": {
+      "rust_password": "UTF-8 via password.as_bytes()",
+      "classification": "UNKNOWN"
+    }
+  },
+  "x_formula_verification": {
+    "formula": "x = SHA-1(salt || SHA-1(identity || ':' || password))",
+    "assembly_evidence": {
+      "identity_source": "mov 0x8(%esi),%eax (obj+0x8) at 0x10060361",
+      "separator": "push $0x10094218, push $0x1 at 0x10060374-0x10060379 (':' byte)",
+      "password_source": "mov 0x10(%ebp),%edx (caller stack) at 0x10060384",
+      "salt_source": "mov 0x14(%esi),%eax (obj+0x14) at 0x100603a8",
+      "inner_hash": "SHA1_Update x3 then SHA1_Final (0x1006036f-0x1006039a)",
+      "outer_hash": "SHA1_Init, SHA1_Update(salt), SHA1_Update(inner), SHA1_Final (0x100603a3-0x100603d5)"
+    },
+    "classification": "CONFIRMED"
+  },
+  "test_results": {
+    "cargo_test": "147 unit + 5 integration tests passed (pre-existing, this phase made no source changes)",
+    "python_validation": "Independent Python verified Rust vs binary byte sequences for identity/password vectors",
+    "source_modified": false
+  }
+}

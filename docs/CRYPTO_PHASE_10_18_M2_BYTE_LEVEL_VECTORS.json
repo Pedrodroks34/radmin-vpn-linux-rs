@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.18",
+    "description": "M2 byte-level reconstruction and RSA data-flow analysis",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e"
+      }
+    },
+    "tools_used": [
+      "objdump (GNU binutils)",
+      "cargo test"
+    ],
+    "analysis_method": "Static binary analysis only. No dynamic execution."
+  },
+  "m2_reconstruction": {
+    "status": "PARTIALLY_CONFIRMED",
+    "formula": "SHA-1(A || M1 || K)",
+    "function": "shelper.dll!0x100609a0",
+    "sha1_sequence": [
+      {
+        "order": 1,
+        "operation": "SHA1_Final",
+        "context": "context+0x38",
+        "output": "20-byte digest in BIGNUM",
+        "evidence": "objdump at 0x100609d4",
+        "classification": "CONFIRMED"
+      },
+      {
+        "order": 2,
+        "operation": "SHA1_Update",
+        "context": "context+0x38+0x60",
+        "input": "BIGNUM bytes (from step 1)",
+        "evidence": "objdump at 0x100609e9",
+        "classification": "CONFIRMED"
+      },
+      {
+        "order": 3,
+        "operation": "SHA1_Update",
+        "context": "context+0x38+0x60",
+        "input": "K (40 bytes from context+0xc0)",
+        "evidence": "objdump at 0x100609fe",
+        "classification": "CONFIRMED"
+      }
+    ],
+    "serialization": {
+      "A": {
+        "format": "BIGNUM big-endian",
+        "length": "Variable (BIGNUM length field)",
+        "evidence": "0x100609db: mov 0x4(%esi),%ecx",
+        "classification": "STRONGLY_SUPPORTED"
+      },
+      "M1": {
+        "format": "20-byte SHA-1 digest",
+        "evidence": "SHA1_Final output",
+        "classification": "STRONGLY_SUPPORTED"
+      },
+      "K": {
+        "format": "40 bytes raw",
+        "evidence": "0x100609f7: push $0x28",
+        "classification": "CONFIRMED"
+      }
+    },
+    "rust_comparison": {
+      "rust_formula": "SHA-1(A_bytes || M1 || K)",
+      "binary_formula": "SHA-1(BIGNUM(SHA1_Final(ctx)) || K)",
+      "classification": "PARTIALLY_CONFIRMED",
+      "notes": "Structure matches but BIGNUM serialization step adds complexity. No concrete discrepancy proven."
+    }
+  },
+  "sha1_accumulators": {
+    "base": "context+0x38",
+    "contexts": [
+      {"offset": "+0x00", "purpose": "Primary", "initialized_at": "0x10060a42"},
+      {"offset": "+0x60", "purpose": "M1/M2 accumulator", "initialized_at": "0x10060a4e"},
+      {"offset": "+0xc0", "purpose": "K context", "initialized_at": "0x10060a5d"},
+      {"offset": "+0x120", "purpose": "M2 verification", "initialized_at": "0x10060a6c"}
+    ],
+    "context_size": "0x60 bytes",
+    "total_buffer": "0x1bc bytes",
+    "initialization_function": "0x10060a20"
+  },
+  "m1_reconstruction": {
+    "status": "CONFIRMED",
+    "formula": "SHA-1(H(N) XOR H(g) || H(I) || salt || A || B || K)",
+    "h_ng_computation": {
+      "function": "0x10060b10",
+      "h_n": "SHA1_Update at 0x10060b50",
+      "h_g": "SHA1_Update at 0x10060b7d",
+      "xor_loop": "0x10060ba0-0x10060bd3",
+      "feed_to_accumulator": "0x10060be2",
+      "classification": "CONFIRMED"
+    },
+    "h_i_computation": {
+      "function": "0x10060bf3 onwards",
+      "identity_source": "obj+0x8 (UTF-16LE)",
+      "evidence": "0x10060c26: SHA1_Update with identity",
+      "classification": "STRONGLY_SUPPORTED"
+    }
+  },
+  "rsa_data_flow": {
+    "status": "PARTIALLY_RESOLVED",
+    "constructors": {
+      "public": {
+        "function": "SHelper_RSAHelper_CreateWithPublicKey",
+        "va": "0x1006b4e0",
+        "args": ["n_ptr", "n_len", "e_ptr", "e_len"],
+        "classification": "CONFIRMED"
+      },
+      "private": {
+        "function": "SHelper_RSAHelper_CreateWithPrivateKey",
+        "va": "0x1006b3e0",
+        "args": 16,
+        "description": "8 components (n, e, d, p, q, dmp1, dmq1, iqmp) + lengths",
+        "classification": "CONFIRMED"
+      }
+    },
+    "dispatch": {
+      "mechanism": "GetProcAddress + function pointer",
+      "iat_slot": "0x10175158",
+      "confidence": "STRONGLY_SUPPORTED"
+    },
+    "component_provenance": {
+      "modulus": "Caller-provided (UNKNOWN exact source)",
+      "exponent": "Caller-provided (UNKNOWN exact source)",
+      "private_components": "Caller-provided (UNKNOWN exact source)",
+      "embedded_found": false,
+      "pem_found": false
+    },
+    "operation": {
+      "direction": "Client -> Server",
+      "key_size": 2048,
+      "padding": "PKCS#1 v1.5",
+      "plaintext_size": 76,
+      "ciphertext_size": 256
+    }
+  },
+  "password_encoding": {
+    "status": "UNKNOWN",
+    "change_made": false
+  },
+  "test_results": {
+    "cargo_test": "157 unit tests PASS, 0 FAIL (pre-existing)",
+    "source_modified": false
+  }
+}

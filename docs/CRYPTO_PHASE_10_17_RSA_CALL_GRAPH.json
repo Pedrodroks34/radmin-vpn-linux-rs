@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.17",
+    "description": "RSA constructor call graph from static analysis",
+    "method": "objdump disassembly of shelper.dll and RvROLClient.dll",
+    "note": "Call edges are based on static analysis only. Indirect calls via function pointers may not be fully traced."
+  },
+  "nodes": [
+    {
+      "id": "shelper_create_pub",
+      "name": "SHelper_RSAHelper_CreateWithPublicKey",
+      "binary": "shelper.dll",
+      "va": "0x1006b4e0",
+      "type": "export",
+      "args": ["n_ptr", "n_len", "e_ptr", "e_len"]
+    },
+    {
+      "id": "shelper_create_priv",
+      "name": "SHelper_RSAHelper_CreateWithPrivateKey",
+      "binary": "shelper.dll",
+      "va": "0x1006b3e0",
+      "type": "export",
+      "args": ["16 components (n, e, d, p, q, dmp1, dmq1, iqmp + lens)"]
+    },
+    {
+      "id": "rsa_new",
+      "name": "RSA object creation",
+      "binary": "shelper.dll",
+      "va": "0x10065d00",
+      "type": "internal"
+    },
+    {
+      "id": "rsa_set_key",
+      "name": "RSA key setup",
+      "binary": "shelper.dll",
+      "va": "0x10065f50",
+      "type": "internal"
+    },
+    {
+      "id": "rsession_client",
+      "name": "RSession client (key consumer)",
+      "binary": "RvROLClient.dll",
+      "type": "caller",
+      "note": "Exact dispatch site not traced"
+    },
+    {
+      "id": "rsession_server",
+      "name": "RSession server (key consumer)",
+      "binary": "RvControlSvc.exe",
+      "type": "caller",
+      "note": "Exact dispatch site not traced"
+    }
+  ],
+  "edges": [
+    {
+      "from": "rsession_client",
+      "to": "shelper_create_pub",
+      "mechanism": "GetProcAddress + function pointer",
+      "confidence": "STRONGLY_SUPPORTED",
+      "evidence": "Both binaries import SHelper_RSAHelper_CreateWithPublicKey by name"
+    },
+    {
+      "from": "rsession_server",
+      "to": "shelper_create_priv",
+      "mechanism": "GetProcAddress + function pointer",
+      "confidence": "STRONGLY_SUPPORTED",
+      "evidence": "Both binaries import SHelper_RSAHelper_CreateWithPrivateKey by name"
+    },
+    {
+      "from": "shelper_create_pub",
+      "to": "rsa_new",
+      "mechanism": "direct call",
+      "confidence": "CONFIRMED",
+      "evidence": "objdump at 0x1006b52b: call 0x10065d00"
+    },
+    {
+      "from": "shelper_create_pub",
+      "to": "rsa_set_key",
+      "mechanism": "direct call",
+      "confidence": "CONFIRMED",
+      "evidence": "objdump at 0x1006b538: call 0x10065f50"
+    },
+    {
+      "from": "shelper_create_priv",
+      "to": "rsa_new",
+      "mechanism": "direct call",
+      "confidence": "CONFIRMED",
+      "evidence": "objdump at 0x1006b473: call 0x10065d00"
+    }
+  ],
+  "unresolved_boundaries": [
+    {
+      "description": "Exact caller address in RvROLClient.dll that invokes CreateWithPublicKey",
+      "reason": "Indirect dispatch via IAT at 0x10175158; specific call site not identified",
+      "next_step": "Trace IAT references to SHelper_RSAHelper_CreateWithPublicKey import slot"
+    },
+    {
+      "description": "Modulus/exponent byte source",
+      "reason": "Caller-side preparation not traced; could be generated, loaded, or received",
+      "next_step": "Dynamic breakpoint on 0x1006b4e0 to capture n_ptr and e_ptr contents"
+    }
+  ],
+  "key_lifecycle": {
+    "generation": "UNKNOWN (not in shelper.dll)",
+    "loading": "Caller-provided components",
+    "storage": "RSA object (0x10065d00) + key schedule",
+    "usage": "RSession key establishment (client encrypts 64-byte secret)",
+    "direction": "Client (public) -> Server (private)",
+    "rotation": "UNKNOWN"
+  }
+}

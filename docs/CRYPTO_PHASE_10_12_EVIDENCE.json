@@ -1,0 +1,533 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.12",
+    "description": "Cryptographic compatibility blocker resolution: AES key mapping, password encoding, SRP context structure, M1/M2 verification, RSA provenance, wire endianness",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "format": "PE32 i386 DLL",
+        "image_base": "0x10000000",
+        "role": "Crypto library (SRP, AES, RSA, MD5)"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+        "format": "PE32 i386 DLL",
+        "role": "ROL client library"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+        "format": "PE32 i386 EXE",
+        "role": "Control service (suspected RSession consumer)"
+      },
+      "Radmin.exe": {
+        "sha256": "5fc07f57d1d1a46bf080dd833511d5166235ffc2c00812faf46d99f008384d21",
+        "format": "PE32 i386 EXE",
+        "role": "Installer binary"
+      }
+    },
+    "tools_used": [
+      "Ghidra 12.2 (analyzeHeadless)",
+      "objdump (GNU binutils)",
+      "readelf",
+      "nm",
+      "strings",
+      "sha256sum",
+      "python3 (independent computation scripts)"
+    ],
+    "analysis_method": "Static binary analysis only (objdump disassembly, sha256sum verification). No dynamic execution."
+  },
+  "binary_inventory": [
+    {
+      "name": "shelper.dll",
+      "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+      "format": "PE32 i386 DLL",
+      "image_base": "0x10000000",
+      "role": "Crypto library",
+      "verified": true
+    },
+    {
+      "name": "RvROLClient.dll",
+      "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+      "format": "PE32 i386 DLL",
+      "role": "ROL client library",
+      "verified": true
+    },
+    {
+      "name": "RvControlSvc.exe",
+      "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+      "format": "PE32 i386 EXE",
+      "role": "Control service",
+      "verified": true
+    },
+    {
+      "name": "Radmin.exe",
+      "sha256": "5fc07f57d1d1a46bf080dd833511d5166235ffc2c00812faf46d99f008384d21",
+      "format": "PE32 i386 EXE",
+      "role": "Installer binary",
+      "verified": true
+    }
+  ],
+  "aes_consumers": [
+    {
+      "consumer_id": "AES-01",
+      "binary": "shelper.dll",
+      "function": "SHelper_RSession_GetKey",
+      "address": "0x1006ba80",
+      "signature": "bool(void* session, void** out_ptr, uint32_t* out_len)",
+      "return_value": "64-byte heap copy of session secret",
+      "transformation": "None (verbatim copy)",
+      "evidence": "objdump disassembly of 0x1006ba80",
+      "classification": "CONFIRMED"
+    },
+    {
+      "consumer_id": "AES-02",
+      "binary": "shelper.dll",
+      "function": "SetKeyPair (vtable+0x18 and +0x1c)",
+      "address": "0x1006a630",
+      "signature": "bool(void* cch, void* enc_key, uint enc_len, void* dec_key, uint dec_len)",
+      "key_requirements": "Both enc_len and dec_len must equal 0x20 (32 bytes)",
+      "calls": [
+        "vtable+0x18: SetKeyEnc(enc_key, 32)",
+        "vtable+0x1c: SetKeyDec(dec_key, 32)"
+      ],
+      "evidence": "objdump disassembly: cmp $0x20,%eax / jne fail; call *0x18(%eax); call *0x1c(%eax)",
+      "classification": "CONFIRMED"
+    },
+    {
+      "consumer_id": "AES-03",
+      "binary": "RvROLClient.dll",
+      "function": "GetKey consumer call site",
+      "address": null,
+      "status": "NOT FOUND via static analysis",
+      "explanation": "disp8 indirect calls (call [reg+0xb0]) defeat pattern matching; 369 IAT calls found but none specifically at offset 0xb0",
+      "classification": "UNKNOWN"
+    },
+    {
+      "consumer_id": "AES-04",
+      "binary": "RvControlSvc.exe",
+      "function": "GetKey consumer call site",
+      "address": null,
+      "status": "NOT FOUND via static analysis",
+      "explanation": "Same disp8 limitation as AES-03; not traced",
+      "classification": "UNKNOWN"
+    }
+  ],
+  "aes_key_mapping": {
+    "status": "UNKNOWN",
+    "description": "Which half of the 64-byte secret maps to encryption vs decryption cannot be determined statically",
+    "data_flow": {
+      "getkey_output": "64-byte heap buffer (from shelper.dll!0x1006ba80)",
+      "setkeypair_input_enc": "First pointer argument (from caller)",
+      "setkeypair_input_dec": "Second pointer argument (from caller)",
+      "caller_offset_for_enc": "UNKNOWN",
+      "caller_offset_for_dec": "UNKNOWN",
+      "intermediate_derivation": "UNKNOWN (if any)",
+      "missing_link": "Consumer call site in RvROLClient.dll/RvControlSvc.exe that computes enc_ptr and dec_ptr from GetKey buffer"
+    },
+    "possible_mappings": [
+      {
+        "mapping": "FIRST_32_ENC_SECOND_32_DEC",
+        "description": "enc = buf[0..32], dec = buf[32..64]",
+        "confidence": "UNVERIFIED"
+      },
+      {
+        "mapping": "SECOND_32_ENC_FIRST_32_DEC",
+        "description": "enc = buf[32..64], dec = buf[0..32]",
+        "confidence": "UNVERIFIED"
+      },
+      {
+        "mapping": "SAME_32_BYTE_MATERIAL_BOTH_DIRECTIONS",
+        "description": "enc = dec = buf[0..32] or buf[32..64]",
+        "confidence": "UNVERIFIED (disfavored; two separate SetKey calls suggest different pointers)"
+      }
+    ],
+    "rust_comparison": {
+      "rust_location": "src/crypto/famatech.rs:181-186 (from_rsession_key)",
+      "rust_behavior": "enc_key = key_material[..32], dec_key = key_material[..32] (same slice)",
+      "binary_behavior": "Two separate pointers passed to SetKeyPair; content-to-pointer mapping UNKNOWN",
+      "classification": "INCOMPATIBLE",
+      "notes": "Rust uses same 32 bytes for both directions. Binary takes two separate pointers. Whether the two pointers point to different halves is unconfirmed, but the existence of SetKeyPair as a two-argument function suggests different keys."
+    },
+    "required_experiment": "Dynamic execution: breakpoint on SetKeyPair (0x1006a630), inspect pointer args relative to GetKey buffer"
+  },
+  "password_encoding": {
+    "status": "UNKNOWN",
+    "formula_confirmed": "x = SHA-1(salt || SHA-1(identity || ':' || password))",
+    "identity_encoding_in_hash": {
+      "value": "UTF-16LE (from obj+0x8)",
+      "evidence": "Wire byte-swap at 0x100667b0; binary reads raw bytes from obj+0x8",
+      "classification": "CONFIRMED"
+    },
+    "password_encoding_in_hash": {
+      "value": null,
+      "evidence": "Password passed as caller (ptr, len) at 0x10060340/0x10060c80; no transformation inside shelper.dll; caller not traced",
+      "classification": "UNKNOWN"
+    },
+    "password_pipeline": {
+      "source": "Caller stack: 0xc(%ebp) = len, 0x10(%ebp) = ptr (at 0x10060340)",
+      "transformation_in_shelper": "None",
+      "null_terminator": false,
+      "normalization": "None",
+      "case_conversion": "None",
+      "trimming": "None",
+      "encoding": "UNKNOWN"
+    },
+    "possible_encodings": ["UTF-8", "UTF-16LE", "UTF-16BE", "ANSI/code page"],
+    "rust_comparison": {
+      "rust_identity": "encode_identity() produces UTF-16BE (wire format); if hash input is internal UTF-16LE, this differs",
+      "rust_password": "password.as_bytes() = UTF-8",
+      "classification": "INFERRED_MISMATCH (password); PARTIAL (identity — needs wire vs hash disambiguation)",
+      "notes": "Phase 10.5 corrected identity to UTF-16LE for hash; but encode_identity() actually produces UTF-16BE. If binary hashes internal UTF-16LE buffer, there is a mismatch. If binary hashes wire-format UTF-16BE, there is no mismatch. This needs direct verification."
+    },
+    "required_experiment": "Dynamic: breakpoint on 0x10060340, inspect identity buffer bytes for known test string (e.g., 'A' → UTF-16LE=41 00, UTF-16BE=00 41)"
+  },
+  "srp_context_fields": [
+    {
+      "offset": "0x08",
+      "type": "{ptr, len} struct",
+      "semantic_meaning": "Identity buffer",
+      "client_init": "Identity (UTF-16LE)",
+      "server_init": "Identity (UTF-16LE)",
+      "classification": "CONFIRMED"
+    },
+    {
+      "offset": "0x0c",
+      "type": "BIGNUM",
+      "semantic_meaning": "N (prime modulus)",
+      "classification": "CONFIRMED"
+    },
+    {
+      "offset": "0x10",
+      "type": "BIGNUM",
+      "semantic_meaning": "g (generator)",
+      "classification": "CONFIRMED"
+    },
+    {
+      "offset": "0x14",
+      "type": "{ptr, len} struct",
+      "semantic_meaning": "Salt buffer",
+      "classification": "CONFIRMED"
+    },
+    {
+      "offset": "0x18",
+      "type": "BIGNUM",
+      "semantic_meaning": "v = g^x mod N (verifier)",
+      "classification": "CONFIRMED"
+    },
+    {
+      "offset": "0x1c",
+      "type": "BIGNUM",
+      "semantic_meaning": "x (password-derived private key)",
+      "classification": "CONFIRMED"
+    },
+    {
+      "offset": "0x20",
+      "type": "BIGNUM*",
+      "semantic_meaning_client": "A = g^a mod N (client public ephemeral)",
+      "semantic_meaning_server": "B = g^b mod N (server public ephemeral)",
+      "evidence_client": "FUN_10060410: mov %eax,0x20(%esi) after mod_exp call 0x1005f940",
+      "evidence_server": "FUN_10060d80: mov %eax,0x20(%esi) after BN_new + mod_exp 0x1005f940",
+      "classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "offset": "0x24",
+      "type": "BIGNUM",
+      "semantic_meaning": "Random exponent (a on client, b on server)",
+      "classification": "PARTIAL"
+    },
+    {
+      "offset": "0x28",
+      "type": "BIGNUM*",
+      "semantic_meaning": "u (scrambling parameter) = SHA-1(A||B)",
+      "classification": "CONFIRMED"
+    },
+    {
+      "offset": "0x2c",
+      "type": "BIGNUM*",
+      "semantic_meaning": null,
+      "classification": "UNKNOWN"
+    },
+    {
+      "offset": "0x30",
+      "type": "BIGNUM*",
+      "semantic_meaning": null,
+      "classification": "UNKNOWN"
+    },
+    {
+      "offset": "0x34",
+      "type": "BIGNUM*",
+      "semantic_meaning": null,
+      "classification": "UNKNOWN"
+    },
+    {
+      "offset": "0x38",
+      "type": "BIGNUM*",
+      "semantic_meaning": "Auxiliary buffer (M1 accumulator at +0x60 offset)",
+      "classification": "PARTIAL"
+    }
+  ],
+  "srp_proofs": {
+    "m1": {
+      "formula": "SHA-1(H(N) XOR H(g) || H(I) || salt || A || B || K)",
+      "status": "PARTIALLY_CONFIRMED",
+      "evidence": "M1 accumulator at context+0x38+0x60; incremental SHA-1 updates confirmed in FUN_10060fa0",
+      "rust_comparison": "Rust compute_srp_m1() matches structure; instruction-level verification not performed",
+      "classification": "PARTIAL_MATCH"
+    },
+    "m2": {
+      "formula": "SHA-1(A || M1 || K)",
+      "status": "PARTIALLY_CONFIRMED",
+      "evidence": "References at 0x100609a0/0x10061450 area",
+      "rust_comparison": "Rust compute_srp_m2() matches structure; instruction-level verification not performed",
+      "classification": "PARTIAL_MATCH"
+    },
+    "kdf": {
+      "formula": "SHA-1(S||BE32(0)) || SHA-1(S||BE32(1)) = 40 bytes",
+      "status": "CONFIRMED",
+      "evidence": "Binary FUN_10061790 (structure); Rust compute_srp_kdf() matches; independent Python verification",
+      "classification": "MATCH"
+    }
+  },
+  "rsa_key_provenance": {
+    "key_size": "2048-bit (256 bytes)",
+    "padding": "PKCS#1 v1.5",
+    "plaintext_size": 76,
+    "plaintext_format": "3x u32 LE (client params) + 64-byte key material",
+    "server_token_size": 4,
+    "public_exponent": "0x010001 (65537)",
+    "usage": "RSession key establishment: client encrypts key material to server",
+    "public_key_source": null,
+    "private_key_source": null,
+    "key_rotation": null,
+    "classification": "UNKNOWN",
+    "notes": "No RSA key blob located in .rdata during this phase. Rust uses Rsa::generate(2048) for tests, which produces a valid but different key from the official binary."
+  },
+  "wire_format": {
+    "version_field": {
+      "value": 3,
+      "encoding": "little-endian",
+      "bytes": "03 00 00 00",
+      "evidence": "PCAP examination (5 occurrences)",
+      "classification": "CONFIRMED"
+    },
+    "frame_length_prefix": {
+      "encoding": "big-endian uint32",
+      "evidence": "AGENTS.md, PCAP",
+      "classification": "CONFIRMED"
+    },
+    "tlv_headers": {
+      "encoding": "big-endian (tag | length)",
+      "evidence": "Rust to_be_bytes(); framing spec",
+      "classification": "PARTIAL"
+    },
+    "srp_bignums": {
+      "encoding": "big-endian",
+      "evidence": "Binary FUN_1005fad0 (BN_bn2bin-style), FUN_1005f710",
+      "classification": "CONFIRMED"
+    },
+    "srp_step_values": {
+      "encoding": null,
+      "evidence": "No PCAP evidence of SRP step values",
+      "classification": "UNKNOWN",
+      "notes": "Rust uses to_le_bytes() for steps; unverified against wire."
+    }
+  },
+  "confirmed_findings": [
+    {
+      "id": "F1",
+      "finding": "k = SHA-1(N||PAD192(g)) = 7b12a483fe77c3ed56e5a4dd8e7acc4fe7ec1233",
+      "evidence": "Independent Python + Rust srp_k() + binary FUN_10060810/FUN_10060ec0",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "F2",
+      "finding": "x = SHA-1(salt||SHA-1(identity||':'||password))",
+      "evidence": "Binary 0x10060340/0x10060c80 disassembly",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "F3",
+      "finding": "context+0x20 = A (client) / B (server)",
+      "evidence": "Binary FUN_10060410/FUN_10060d80 disassembly",
+      "classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "id": "F4",
+      "finding": "u = SHA-1(PAD192(A)||PAD192(B)) symmetric",
+      "evidence": "Binary FUN_10060510/FUN_10060fa0 disassembly",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "F5",
+      "finding": "SetKeyPair (0x1006a630) installs both keys with separate pointers, both len==0x20",
+      "evidence": "objdump disassembly",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "F6",
+      "finding": "GetKey (0x1006ba80) returns 64 bytes verbatim",
+      "evidence": "objdump disassembly",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "F7",
+      "finding": "Password passed raw from caller, no transform in shelper.dll",
+      "evidence": "Binary 0x10060340 disassembly",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "F8",
+      "finding": "Version 3 = 03 00 00 00 (little-endian) in PCAP",
+      "evidence": "PCAP examination",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "F9",
+      "finding": "N/g match between binary and Rust",
+      "evidence": "Independent extraction + source comparison",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "F10",
+      "finding": "S_client == S_server (mathematical consistency)",
+      "evidence": "Independent Python",
+      "classification": "CONFIRMED"
+    }
+  ],
+  "unresolved_findings": [
+    {
+      "id": "U1",
+      "finding": "AES split: which half of 64-byte secret maps to enc vs dec",
+      "impact": "Critical — one direction fails if wrong",
+      "evidence_needed": "Dynamic execution or consumer call-site tracing",
+      "classification": "UNKNOWN"
+    },
+    {
+      "id": "U2",
+      "finding": "Password encoding (UTF-8 vs UTF-16LE)",
+      "impact": "Critical — x, v, A, S, K all differ",
+      "evidence_needed": "Caller tracing of 0x10060340/0x10060c80 in consumer binary",
+      "classification": "UNKNOWN"
+    },
+    {
+      "id": "U3",
+      "finding": "Identity hash encoding (UTF-16LE vs UTF-16BE)",
+      "impact": "Critical — x differs if wrong",
+      "evidence_needed": "Compare known identity hash input bytes",
+      "classification": "UNKNOWN (potentially conflated in Phase 10.5)"
+    },
+    {
+      "id": "U4",
+      "finding": "GetKey consumer call site",
+      "impact": "High — needed for U1",
+      "evidence_needed": "Disp8 indirect call sweep or dynamic tracing",
+      "classification": "UNKNOWN"
+    },
+    {
+      "id": "U5",
+      "finding": "RSA key blobs (public/private)",
+      "impact": "High — RSession cannot be implemented without keys",
+      "evidence_needed": "Search .rdata for key material or dynamic tracing",
+      "classification": "UNKNOWN"
+    },
+    {
+      "id": "U6",
+      "finding": "M1/M2 exact formulas (instruction-level)",
+      "impact": "Medium — proof verification",
+      "evidence_needed": "Disassemble 0x100612f0/0x100609a0",
+      "classification": "PARTIALLY_CONFIRMED"
+    },
+    {
+      "id": "U7",
+      "finding": "SRP step endianness",
+      "impact": "Medium — step validation",
+      "evidence_needed": "PCAP with full SRP handshake",
+      "classification": "UNKNOWN"
+    }
+  ],
+  "evidence_references": [
+    {
+      "id": "E1",
+      "evidence": "shelper.dll SHA-256 d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+      "source": "sha256sum",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "E2",
+      "evidence": "0x1006a630 SetKeyPair: cmp $0x20,%eax; call *0x18(%eax); call *0x1c(%eax)",
+      "source": "objdump disassembly",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "E3",
+      "evidence": "0x10060340: mov 0x8(%esi),%eax (identity); mov 0x10(%ebp),%edx (password from caller)",
+      "source": "objdump disassembly",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "E4",
+      "evidence": "FUN_10060410: mov %eax,0x20(%esi) after call 0x1005f940 (mod_exp)",
+      "source": "objdump disassembly",
+      "classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "id": "E5",
+      "evidence": "FUN_10060fa0: M1 accumulator at context+0x38+0x60",
+      "source": "objdump disassembly",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "E6",
+      "evidence": "k = 7b12a483fe77c3ed56e5a4dd8e7acc4fe7ec1233 (independent Python)",
+      "source": "Python computation",
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "E7",
+      "evidence": "Version 03 00 00 00 (little-endian, 5 PCAP occurrences)",
+      "source": "PCAP examination",
+      "classification": "CONFIRMED"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "description": "context+0x20 = A on client / B on server",
+      "basis": "FUN_10060410/FUN_10060d80 disassembly: both write context+0x20 after mod_exp call",
+      "confidence": "STRONGLY_SUPPORTED",
+      "impact_if_wrong": "u computation differs → S differs → handshake failure"
+    },
+    {
+      "id": "ASM-002",
+      "description": "Password is UTF-16LE (same source as identity)",
+      "basis": "Identity is UTF-16LE; RvROLClient.dll has MultiByteToWideChar imports",
+      "confidence": "LOW",
+      "impact_if_wrong": "x differs → complete handshake failure"
+    },
+    {
+      "id": "ASM-003",
+      "description": "Two halves of 64-byte secret are used for enc and dec respectively",
+      "basis": "SetKeyPair takes two separate pointers; unlikely to pass same pointer twice",
+      "confidence": "MEDIUM",
+      "impact_if_wrong": "If same key used for both directions, one direction will fail decryption"
+    },
+    {
+      "id": "ASM-004",
+      "description": "k = SHA-1(N||PAD192(g)) is the active multiplier",
+      "basis": "FUN_10060810/FUN_10060ec0 referenced from SRP-6a descriptors; FUN_100607d0 (k=3) is dead code",
+      "confidence": "HIGH",
+      "impact_if_wrong": "Different k → different S → handshake failure"
+    },
+    {
+      "id": "ASM-005",
+      "description": "Identity hash input is UTF-16LE (internal form, not UTF-16BE wire form)",
+      "basis": "Wire byte-swap analysis: stored as UTF-16LE, swapped to UTF-16BE for wire",
+      "confidence": "MEDIUM",
+      "impact_if_wrong": "If hash input is actually UTF-16BE, Rust encode_identity() matches and no mismatch exists"
+    }
+  ]
+}

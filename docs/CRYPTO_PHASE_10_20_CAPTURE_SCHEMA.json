@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "description": "JSON schema for Phase 10.20 dynamic analysis captures",
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.20"
+  },
+  "environment": {
+    "vm_name": "win10",
+    "hypervisor": "KVM/virt-manager",
+    "debugger": "x64dbg or WinDbg",
+    "binaries": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177"
+      }
+    }
+  },
+  "capture_types": {
+    "password_capture": {
+      "description": "Password and identity bytes at SRP x computation",
+      "id_format": "PW-XXX",
+      "required_fields": [
+        "capture_id",
+        "timestamp",
+        "binary",
+        "binary_sha256",
+        "breakpoint",
+        "thread_id",
+        "call_stack",
+        "password_ptr",
+        "password_len",
+        "password_hex",
+        "identity_ptr",
+        "identity_len",
+        "identity_hex",
+        "test_password",
+        "test_username",
+        "interpretation",
+        "confidence"
+      ],
+      "example": {
+        "capture_id": "PW-001",
+        "timestamp": "2026-11-08T12:00:00Z",
+        "binary": "shelper.dll",
+        "binary_sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "breakpoint": "0x10060340",
+        "thread_id": 1234,
+        "call_stack": ["shelper.10060340", "shelper.10060a10", "RvROLClient.10041010"],
+        "password_ptr": "0x0000000100ABCDEF",
+        "password_len": 2,
+        "password_hex": "7000",
+        "identity_ptr": "0x0000000100ABC123",
+        "identity_len": 2,
+        "identity_hex": "4100",
+        "test_password": "p",
+        "test_username": "A",
+        "interpretation": "UTF-16LE (bytes 70 00, len 2)",
+        "confidence": "CONFIRMED (if T2 also matches)"
+      }
+    },
+    "m2_capture": {
+      "description": "M2 SHA-1 accumulator state and inputs",
+      "id_format": "M2-XXX",
+      "required_fields": [
+        "capture_id",
+        "timestamp",
+        "binary",
+        "breakpoint",
+        "thread_id",
+        "sha1_contexts",
+        "bignum_buffer",
+        "sha1_updates",
+        "final_digest",
+        "interpretation",
+        "confidence"
+      ],
+      "sha1_contexts": {
+        "primary": "hex dump of context+0x38 (0x60 bytes)",
+        "m1_accumulator": "hex dump of context+0x38+0x60 (0x60 bytes)",
+        "k_context": "hex dump of context+0x38+0xc0 (0x60 bytes)",
+        "m2_accumulator": "hex dump of context+0x38+0x120 (0x60 bytes)"
+      },
+      "bignum_buffer": {
+        "address": "hex string",
+        "capacity": "integer (should be 20)",
+        "length": "integer (should be 20)",
+        "data_hex": "hex string (20 bytes)",
+        "leading_zeros": "count of leading 0x00 bytes"
+      },
+      "sha1_updates": [
+        {
+          "order": 1,
+          "operation": "SHA1_Update",
+          "context": "M2 accumulator",
+          "data_hex": "hex string",
+          "length": "integer"
+        }
+      ]
+    },
+    "rsa_capture": {
+      "description": "RSA key components at constructor entry",
+      "id_format": "RSA-XXX",
+      "required_fields": [
+        "capture_id",
+        "timestamp",
+        "binary",
+        "breakpoint",
+        "thread_id",
+        "call_stack",
+        "components",
+        "component_origins",
+        "interpretation",
+        "confidence"
+      ],
+      "components": {
+        "n_ptr": "hex string",
+        "n_len": "integer",
+        "n_hex": "hex string (modulus bytes)",
+        "e_ptr": "hex string",
+        "e_len": "integer",
+        "e_hex": "hex string (exponent bytes)"
+      },
+      "component_origins": {
+        "n_location": "static | heap | network | file",
+        "e_location": "static | heap | network | file"
+      }
+    }
+  },
+  "capture_index": {
+    "description": "Master index of all captures in a session",
+    "fields": [
+      "capture_id",
+      "file",
+      "type",
+      "timestamp",
+      "blocker_addressed",
+      "confidence"
+    ]
+  },
+  "validation_rules": {
+    "password_encoding": {
+      "UTF-8": "Length matches UTF-8 byte count; bytes match UTF-8 sequence",
+      "UTF-16LE": "Length is 2x char count; bytes have 00 as high byte (LE)",
+      "UTF-16BE": "Length is 2x char count; bytes have 00 as low byte (BE)",
+      "ANSI": "Length matches ANSI byte count; bytes match Cp1252"
+    },
+    "m2_serialization": {
+      "raw_digest": "BIGNUM length = 20; all bytes present including leading zeros",
+      "stripped": "BIGNUM length < 20; leading zeros removed",
+      "padded": "BIGNUM length > 20; extra zero padding added"
+    }
+  }
+}

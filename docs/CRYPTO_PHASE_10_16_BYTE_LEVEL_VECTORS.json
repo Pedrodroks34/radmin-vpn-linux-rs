@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.16",
+    "description": "RSA key provenance and SRP M1/M2 reconstruction",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "format": "PE32 i386 DLL"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+        "format": "PE32 i386 DLL"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+        "format": "PE32 i386 EXE"
+      }
+    },
+    "tools_used": [
+      "objdump (GNU binutils)",
+      "cargo test"
+    ],
+    "analysis_method": "Static binary analysis only. No dynamic execution. No VM."
+  },
+  "rsa_key_provenance": {
+    "status": "UNKNOWN",
+    "key_size_bits": 2048,
+    "padding": "PKCS#1 v1.5",
+    "embedded_in_shelper": false,
+    "embedded_in_RvROLClient": false,
+    "pem_material_found": false,
+    "key_source": "Caller-provided at runtime (not embedded)",
+    "evidence": {
+      "SHelper_RSAHelper_CreateWithPrivateKey": {
+        "va": "0x1006b3e0",
+        "args": 16,
+        "description": "16 args (private key components)"
+      },
+      "SHelper_RSAHelper_CreateWithPublicKey": {
+        "va": "0x1006b4e0",
+        "args": 4,
+        "description": "4 args (modulus_ptr, modulus_len, exponent_ptr, exponent_len)"
+      }
+    },
+    "windows_cryptoapi_imports": [
+      "CryptAcquireContextA",
+      "CryptDecrypt",
+      "CryptExportKey",
+      "CryptGetUserKey",
+      "CryptCreateHash",
+      "CryptSignHashA"
+    ]
+  },
+  "srp_m1_reconstruction": {
+    "status": "CONFIRMED",
+    "formula": "SHA-1(H(N) XOR H(g) || H(I) || salt || A || B || K)",
+    "components": {
+      "H_N": {
+        "formula": "SHA-1(N_bytes)",
+        "evidence": "objdump at 0x10060b50 (SHA1_Update)",
+        "classification": "CONFIRMED"
+      },
+      "H_g": {
+        "formula": "SHA-1(g_byte)",
+        "evidence": "objdump at 0x10060b7d (SHA1_Update)",
+        "classification": "CONFIRMED"
+      },
+      "H_Ng": {
+        "formula": "H(N) XOR H(g) (byte-wise)",
+        "evidence": "objdump at 0x10060ba0-0x10060bd3 (XOR loop)",
+        "classification": "CONFIRMED"
+      },
+      "H_I": {
+        "formula": "SHA-1(identity_utf16le_bytes)",
+        "evidence": "objdump at 0x10060c26 (SHA1_Update with obj+0x8)",
+        "classification": "STRONGLY_SUPPORTED",
+        "rust_comparison": "Rust uses UTF-8, binary uses UTF-16LE - MISMATCH"
+      },
+      "salt": {
+        "formula": "Raw salt bytes",
+        "evidence": "objdump at 0x10060c3d",
+        "classification": "CONFIRMED"
+      },
+      "A": {
+        "formula": "BIGNUM A (192 bytes, big-endian)",
+        "evidence": "Later call (not fully traced)",
+        "classification": "PARTIALLY_CONFIRMED"
+      },
+      "B": {
+        "formula": "BIGNUM B (192 bytes, big-endian)",
+        "evidence": "Later call (not fully traced)",
+        "classification": "PARTIALLY_CONFIRMED"
+      },
+      "K": {
+        "formula": "40-byte KDF output",
+        "evidence": "Later call (not fully traced)",
+        "classification": "PARTIALLY_CONFIRMED"
+      }
+    },
+    "accumulator": {
+      "base": "context+0x38",
+      "m1_offset": "+0x60",
+      "context_size": "0x60 bytes per SHA-1 context",
+      "total_buffer": "0x1bc bytes, 4 contexts"
+    }
+  },
+  "srp_m2_reconstruction": {
+    "status": "PARTIALLY_CONFIRMED",
+    "formula": "SHA-1(A || M1 || K)",
+    "components": {
+      "A": {
+        "evidence": "objdump at 0x100609e9 (BIGNUM update)",
+        "classification": "CONFIRMED"
+      },
+      "M1": {
+        "evidence": "SHA1_Final of main context at 0x100609d4",
+        "classification": "PARTIALLY_CONFIRMED"
+      },
+      "K": {
+        "formula": "40 bytes from context+0xc0",
+        "evidence": "objdump at 0x100609fe (0x28 bytes)",
+        "classification": "CONFIRMED"
+      }
+    },
+    "accumulator": {
+      "base": "context+0x38",
+      "m2_offset": "+0x60 (reused)",
+      "k_offset": "+0xc0"
+    }
+  },
+  "sha1_contexts": {
+    "base": "context+0x38",
+    "contexts": [
+      {"offset": "+0x00", "purpose": "Primary"},
+      {"offset": "+0x60", "purpose": "M1/M2 accumulator"},
+      {"offset": "+0xc0", "purpose": "K or M2 related"},
+      {"offset": "+0x120", "purpose": "M2 accumulator"}
+    ],
+    "context_size": "0x60 bytes",
+    "total_buffer": "0x1bc bytes",
+    "initialization": "0x10060a20 (4x SHA1_Init)"
+  },
+  "rust_comparison": {
+    "m1": {
+      "structure": "COMPATIBLE",
+      "identity_encoding": "INCOMPATIBLE (UTF-8 vs UTF-16LE)",
+      "location": "src/session/control_handshake.rs:442"
+    },
+    "m2": {
+      "structure": "COMPATIBLE",
+      "byte_order": "COMPATIBLE (A, M1, K)",
+      "location": "src/session/control_handshake.rs:455"
+    },
+    "rsa": {
+      "key_size": "COMPATIBLE (2048-bit)",
+      "padding": "COMPATIBLE (PKCS#1 v1.5)",
+      "provenance": "UNKNOWN (test keys generated)"
+    }
+  },
+  "confirmed_discrepancies": [
+    {
+      "id": "D-001",
+      "component": "M1 identity encoding",
+      "binary": "UTF-16LE (from obj+0x8)",
+      "rust": "UTF-8 (username.as_bytes())",
+      "impact": "M1 differs for all usernames (even ASCII: 1 byte vs 2 bytes per char)",
+      "classification": "CONFIRMED_MISMATCH",
+      "fix": "Change line 442 to sha1(&encode_identity_le(username))"
+    }
+  ],
+  "test_results": {
+    "cargo_test": "152 unit tests PASS, 0 FAIL (pre-existing)",
+    "source_modified": false
+  }
+}

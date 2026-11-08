@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.19",
+    "description": "M2 BIGNUM serialization and RSA IAT audit",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e"
+      }
+    },
+    "tools_used": [
+      "objdump (GNU binutils)",
+      "cargo test"
+    ],
+    "analysis_method": "Static binary analysis only. No dynamic execution."
+  },
+  "m2_bignum_analysis": {
+    "status": "CONFIRMED",
+    "conversion_function": "shelper.dll!0x1005f620",
+    "conversion_type": "BIGNUM buffer resize (NOT integer conversion)",
+    "leading_zero_stripping": false,
+    "digest_preservation": "All 20 bytes preserved as raw input to SHA1_Update",
+    "evidence": {
+      "resize_function": "Checks capacity >= 20, reallocates if needed. No integer interpretation.",
+      "sha1_final": "Writes 20 bytes directly to BIGNUM data buffer at 0x100609d4",
+      "sha1_update": "Hashes BIGNUM bytes (length 20) at 0x100609e9"
+    },
+    "synthetic_vectors": [
+      {
+        "id": "M2-LZ-001",
+        "type": "synthetic",
+        "description": "Digest with no leading zero",
+        "digest_hex": "abcd1234ef5678901234567890abcdef12345678",
+        "raw_bytes_hashed": "abcd1234ef5678901234567890abcdef12345678",
+        "bignum_bytes": "abcd1234ef5678901234567890abcdef12345678",
+        "leading_zeros_stripped": false,
+        "classification": "CONFIRMED (based on resize function analysis)"
+      },
+      {
+        "id": "M2-LZ-002",
+        "type": "synthetic",
+        "description": "Digest with one leading zero",
+        "digest_hex": "00abcd1234ef5678901234567890abcdef123456",
+        "raw_bytes_hashed": "00abcd1234ef5678901234567890abcdef123456",
+        "bignum_bytes": "00abcd1234ef5678901234567890abcdef123456 (length preserved as 20)",
+        "leading_zeros_stripped": false,
+        "classification": "CONFIRMED"
+      },
+      {
+        "id": "M2-LZ-003",
+        "type": "synthetic",
+        "description": "Digest with multiple leading zeros",
+        "digest_hex": "000000abcd1234ef5678901234567890abcdef12",
+        "raw_bytes_hashed": "000000abcd1234ef5678901234567890abcdef12",
+        "bignum_bytes": "000000abcd1234ef5678901234567890abcdef12 (length preserved as 20)",
+        "leading_zeros_stripped": false,
+        "classification": "CONFIRMED"
+      },
+      {
+        "id": "M2-LZ-004",
+        "type": "synthetic",
+        "description": "All-zero digest",
+        "digest_hex": "0000000000000000000000000000000000000000",
+        "raw_bytes_hashed": "0000000000000000000000000000000000000000",
+        "bignum_bytes": "0000000000000000000000000000000000000000 (length 20, not 0)",
+        "leading_zeros_stripped": false,
+        "classification": "CONFIRMED"
+      }
+    ],
+    "rust_comparison": {
+      "rust_m1_serialization": "Raw 20 bytes [u8; 20]",
+      "binary_m1_serialization": "Raw 20 bytes in BIGNUM buffer",
+      "match": true,
+      "classification": "COMPATIBLE"
+    }
+  },
+  "m2_accumulator": {
+    "contexts": [
+      {"offset": "+0x00", "purpose": "Primary"},
+      {"offset": "+0x60", "purpose": "M1/M2 accumulator"},
+      {"offset": "+0xc0", "purpose": "K context"},
+      {"offset": "+0x120", "purpose": "M2 verification"}
+    ],
+    "context_size": "0x60 bytes",
+    "total_buffer": "0x1bc bytes",
+    "initialization": "0x10060a20"
+  },
+  "m2_formula": {
+    "status": "PARTIALLY_CONFIRMED",
+    "binary_sequence": [
+      "SHA1_Final(primary_ctx) -> D (20 bytes)",
+      "SHA1_Update(M2_ctx, D_bytes)",
+      "SHA1_Update(M2_ctx, K, 40)"
+    ],
+    "rust_formula": "SHA-1(A || M1 || K)",
+    "classification": "PARTIALLY_CONFIRMED (BIGNUM step structure unclear)",
+    "notes": "If primary_ctx accumulated A||M1, then binary = SHA-1(H(A||M1) || K), which differs from Rust. If primary_ctx is M1 only, then CANNOT be SHA-1(A||M1||K). Exact contents of primary_ctx at M2 time not fully traced."
+  },
+  "rsa_iat_analysis": {
+    "common_iat_slot": "0x10175158",
+    "call_count": 4705,
+    "dispatch_mechanism": "GetProcAddress + function pointer in IAT",
+    "call_sites_identified": false,
+    "reason": "4705 call sites to same slot; function varies by context. Specific RSA call not isolated.",
+    "rsa_constructors": {
+      "public": {
+        "function": "SHelper_RSAHelper_CreateWithPublicKey",
+        "va": "0x1006b4e0",
+        "args": ["n_ptr", "n_len", "e_ptr", "e_len"],
+        "classification": "CONFIRMED"
+      },
+      "private": {
+        "function": "SHelper_RSAHelper_CreateWithPrivateKey",
+        "va": "0x1006b3e0",
+        "args": 16,
+        "classification": "CONFIRMED"
+      }
+    },
+    "component_provenance": {
+      "modulus": "Caller-provided (source UNKNOWN)",
+      "exponent": "Caller-provided (source UNKNOWN)",
+      "private_components": "Caller-provided (source UNKNOWN)"
+    }
+  },
+  "test_results": {
+    "cargo_test": "157 unit tests PASS, 0 FAIL (pre-existing)",
+    "source_modified": false
+  }
+}

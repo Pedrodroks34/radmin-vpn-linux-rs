@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.3-10.5",
+    "description": "Consolidated cryptographic lifecycle reconstruction, protocol analysis, and compatibility remediation",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "format": "PE32 i386 DLL",
+        "image_base": "0x10000000",
+        "role": "Crypto library (SRP, AES, RSA, MD5)"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+        "format": "PE32 i386 DLL",
+        "role": "ROL client library"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+        "format": "PE32 i386 EXE",
+        "role": "Control service (suspected RSession consumer)"
+      }
+    },
+    "tools_used": [
+      "Ghidra 12.2 (analyzeHeadless)",
+      "objdump (GNU binutils)",
+      "python3 (independent computation)"
+    ],
+    "analysis_method": "Static binary analysis only. No dynamic execution."
+  },
+  "binary_hashes": {
+    "shelper.dll": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+    "RvROLClient.dll": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+    "RvControlSvc.exe": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e"
+  },
+  "function_addresses": [
+    {"va": "0x10060810", "rva": "0x60810", "binary": "shelper.dll", "role": "client k = SHA-1(N||PAD192(g))", "confidence": "CONFIRMED"},
+    {"va": "0x10060ec0", "rva": "0x60ec0", "binary": "shelper.dll", "role": "server k", "confidence": "CONFIRMED"},
+    {"va": "0x100607d0", "rva": "0x607d0", "binary": "shelper.dll", "role": "legacy k=3 (dead code)", "confidence": "CONFIRMED"},
+    {"va": "0x10060340", "rva": "0x60340", "binary": "shelper.dll", "role": "client x computation", "confidence": "CONFIRMED"},
+    {"va": "0x10060c80", "rva": "0x60c80", "binary": "shelper.dll", "role": "server x computation", "confidence": "CONFIRMED"},
+    {"va": "0x10060410", "rva": "0x60410", "binary": "shelper.dll", "role": "client A = g^a into context+0x20", "confidence": "STRONGLY_SUPPORTED"},
+    {"va": "0x10060d80", "rva": "0x60d80", "binary": "shelper.dll", "role": "server B = g^b into context+0x20", "confidence": "STRONGLY_SUPPORTED"},
+    {"va": "0x10060510", "rva": "0x60510", "binary": "shelper.dll", "role": "client u/S", "confidence": "CONFIRMED"},
+    {"va": "0x10060fa0", "rva": "0x60fa0", "binary": "shelper.dll", "role": "server u/S", "confidence": "CONFIRMED"},
+    {"va": "0x100612f0", "rva": "0x612f0", "binary": "shelper.dll", "role": "M1 accumulator finalization", "confidence": "PARTIAL"},
+    {"va": "0x100609a0", "rva": "0x609a0", "binary": "shelper.dll", "role": "M2 generation", "confidence": "PARTIAL"},
+    {"va": "0x1006ba80", "rva": "0x6ba80", "binary": "shelper.dll", "role": "SHelper_RSession_GetKey (64 bytes)", "confidence": "CONFIRMED"},
+    {"va": "0x1006a630", "rva": "0x6a630", "binary": "shelper.dll", "role": "SetKeyPair (two 32-byte pointers)", "confidence": "CONFIRMED"},
+    {"va": "0x1006aa10", "rva": "0x6aa10", "binary": "shelper.dll", "role": "encryption setup path", "confidence": "PARTIAL"},
+    {"va": "0x1006a930", "rva": "0x6a930", "binary": "shelper.dll", "role": "decryption setup path", "confidence": "PARTIAL"},
+    {"va": "0x1003fbd0", "rva": "0x3fbd0", "binary": "RvROLClient.dll", "role": "GetProcAddress resolver", "confidence": "CONFIRMED"},
+    {"va": "0x100092e0", "rva": "0x92e0", "binary": "shelper.dll", "role": "unresolved jump table dispatcher", "confidence": "UNKNOWN"}
+  ],
+  "cryptographic_formulas": {
+    "k": {"formula": "SHA-1(N || PAD192(g))", "value_hex": "7b12a483fe77c3ed56e5a4dd8e7acc4fe7ec1233", "classification": "CONFIRMED"},
+    "x": {"formula": "SHA-1(salt || SHA-1(identity || ':' || password))", "classification": "CONFIRMED"},
+    "v": {"formula": "g^x mod N", "classification": "CONFIRMED"},
+    "A": {"formula": "g^a mod N", "classification": "STRONGLY_SUPPORTED"},
+    "B": {"formula": "(k*v + g^b) mod N", "classification": "STRONGLY_SUPPORTED"},
+    "u": {"formula": "SHA-1(PAD192(A) || PAD192(B))", "classification": "CONFIRMED"},
+    "S_client": {"formula": "(B - k*v)^(a + u*x) mod N", "classification": "CONFIRMED"},
+    "S_server": {"formula": "(A * v^u)^b mod N", "classification": "CONFIRMED"},
+    "K": {"formula": "SHA-1(S||BE32(0)) || SHA-1(S||BE32(1))", "length_bytes": 40, "classification": "CONFIRMED"},
+    "M1": {"formula": "SHA-1(H(N) XOR H(g) || H(I) || salt || A || B || K)", "classification": "PARTIAL"},
+    "M2": {"formula": "SHA-1(A || M1 || K)", "classification": "PARTIAL"}
+  },
+  "encoding_details": {
+    "identity_wire": {"encoding": "UTF-16BE", "classification": "CONFIRMED"},
+    "identity_internal_obj_0x8": {"encoding": "UTF-16LE", "classification": "STRONGLY_SUPPORTED"},
+    "identity_hash_input": {"encoding": "raw obj+0x8 buffer (LE vs BE unresolved)", "classification": "UNKNOWN"},
+    "password_hash_input": {"encoding": null, "classification": "UNKNOWN"},
+    "separator": {"byte": "0x3a", "length": 1, "classification": "CONFIRMED"}
+  },
+  "aes": {
+    "mode": "AES-256-CBC",
+    "secret_size_bytes": 64,
+    "secret_transform": "none (verbatim via GetKey)",
+    "enc_key_size_bytes": 32,
+    "dec_key_size_bytes": 32,
+    "split_mapping": "UNKNOWN",
+    "padding": "0xCC",
+    "trailer": "9-byte folded MD5",
+    "iv": "persistent per direction, zero-initialized",
+    "classification": "CONFIRMED (except split mapping)"
+  },
+  "rsa": {
+    "size_bits": 2048,
+    "padding": "PKCS#1 v1.5",
+    "plaintext_bytes": 76,
+    "server_token_bytes": 4,
+    "public_exponent": 65537,
+    "provenance": "UNKNOWN"
+  },
+  "compatibility": {
+    "srp_group": "COMPATIBLE",
+    "srp_k": "COMPATIBLE",
+    "srp_x": "POTENTIAL_MISMATCH",
+    "identity_wire": "COMPATIBLE",
+    "identity_hash": "POTENTIAL_MISMATCH",
+    "password_encoding": "UNKNOWN",
+    "srp_u": "COMPATIBLE",
+    "srp_s": "COMPATIBLE",
+    "session_k": "COMPATIBLE",
+    "m1_m2": "PARTIAL",
+    "aes_key_split": "INCOMPATIBLE",
+    "aes_mode": "COMPATIBLE",
+    "rsa_params": "COMPATIBLE",
+    "rsa_provenance": "UNKNOWN",
+    "protocol_serialization": "PARTIAL"
+  },
+  "test_results": {
+    "cargo_test": "147 unit + 5 integration tests passed",
+    "source_modified_this_phase": false
+  },
+  "unresolved_questions": [
+    {"id": "OQ-1", "question": "AES split mapping (which half -> enc/dec)", "priority": "P0"},
+    {"id": "OQ-2", "question": "Password encoding in x hash", "priority": "P0"},
+    {"id": "OQ-3", "question": "Identity hash bytes UTF-16LE vs UTF-16BE", "priority": "P0"},
+    {"id": "OQ-4", "question": "context+0x20 runtime proof", "priority": "P1"},
+    {"id": "OQ-5", "question": "M1/M2 exact instruction-level construction", "priority": "P1"},
+    {"id": "OQ-6", "question": "RSA key provenance/blobs", "priority": "P1"},
+    {"id": "OQ-7", "question": "SRP step-value endianness on the wire", "priority": "P2"},
+    {"id": "OQ-8", "question": "Fields +0x24/+0x2c/+0x30/+0x34 and FUN_100092e0 jump table", "priority": "P2"}
+  ],
+  "readiness": "NOT READY"
+}

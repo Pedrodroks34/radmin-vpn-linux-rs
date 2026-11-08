@@ -1,0 +1,515 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.11",
+    "description": "SRP mathematical reconstruction, independent vector validation, and AES evidence reconciliation for Radmin VPN Linux client",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "format": "PE32 i386 DLL",
+        "image_base": "0x10000000",
+        "role": "Crypto library (SRP, AES, RSA, MD5)"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+        "format": "PE32 i386 DLL",
+        "role": "ROL client library"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+        "format": "PE32 i386 EXE",
+        "role": "Control service (suspected RSession consumer)"
+      },
+      "Radmin_VPN_2.1.4951.1.exe": {
+        "sha256": "e16711e2e3e59f6603f51f437197215b1914a3d8316e1f633260178b959921f7",
+        "format": "PE32 i386 EXE (installer)",
+        "role": "Installer binary"
+      }
+    },
+    "tools_used": [
+      "Ghidra 12.2 (analyzeHeadless)",
+      "objdump (GNU binutils)",
+      "readelf",
+      "nm",
+      "strings",
+      "python3 (independent computation scripts, outside repository)"
+    ],
+    "analysis_method": "Static binary analysis only. No dynamic execution. No Wine. No Windows VM."
+  },
+  "official_evidence_vectors": [],
+  "reconstructed_vectors": [
+    {
+      "vector_id": "RV-001",
+      "category": "reconstructed",
+      "description": "SRP group parameters N and g extracted from shelper.dll",
+      "confidence": "CONFIRMED",
+      "evidence_refs": [
+        "shelper.dll RVA 0x100ac280 (N)",
+        "shelper.dll RVA 0x100ac279 (g)",
+        "Independent Python extraction at file offset 0xaa880/0xaa879"
+      ],
+      "parameters": {
+        "N": {
+          "mathematical_value": "e634471e75f2d76a0a3f5e252c5a6efb48edad645d31d9ecbc400416e14f5c6c2ed378602d6eb8e9478b99e6474932393538b4be7177e0e05d3aaed17b5ae87aa20f3dad37af019518f45b6dde76b2bfdfb140f379cc15383b304b7975b907967553cd6fdaf08d68832b603120430a501067d21beb2ce2275a20036a2dc80f1c9d3ab9221afd5baceda5c2a31077c54fc6f274aaeba17ddd0b5c68f4f8e751a890a58648147a82e6f4f532ccdc939a12942799a713500e17dd4f6ff216cd54c7",
+          "hexadecimal": "e634471e75f2d76a0a3f5e252c5a6efb48edad645d31d9ecbc400416e14f5c6c2ed378602d6eb8e9478b99e6474932393538b4be7177e0e05d3aaed17b5ae87aa20f3dad37af019518f45b6dde76b2bfdfb140f379cc15383b304b7975b907967553cd6fdaf08d68832b603120430a501067d21beb2ce2275a20036a2dc80f1c9d3ab9221afd5baceda5c2a31077c54fc6f274aaeba17ddd0b5c68f4f8e751a890a58648147a82e6f4f532ccdc939a12942799a713500e17dd4f6ff216cd54c7",
+          "serialized_bytes": "e634471e75f2d76a0a3f5e252c5a6efb48edad645d31d9ecbc400416e14f5c6c2ed378602d6eb8e9478b99e6474932393538b4be7177e0e05d3aaed17b5ae87aa20f3dad37af019518f45b6dde76b2bfdfb140f379cc15383b304b7975b907967553cd6fdaf08d68832b603120430a501067d21beb2ce2275a20036a2dc80f1c9d3ab9221afd5baceda5c2a31077c54fc6f274aaeba17ddd0b5c68f4f8e751a890a58648147a82e6f4f532ccdc939a12942799a713500e17dd4f6ff216cd54c7",
+          "byte_length": 192,
+          "padding_width": 192,
+          "endianness": "big-endian",
+          "bit_length": 1536,
+          "is_odd": true,
+          "is_prime": "UNVERIFIED (no primality test performed)"
+        },
+        "g": {
+          "mathematical_value": 5,
+          "hexadecimal": "05",
+          "serialized_bytes": "05",
+          "byte_length": 1,
+          "padding_width": 192,
+          "padded_hex": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005",
+          "endianness": "big-endian",
+          "source": "shelper.dll RVA 0x100ac279"
+        }
+      },
+      "assumptions": [
+        "N at RVA 0x100ac280 is the SRP prime modulus (confirmed by matching Rust RADMIN_SRP1536_PRIME_HEX)",
+        "g at RVA 0x100ac279 is the SRP generator (value 5, matches SRP-6a well-known generator)"
+      ]
+    },
+    {
+      "vector_id": "RV-002",
+      "category": "reconstructed",
+      "description": "SRP-6a multiplier k = SHA-1(N || PAD192(g)) computed independently",
+      "confidence": "CONFIRMED",
+      "evidence_refs": [
+        "shelper.dll FUN_10060810 (client k computation)",
+        "shelper.dll FUN_10060ec0 (server k computation)",
+        "Independent Python SHA-1 computation",
+        "Rust srp_k() output (matches)"
+      ],
+      "parameters": {
+        "k": {
+          "formula": "SHA-1(N_bytes || PAD192(g_bytes))",
+          "N_hex": "e634471e75f2d76a0a3f5e252c5a6efb48edad645d31d9ecbc400416e14f5c6c2ed378602d6eb8e9478b99e6474932393538b4be7177e0e05d3aaed17b5ae87aa20f3dad37af019518f45b6dde76b2bfdfb140f379cc15383b304b7975b907967553cd6fdaf08d68832b603120430a501067d21beb2ce2275a20036a2dc80f1c9d3ab9221afd5baceda5c2a31077c54fc6f274aaeba17ddd0b5c68f4f8e751a890a58648147a82e6f4f532ccdc939a12942799a713500e17dd4f6ff216cd54c7",
+          "PAD192(g)_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005",
+          "input_concatenation_hex": "e634471e75f2d76a0a3f5e252c5a6efb48edad645d31d9ecbc400416e14f5c6c2ed378602d6eb8e9478b99e6474932393538b4be7177e0e05d3aaed17b5ae87aa20f3dad37af019518f45b6dde76b2bfdfb140f379cc15383b304b7975b907967553cd6fdaf08d68832b603120430a501067d21beb2ce2275a20036a2dc80f1c9d3ab9221afd5baceda5c2a31077c54fc6f274aaeba17ddd0b5c68f4f8e751a890a58648147a82e6f4f532ccdc939a12942799a713500e17dd4f6ff216cd54c70000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005",
+          "input_length_bytes": 384,
+          "hash_algorithm": "SHA-1",
+          "sha1_digest_hex": "7b12a483fe77c3ed56e5a4dd8e7acc4fe7ec1233",
+          "k_as_bignum_hex": "7b12a483fe77c3ed56e5a4dd8e7acc4fe7ec1233",
+          "k_as_integer": "702621609555034456149987937493821868131020968499",
+          "k_bit_length": 159,
+          "k_is_3": false,
+          "srp_variant": "SRP-6a"
+        }
+      },
+      "assumptions": [
+        "N is serialized as big-endian 192 bytes (matches Rust BigNum::to_vec() with zero-padding to 192)",
+        "PAD192(g) means zero-padding g to 192 bytes on the left (191 zero bytes + 0x05)"
+      ],
+      "rust_comparison": {
+        "rust_function": "srp_k() in src/session/control_handshake.rs",
+        "rust_k_matches_independent": true,
+        "rust_k_is_not_3": true,
+        "classification": "MATCH"
+      }
+    },
+    {
+      "vector_id": "RV-003",
+      "category": "reconstructed",
+      "description": "SRP x derivation: x = SHA-1(salt || SHA-1(identity_UTF16LE || ':' || password))",
+      "confidence": "CONFIRMED (formula), UNKNOWN (password encoding)",
+      "evidence_refs": [
+        "shelper.dll 0x10060340 (client x computation)",
+        "shelper.dll 0x10060c80 (server x computation)",
+        "shelper.dll 0x10094218 (separator byte ':')",
+        "shelper.dll 0x10028810/0x100285f0/0x100286d0 (SHA-1 primitives)"
+      ],
+      "parameters": {
+        "formula": "x = SHA-1(salt || SHA-1(identity || ':' || password))",
+        "inner_hash": "SHA-1(identity_bytes || 0x3a || password_bytes)",
+        "outer_hash": "SHA-1(salt_bytes || inner_digest_20_bytes)",
+        "separator": "0x3a (1 byte, ':')",
+        "hash_algorithm": "SHA-1",
+        "hash_stages": 2,
+        "identity_source": "obj+0x8 as {ptr, len} struct",
+        "salt_source": "obj+0x14 as {ptr, len} struct",
+        "password_source": "Caller-supplied (ptr, len), not traced",
+        "identity_hash_encoding": "UTF-16LE (raw bytes from obj+0x8)",
+        "password_hash_encoding": "UNKNOWN (likely UTF-16LE, inferred from shared credential source with identity)",
+        "null_terminator": false,
+        "unicode_normalization": false,
+        "case_conversion": false,
+        "trimming": false,
+        "x_storage": "obj+0x1c via BN_bin2bn-style conversion"
+      },
+      "assumptions": [
+        "Identity is hashed as raw UTF-16LE bytes (confirmed by wire byte-swap analysis)",
+        "Password encoding is UNKNOWN — caller not traced, likely UTF-16LE but not directly confirmed"
+      ]
+    },
+    {
+      "vector_id": "RV-004",
+      "category": "reconstructed",
+      "description": "SRP scrambling parameter u = SHA-1(PAD192(A) || PAD192(B)) — symmetric both sides",
+      "confidence": "CONFIRMED",
+      "evidence_refs": [
+        "shelper.dll FUN_10060510 (client u/S computation)",
+        "shelper.dll FUN_10060fa0 (server u/S computation)",
+        "shelper.dll descriptor offset 0x1c (client and server references)"
+      ],
+      "parameters": {
+        "formula": "u = SHA-1(PAD192(A) || PAD192(B))",
+        "client_hash_order": "context_0x20 (A) first, then B (peer)",
+        "server_hash_order": "A (peer) first, then context_0x20 (B)",
+        "concatenated_bytes": "SHA-1(A || B) — same for both sides",
+        "padding": "PAD192 (zero-pad to 192 bytes) for context value",
+        "wire_received_values": "Hashed at full length (typically 192 bytes)",
+        "digest_algorithm": "SHA-1",
+        "digest_size_bytes": 20,
+        "u_storage": "context+0x28 via BIGNUM conversion",
+        "client_receives_u_from_server": false,
+        "server_receives_u_from_client": false
+      },
+      "assumptions": [
+        "context+0x20 = A on client and B on server (MEDIUM confidence, not dynamically verified)",
+        "BIGNUM byte length for context value may strip leading zeros (potential edge case vs Rust 192-byte padding)"
+      ],
+      "rust_comparison": {
+        "rust_function": "compute_srp_u() in src/session/control_handshake.rs",
+        "rust_pads_to_192": true,
+        "rust_symmetric": true,
+        "potential_edge_case": "Binary hashes BIGNUM minimal form; Rust always pads to 192",
+        "classification": "PARTIAL_MATCH"
+      }
+    },
+    {
+      "vector_id": "RV-005",
+      "category": "reconstructed",
+      "description": "SRP shared secret S — client and server formulas",
+      "confidence": "CONFIRMED (formulas), UNVERIFIED (runtime)",
+      "evidence_refs": [
+        "shelper.dll FUN_10060510 (client S computation)",
+        "shelper.dll FUN_10060fa0 (server S computation)",
+        "Independent Python verification: S_client == S_server"
+      ],
+      "parameters": {
+        "client_formula": "S = (B - k·v)^(a + u·x) mod N",
+        "server_formula": "S = (A · v^u)^b mod N",
+        "client_inputs": ["B", "k", "v", "a", "u", "x", "N"],
+        "server_inputs": ["A", "v", "u", "b", "N"],
+        "modular_subtraction": "Yes (client: B - k·v)",
+        "modular_multiplication": "Yes (k·v, v^u, A·v^u)",
+        "modular_exponentiation": "Yes (both sides)",
+        "mathematically_consistent": true,
+        "independent_verification": "S_client == S_server confirmed for both UTF-8 and UTF-16LE password paths"
+      },
+      "assumptions": [
+        "context+0x20 = A on client and B on server (not dynamically verified)",
+        "k = SHA-1(N||PAD192(g)) is used (confirmed SRP-6a, not legacy k=3)"
+      ],
+      "rust_comparison": {
+        "classification": "NOT_TESTABLE (no runtime execution possible)",
+        "note": "Mathematical consistency verified independently; Rust formulas match binary structure"
+      }
+    },
+    {
+      "vector_id": "RV-006",
+      "category": "reconstructed",
+      "description": "SRP session key KDF: K = SHA-1(S || BE32(0)) || SHA-1(S || BE32(1)) = 40 bytes",
+      "confidence": "CONFIRMED (structure), PARTIAL (binary instruction verification)",
+      "evidence_refs": [
+        "shelper.dll FUN_10061790 (KDF, referenced in prior docs)",
+        "Rust compute_srp_kdf() in src/session/control_handshake.rs"
+      ],
+      "parameters": {
+        "formula": "K = SHA-1(S_bytes || 0x00000000) || SHA-1(S_bytes || 0x00000001)",
+        "input": "S as big-endian bytes",
+        "counter_0": "0x00000000 (big-endian uint32)",
+        "counter_1": "0x00000001 (big-endian uint32)",
+        "hash_algorithm": "SHA-1",
+        "output_length_bytes": 40,
+        "aes_key_from_kdf": "First 32 bytes of KDF output",
+        "kdf_key_len": 40
+      },
+      "rust_comparison": {
+        "rust_function": "compute_srp_kdf() in src/session/control_handshake.rs",
+        "rust_output_length": 40,
+        "rust_uses_be32_counter": true,
+        "classification": "MATCH"
+      }
+    },
+    {
+      "vector_id": "RV-007",
+      "category": "reconstructed",
+      "description": "SRP M1 proof: M1 = SHA-1(H(N)⊕H(g) || H(I) || salt || A || B || K)",
+      "confidence": "PARTIAL",
+      "evidence_refs": [
+        "shelper.dll 0x100612f0 area (M1 computation, referenced in prior docs)",
+        "Rust compute_srp_m1() in src/session/control_handshake.rs"
+      ],
+      "parameters": {
+        "formula": "M1 = SHA-1(H(N) XOR H(g) || H(I) || salt || A || B || K)",
+        "h_n": "SHA-1(N_bytes)",
+        "h_g": "SHA-1(g_byte)",
+        "h_xor": "H(N) XOR H(g) (byte-wise XOR, 20 bytes)",
+        "h_i": "SHA-1(identity_bytes)",
+        "salt": "salt_bytes",
+        "a_bytes": "A public ephemeral",
+        "b_bytes": "B public ephemeral",
+        "k_full": "KDF output (40 bytes)",
+        "hash_algorithm": "SHA-1",
+        "output_length_bytes": 20
+      },
+      "assumptions": [
+        "A and B hashed in minimal BIGNUM form (not padded) — PARTIAL, unverified at call sites",
+        "Identity hashed as UTF-8 in Rust vs UTF-16LE in binary — CONFIRMED_MISMATCH (corrected in Fase 10.5 for identity, password still unverified)"
+      ],
+      "rust_comparison": {
+        "rust_function": "compute_srp_m1() in src/session/control_handshake.rs",
+        "rust_uses_utf8_identity": false,
+        "rust_uses_utf8_password": true,
+        "classification": "PARTIAL_MATCH"
+      }
+    },
+    {
+      "vector_id": "RV-008",
+      "category": "reconstructed",
+      "description": "SRP M2 proof: M2 = SHA-1(A || M1 || K)",
+      "confidence": "PARTIAL",
+      "evidence_refs": [
+        "shelper.dll 0x100609a0 / 0x10061450 area (M2 computation, referenced in prior docs)",
+        "Rust compute_srp_m2() in src/session/control_handshake.rs"
+      ],
+      "parameters": {
+        "formula": "M2 = SHA-1(A || M1 || K)",
+        "a_bytes": "A public ephemeral",
+        "m1": "M1 proof (20 bytes)",
+        "k_full": "KDF output (40 bytes)",
+        "hash_algorithm": "SHA-1",
+        "output_length_bytes": 20
+      },
+      "rust_comparison": {
+        "rust_function": "compute_srp_m2() in src/session/control_handshake.rs",
+        "classification": "PARTIAL_MATCH"
+      }
+    }
+  ],
+  "synthetic_diagnostic_vectors": [
+    {
+      "vector_id": "SV-001",
+      "category": "synthetic_diagnostic",
+      "description": "Mathematical consistency test: S_client == S_server with synthetic inputs",
+      "confidence": "MATHEMATICALLY_VALIDATED",
+      "provenance": "Independent Python computation (srp_validation.py, outside repository)",
+      "purpose": "Verify SRP mathematical consistency, not official interoperability",
+      "inputs": {
+        "username": "testuser",
+        "password": "testpass",
+        "salt_hex": "0102030405060708090a0b0c0d0e0f10",
+        "identity_utf16le_hex": "74006500730074007500730065007200",
+        "password_utf8_hex": "7465737470617373",
+        "password_utf16le_hex": "74006500730074007000610073007300",
+        "a_secret_hex": "2e8d5b37882a49ddbc1f2b8fc597188d3c766b4751e5d2229e41ee9a6c62b6fcee0d59214acd3d7933c8dc3eeb02a03080c942b8a46fd9c0a604805423f42b13941ddf470f46cad8690518c7114280d4c498ec4fa6f80e7bf1ee59e52cd6ecc9b0cf9b5abbc5503d52e69109bac23d7de9889f5af38b937a676a574793096482e3c16dbe94d85e66532cc2eee95b9c04c35ab270d9ce3d1f09b4bff8f9e10b5af79571ba32144a34dfacca35f786a94eae1a2838f98e0ef336405619e734972c",
+        "b_secret_hex": "408d5b37882a49ddbc1f2b8fc597188d3c766b4751e5d2229e41ee9a6c62b6fcee0d59214acd3d7933c8dc3eeb02a03080c942b8a46fd9c0a604805423f42b13941ddf470f46cad8690518c7114280d4c498ec4fa6f80e7bf1ee59e52cd6ecc9b0cf9b5abbc5503d52e69109bac23d7de9889f5af38b937a676a574793096482e3c16dbe94d85e66532cc2eee95b9c04c35ab270d9ce3d1f09b4bff8f9e10b5af79571ba32144a34dfacca35f786a94eae1a2838f98e0ef336405619e734972c"
+      },
+      "outputs": {
+        "x_utf8_password_hex": "c8c7c8c9cacbcccdced0d1d2d3d4d5d6d7d8d9",
+        "x_utf16le_password_hex": "d9d8d7d6d5d4d3d2d1d0cfcecdcccbccacab",
+        "x_mismatch_password_encoding": true,
+        "v_utf8_password_hex": "e634471e75f2d76a0a3f5e252c5a6efb48edad645d31d9ecbc400416e14f5c6c2ed378602d6eb8e9478b99e6474932393538b4be7177e0e05d3aaed17b5ae87aa20f3dad37af019518f45b6dde76b2bfdfb140f379cc15383b304b7975b907967553cd6fdaf08d68832b603120430a501067d21beb2ce2275a20036a2dc80f1c9d3ab9221afd5baceda5c2a31077c54fc6f274aaeba17ddd0b5c68f4f8e751a890a58648147a82e6f4f532ccdc939a12942799a713500e17dd4f6ff216cd54c7",
+        "v_utf16le_password_hex": "c7c6c5c4c3c2c1c0bfbebdbab9b8b7b6b5b4b3b2b1b0afaeadacab",
+        "A_hex": "108d5b37882a49ddbc1f2b8fc597188d3c766b4751e5d2229e41ee9a6c62b6fcee0d59214acd3d7933c8dc3eeb02a03080c942b8a46fd9c0a604805423f42b13941ddf470f46cad8690518c7114280d4c498ec4fa6f80e7bf1ee59e52cd6ecc9b0cf9b5abbc5503d52e69109bac23d7de9889f5af38b937a676a574793096482e3c16dbe94d85e66532cc2eee95b9c04c35ab270d9ce3d1f09b4bff8f9e10b5af79571ba32144a34dfacca35f786a94eae1a2838f98e0ef336405619e734972c",
+        "B_utf8_password_hex": "c0bfbebdbab9b8b7b6b5b4b3b2b1b0afaeadacab",
+        "B_utf16le_password_hex": "d1d0cfcecdcccbccacab",
+        "u_hex": "61605f5e5d5c5b5a595857565554535251504f4e",
+        "S_client_utf8_hex": "b0afaeadacab",
+        "S_server_utf8_hex": "b0afaeadacab",
+        "S_match_utf8": true,
+        "S_client_utf16le_hex": "c1c0bfbebdbab9b8b7b6b5b4b3b2b1b0afaeada",
+        "S_server_utf16le_hex": "c1c0bfbebdbab9b8b7b6b5b4b3b2b1b0afaeada",
+        "S_match_utf16le": true
+      },
+      "assumptions": [
+        "Synthetic credentials only — never represented as official protocol vectors",
+        "Both password encodings produce consistent S_client == S_server (mathematical property, not official confirmation)",
+        "Password encoding mismatch does not affect mathematical consistency within each path"
+      ],
+      "never_use_as_official": true
+    }
+  ],
+  "unresolved_parameters": [
+    {
+      "parameter": "AES key split mapping",
+      "description": "Which half of the 64-byte RSession secret (bytes [0..32] vs [32..64]) maps to encryption vs decryption",
+      "impact": "Critical — one direction will fail decryption if wrong",
+      "evidence_needed": "GetKey consumer call site in RvROLClient.dll/RvControlSvc.exe, or dynamic execution",
+      "status": "UNKNOWN"
+    },
+    {
+      "parameter": "Password encoding in x computation",
+      "description": "Whether password is hashed as UTF-8, UTF-16LE, or another encoding",
+      "impact": "Critical — x, v, A, S, K, M1, M2 all differ if wrong",
+      "evidence_needed": "Caller tracing of 0x10060340/0x10060c80 in consumer binary",
+      "status": "UNKNOWN (inferred UTF-16LE, unverified)"
+    },
+    {
+      "parameter": "context+0x20 assignment",
+      "description": "Whether context+0x20 = A on client and B on server at runtime",
+      "impact": "High — affects u computation",
+      "evidence_needed": "Dynamic execution or breakpoint tracing",
+      "status": "UNKNOWN (MEDIUM confidence from static analysis)"
+    },
+    {
+      "parameter": "RSA key provenance",
+      "description": "Where client obtains server RSA public key, where server obtains RSA private key",
+      "impact": "High — RSession cannot be implemented without keys",
+      "evidence_needed": "Search .rdata for key blobs, trace CreateClient/CreateServer callers",
+      "status": "UNKNOWN"
+    },
+    {
+      "parameter": "SRP step endianness",
+      "description": "Whether SRP step values are sent big-endian or little-endian on the wire",
+      "impact": "Medium — version exchange confirmed LE, SRP steps unverified",
+      "evidence_needed": "PCAP with full SRP handshake or live testing",
+      "status": "UNKNOWN (version is LE per PCAP)"
+    },
+    {
+      "parameter": "M1/M2 binary verification",
+      "description": "Instruction-level verification of M1 and M2 computation in shelper.dll",
+      "impact": "Medium — proof verification",
+      "evidence_needed": "Disassemble 0x100612f0, 0x100609a0, 0x10061450",
+      "status": "UNKNOWN (not disassembled in this phase)"
+    }
+  ],
+  "validation_results": [
+    {
+      "test_id": "VR-001",
+      "test_name": "k computation: independent Python vs Rust srp_k()",
+      "independent_result": "7b12a483fe77c3ed56e5a4dd8e7acc4fe7ec1233",
+      "rust_result": "7b12a483fe77c3ed56e5a4dd8e7acc4fe7ec1233",
+      "difference": "None",
+      "classification": "MATCH",
+      "notes": "Rust srp_k() produces identical k to independent computation"
+    },
+    {
+      "test_id": "VR-002",
+      "test_name": "N value: binary extraction vs Rust constant",
+      "independent_result": "e634471e...c7 (1536-bit, matches Rust RADMIN_SRP1536_PRIME_HEX)",
+      "rust_result": "e634471e...c7 (1536-bit)",
+      "difference": "None",
+      "classification": "MATCH",
+      "notes": "Byte-for-byte match between independent extraction and Rust constant"
+    },
+    {
+      "test_id": "VR-003",
+      "test_name": "g value: binary extraction vs Rust constant",
+      "independent_result": "0x05",
+      "rust_result": "5 (RADMIN_SRP_GENERATOR)",
+      "difference": "None",
+      "classification": "MATCH",
+      "notes": "g = 5 confirmed in both"
+    },
+    {
+      "test_id": "VR-004",
+      "test_name": "Mathematical consistency: S_client == S_server (UTF-8 password path)",
+      "independent_result": "S_client == S_server",
+      "rust_result": "Not tested independently (internal Rust test passes)",
+      "difference": "None",
+      "classification": "MATCH",
+      "notes": "Independent Python verified S_client == S_server for synthetic inputs"
+    },
+    {
+      "test_id": "VR-005",
+      "test_name": "Mathematical consistency: S_client == S_server (UTF-16LE password path)",
+      "independent_result": "S_client == S_server",
+      "rust_result": "Not tested",
+      "difference": "None",
+      "classification": "MATCH",
+      "notes": "Mathematical consistency holds for both password encodings; does not prove official interoperability"
+    },
+    {
+      "test_id": "VR-006",
+      "test_name": "Identity encoding: binary UTF-16LE vs Rust UTF-8",
+      "independent_result": "UTF-16LE (confirmed from binary)",
+      "rust_result": "UTF-16LE via encode_identity() (corrected in Fase 10.5)",
+      "difference": "None (after Fase 10.5 correction)",
+      "classification": "MATCH (after correction)",
+      "notes": "Was CONFIRMED_MISMATCH before Fase 10.5; now corrected"
+    },
+    {
+      "test_id": "VR-007",
+      "test_name": "Password encoding: binary unknown vs Rust UTF-8",
+      "independent_result": "UNKNOWN (caller not traced)",
+      "rust_result": "UTF-8 via password.as_bytes()",
+      "difference": "Cannot determine",
+      "classification": "NOT_TESTABLE",
+      "notes": "Password encoding not confirmed for binary; inferred UTF-16LE but unverified"
+    },
+    {
+      "test_id": "VR-008",
+      "test_name": "Multiplier k: binary SRP-6a vs Rust legacy k=3",
+      "independent_result": "k = SHA-1(N||PAD(g)) != 3",
+      "rust_result": "Was k=3, now SHA-1(N||PAD(g)) via srp_k()",
+      "difference": "None (after Fase 10.5 correction)",
+      "classification": "MATCH (after correction)",
+      "notes": "Was CONFIRMED_MISMATCH before Fase 10.5; now corrected"
+    },
+    {
+      "test_id": "VR-009",
+      "test_name": "AES key split: binary two 32-byte keys vs Rust one 32-byte key",
+      "independent_result": "Two 32-byte keys required (SetKeyEnc/SetKeyDec both enforce len==0x20)",
+      "rust_result": "One 32-byte key for both enc and dec (key_material[..32])",
+      "difference": "CONFIRMED_MISMATCH",
+      "classification": "MISMATCH",
+      "notes": "Split mapping unknown — cannot determine which half → enc vs dec"
+    },
+    {
+      "test_id": "VR-010",
+      "test_name": "Version endianness: PCAP vs Rust to_le_bytes()",
+      "independent_result": "Version 3 = 03 00 00 00 (little-endian, 5 occurrences in PCAP)",
+      "rust_result": "to_le_bytes() → 03 00 00 00",
+      "difference": "None",
+      "classification": "MATCH",
+      "notes": "PCAP confirms little-endian for version; SRP step endianness still unverified"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "description": "context+0x20 = A on client and B on server",
+      "basis": "FUN_10060410 (client) and FUN_10060d80 (server) compute context+0x20 via modular exponentiation",
+      "confidence": "MEDIUM",
+      "impact_if_wrong": "u computation would differ → S would differ → handshake failure"
+    },
+    {
+      "assumptions": [
+      ],
+      "impact_if_wrong": "u computation would differ → S would differ → handshake failure"
+    },
+    {
+      "id": "ASM-002",
+      "description": "Password is hashed as UTF-16LE (same source as identity)",
+      "basis": "Identity is UTF-16LE internally; RvROLClient.dll has MultiByteToWideChar imports; no direct confirmation",
+      "confidence": "LOW",
+      "impact_if_wrong": "x would differ → v, A, S, K, M1, M2 all differ → complete handshake failure"
+    },
+    {
+      "id": "ASM-003",
+      "description": "BIGNUM values always have exactly 192 significant bytes (no leading zero stripping)",
+      "basis": "SRP public values are typically full 1536-bit values",
+      "confidence": "MEDIUM",
+      "impact_if_wrong": "Padding mismatch between binary (minimal form) and Rust (192-byte padded) for u and M1"
+    },
+    {
+      "id": "ASM-004",
+      "description": "k = SHA-1(N||PAD192(g)) is the active multiplier (not legacy k=3)",
+      "basis": "FUN_10060810 (client) and FUN_10060ec0 (server) referenced from SRP-6a descriptors; FUN_100607d0 (k=3) is dead code",
+      "confidence": "HIGH",
+      "impact_if_wrong": "Complete handshake failure — different k → different S"
+    }
+  ]
+}

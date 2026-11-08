@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.16",
+    "description": "RSA key inventory from static binary analysis",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "path": "claude-handoff/binaries/radmin_ext/shelper.dll",
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "size": null,
+        "format": "PE32 i386 DLL"
+      },
+      "RvROLClient.dll": {
+        "path": "claude-handoff/binaries/radmin_ext/RvROLClient.dll",
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+        "size": null,
+        "format": "PE32 i386 DLL"
+      },
+      "RvControlSvc.exe": {
+        "path": "claude-handoff/binaries/radmin_ext/RvControlSvc.exe",
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+        "size": null,
+        "format": "PE32 i386 EXE"
+      }
+    },
+    "analysis_method": "Static binary analysis (objdump). No dynamic execution.",
+    "search_date": "2026-11-08"
+  },
+  "embedded_key_material": {
+    "found": false,
+    "search_performed": [
+      "PEM headers in shelper.dll: NOT FOUND",
+      "PEM headers in RvROLClient.dll: NOT FOUND",
+      "RSA exponent 0x010001 in shelper.dll: NOT FOUND as embedded data",
+      "256-byte RSA key blobs in .rdata: NOT IDENTIFIED",
+      "ASN.1 DER structures: NOT FOUND"
+    ],
+    "conclusion": "No embedded RSA key material was located in the analyzed binaries. Keys are provided by the caller at runtime."
+  },
+  "rsa_api_surface": {
+    "shelper_exports": [
+      {
+        "name": "SHelper_RSAHelper_CreateWithPrivateKey",
+        "va": "0x1006b3e0",
+        "args": 16,
+        "arg_types": ["ptr", "len", "ptr", "len", "ptr", "len", "ptr", "len", "ptr", "len", "ptr", "len", "ptr", "len", "ptr", "len"],
+        "description": "Creates RSA helper with private key components (n, e, d, p, q, dmp1, dmq1, iqmp + lengths)"
+      },
+      {
+        "name": "SHelper_RSAHelper_CreateWithPublicKey",
+        "va": "0x1006b4e0",
+        "args": 4,
+        "arg_types": ["n_ptr", "n_len", "e_ptr", "e_len"],
+        "description": "Creates RSA helper with public key components"
+      },
+      {
+        "name": "SHelper_RSAHelper_EncryptBuffer_Private",
+        "va": null,
+        "description": "RSA encrypt with private key"
+      },
+      {
+        "name": "SHelper_RSAHelper_DecryptBuffer_Private",
+        "va": null,
+        "description": "RSA decrypt with private key"
+      },
+      {
+        "name": "SHelper_RSAHelper_EncryptBuffer_Public",
+        "va": null,
+        "description": "RSA encrypt with public key"
+      },
+      {
+        "name": "SHelper_RSAHelper_DecryptBuffer_Public",
+        "va": null,
+        "description": "RSA decrypt with public key"
+      }
+    ],
+    "windows_cryptoapi_imports": [
+      "CryptAcquireContextA",
+      "CryptDecrypt",
+      "CryptExportKey",
+      "CryptGetUserKey",
+      "CryptCreateHash",
+      "CryptSignHashA",
+      "CryptEnumProvidersA",
+      "CryptReleaseContext",
+      "CryptDestroyKey",
+      "CryptGetProvParam",
+      "CryptSetHashParam",
+      "CryptDestroyHash"
+    ]
+  },
+  "key_parameters": {
+    "size_bits": 2048,
+    "size_bytes": 256,
+    "public_exponent": 65537,
+    "public_exponent_hex": "0x010001",
+    "padding": "PKCS#1 v1.5",
+    "evidence": "Rust RSESSION_RSA_BLOCK_SIZE=256, DEFAULT_RSA_PUBLIC_EXPONENT=[0x01,0x00,0x01], Padding::PKCS1"
+  },
+  "key_provenance": {
+    "source": "Caller-provided at runtime (not embedded)",
+    "embedded_in_shelper": false,
+    "embedded_in_RvROLClient": false,
+    "generated_at_runtime": null,
+    "provisioned_by_server": null,
+    "received_over_network": null,
+    "certificate_derived": null,
+    "classification": "UNKNOWN"
+  },
+  "operation_flow": {
+    "direction": "Client -> Server (one-directional for key exchange)",
+    "plaintext_size": 76,
+    "plaintext_format": "3x u32 LE (client params) + 64-byte key material",
+    "ciphertext_size": 256,
+    "purpose": "RSession key establishment (64-byte secret encryption)"
+  },
+  "rust_implementation": {
+    "location": "src/session/handshake.rs",
+    "key_generation": "Rsa::generate(2048) in tests",
+    "key_import": "Rsa::from_public_components(n, e)",
+    "padding": "Padding::PKCS1",
+    "classification": "COMPATIBLE (parameters), UNKNOWN (provenance)"
+  }
+}

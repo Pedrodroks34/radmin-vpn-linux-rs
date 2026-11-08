@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.15",
+    "description": "Static analysis of password encoding in Radmin VPN Windows binaries",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "format": "PE32 i386 DLL"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+        "format": "PE32 i386 DLL"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+        "format": "PE32 i386 EXE"
+      }
+    },
+    "tools_used": [
+      "objdump (GNU binutils)"
+    ],
+    "analysis_method": "Static binary analysis only. No dynamic execution. No VM."
+  },
+  "binary_facts": {
+    "shelper_dll_password_handling": {
+      "functions": [
+        {"va": "0x10060340", "role": "client x computation", "verified": true},
+        {"va": "0x10060c80", "role": "server x computation", "verified": true}
+      ],
+      "password_source": "Caller stack [ebp+0x10] (pointer), [ebp+0xc] (length)",
+      "password_transformation_in_shelper": "NONE (verbatim SHA1_Update)",
+      "identity_source": "obj+0x8 as {ptr, len} struct",
+      "separator": "0x10094218, length 1, byte 0x3a (':')",
+      "salt_source": "obj+0x14 as {ptr, len} struct",
+      "formula": "x = SHA-1(salt || SHA-1(identity || ':' || password))"
+    },
+    "shelper_dll_exports": {
+      "SHelper_CreateClient": "0x1006ab90",
+      "SHelper_CreateServer": "0x1006ac80",
+      "SHelper_SetUserParams": "0x1006bbe0"
+    },
+    "consumer_unicode_imports": {
+      "RvROLClient.dll": {
+        "MultiByteToWideChar": "0x10111108",
+        "WideCharToMultiByte": "0x10111104",
+        "LCMapStringW": "0x1011117c",
+        "GetACP": "0x10111100"
+      },
+      "RvControlSvc.exe": {
+        "MultiByteToWideChar": "0x1011722c",
+        "WideCharToMultiByte": "0x101171d8",
+        "LCMapStringW": "0x101172dc",
+        "GetACP": "0x101171d4"
+      }
+    },
+    "conversion_calls_in_RvROLClient": {
+      "MultiByteToWideChar": ["0x100a5b63", "0x100a5b9f", "0x100a5daa", "0x100a5dd8", "0x100ff5ed"],
+      "WideCharToMultiByte": ["0x100a625c", "0x100a62df", "0x100dc223", "0x100dc270", "0x100e25da", "0x100e2617", "0x100ff6a5"],
+      "traced_to_SRP_password_path": false
+    }
+  },
+  "password_encoding": {
+    "status": "UNKNOWN",
+    "classification": "UNKNOWN",
+    "description": "Cannot determine encoding from static analysis. Caller-side conversion not traced.",
+    "possible_encodings": [
+      {"encoding": "UTF-16LE", "likelihood": "HIGH", "basis": "Windows native format; MultiByteToWideChar available in both consumers"},
+      {"encoding": "UTF-8", "likelihood": "MEDIUM", "basis": "Rust current impl; WideCharToMultiByte available for UTF-8 output"},
+      {"encoding": "ANSI/code page", "likelihood": "LOW", "basis": "Legacy; less common in modern Windows"},
+      {"encoding": "UTF-16BE", "likelihood": "VERY LOW", "basis": "Unnatural for Windows internal representation"}
+    ],
+    "evidence_chain": {
+      "shelper_dll": "Raw (ptr,len) -> SHA1_Update, no transform (CONFIRMED)",
+      "caller": "NOT TRACED (UNKNOWN)",
+      "conversion_APIs": "Present in imports but call sites not connected to SRP path (NOT_CONFIRMED)"
+    }
+  },
+  "candidate_vectors": [
+    {
+      "id": "PW-V1",
+      "type": "synthetic",
+      "password": "p",
+      "utf8_hex": "70",
+      "utf16le_hex": "7000",
+      "utf16be_hex": "0070",
+      "ansi_hex": "70",
+      "notes": "Single ASCII char. Length distinguishes UTF-8 (1 byte) from UTF-16 (2 bytes)."
+    },
+    {
+      "id": "PW-V2",
+      "type": "synthetic",
+      "password": "päss",
+      "utf8_hex": "70c3a47373",
+      "utf16le_hex": "7000e40073007300",
+      "utf16be_hex": "007000e400730073",
+      "ansi_hex": "70e47373",
+      "notes": "Non-ASCII (ä = U+00E4). UTF-8 uses 2-byte C3 A4; UTF-16 uses 2-byte fixed width."
+    },
+    {
+      "id": "PW-V3",
+      "type": "synthetic",
+      "password": "😀",
+      "unicode": "U+1F600",
+      "utf8_hex": "f09f9880",
+      "utf16le_hex": "3dd800de",
+      "utf16be_hex": "d83dde00",
+      "ansi_hex": null,
+      "notes": "Non-BMP supplementary plane. UTF-16 requires surrogate pair."
+    }
+  ],
+  "rust_comparison": {
+    "current_password_handling": "password.as_bytes() (UTF-8) at src/session/control_handshake.rs:300",
+    "change_made": false,
+    "reason": "Static evidence insufficient for CONFIRMED threshold. Changing to UTF-16LE without proof would be speculation.",
+    "classification": "UNKNOWN"
+  },
+  "dynamic_analysis_required": {
+    "status": "NOT_EXECUTED",
+    "vm_available": false,
+    "breakpoint": {
+      "module": "shelper.dll",
+      "function": "0x10060340",
+      "also_check": "0x10060c80",
+      "password_ptr": "EDX at 0x10060384",
+      "password_len": "EDI at 0x10060355"
+    },
+    "test_credentials": {
+      "username": "A",
+      "password": "p"
+    },
+    "expected_observations": {
+      "UTF-8": "70 (len=1)",
+      "UTF-16LE": "70 00 (len=2)",
+      "UTF-16BE": "00 70 (len=2)",
+      "ANSI": "70 (len=1)"
+    }
+  },
+  "test_results": {
+    "cargo_test": "152 unit tests PASS, 0 FAIL (pre-existing)",
+    "source_modified": false
+  }
+}

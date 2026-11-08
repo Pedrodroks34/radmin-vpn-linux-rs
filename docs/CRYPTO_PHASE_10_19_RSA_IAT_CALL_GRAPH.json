@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.19",
+    "description": "RSA IAT resolution and constructor call graph",
+    "method": "objdump disassembly of shelper.dll, RvROLClient.dll, RvControlSvc.exe",
+    "note": "Call edges based on static analysis. 4705 IAT call sites to 0x10175158 not individually traced."
+  },
+  "iat_analysis": {
+    "common_slot": "0x10175158",
+    "module": "RvROLClient.dll",
+    "call_count": 4705,
+    "purpose": "Indirect call through import address table",
+    "functions_via_slot": "Multiple (varies by call site context)",
+    "rsa_specific_calls_identified": false,
+    "reason": "Same IAT slot used for many different imported functions across the binary"
+  },
+  "nodes": [
+    {
+      "id": "rolclient_import",
+      "name": "RvROLClient.dll import table",
+      "type": "iat",
+      "slot": "0x10175158",
+      "note": "4705 call sites; RSA helpers loaded here"
+    },
+    {
+      "id": "shelper_create_pub",
+      "name": "SHelper_RSAHelper_CreateWithPublicKey",
+      "binary": "shelper.dll",
+      "va": "0x1006b4e0",
+      "type": "export",
+      "args": ["n_ptr", "n_len", "e_ptr", "e_len"]
+    },
+    {
+      "id": "shelper_create_priv",
+      "name": "SHelper_RSAHelper_CreateWithPrivateKey",
+      "binary": "shelper.dll",
+      "va": "0x1006b3e0",
+      "type": "export",
+      "args": ["16 components"]
+    },
+    {
+      "id": "rsa_new",
+      "name": "RSA object creation",
+      "binary": "shelper.dll",
+      "va": "0x10065d00",
+      "type": "internal"
+    },
+    {
+      "id": "rolclient_caller",
+      "name": "RvROLClient.dll RSA caller",
+      "binary": "RvROLClient.dll",
+      "type": "consumer",
+      "note": "Exact function not isolated"
+    },
+    {
+      "id": "controlsvc_caller",
+      "name": "RvControlSvc.exe RSA caller",
+      "binary": "RvControlSvc.exe",
+      "type": "consumer",
+      "note": "Exact function not isolated"
+    }
+  ],
+  "edges": [
+    {
+      "from": "rolclient_caller",
+      "to": "rolclient_import",
+      "mechanism": "GetProcAddress",
+      "confidence": "STRONGLY_SUPPORTED"
+    },
+    {
+      "from": "rolclient_import",
+      "to": "shelper_create_pub",
+      "mechanism": "IAT indirect call",
+      "confidence": "STRONGLY_SUPPORTED",
+      "evidence": "RvROLClient.dll imports SHelper_RSAHelper_CreateWithPublicKey by name"
+    },
+    {
+      "from": "controlsvc_caller",
+      "to": "shelper_create_priv",
+      "mechanism": "GetProcAddress + IAT",
+      "confidence": "STRONGLY_SUPPORTED",
+      "evidence": "RvControlSvc.exe imports SHelper_RSAHelper_CreateWithPrivateKey by name"
+    },
+    {
+      "from": "shelper_create_pub",
+      "to": "rsa_new",
+      "mechanism": "direct call",
+      "confidence": "CONFIRMED",
+      "evidence": "objdump at 0x1006b52b: call 0x10065d00"
+    }
+  ],
+  "unresolved_boundaries": [
+    {
+      "description": "Exact caller function in RvROLClient.dll",
+      "reason": "4705 IAT call sites; specific RSA call not distinguishable statically",
+      "next_step": "Dynamic breakpoint on 0x1006b4e0 to capture call stack"
+    },
+    {
+      "description": "Modulus/exponent byte source",
+      "reason": "Caller-side preparation not traced; could be generated, loaded, or received",
+      "next_step": "Dynamic breakpoint on 0x1006b4e0 to capture n_ptr and e_ptr contents"
+    },
+    {
+      "description": "Private key component source",
+      "reason": "16 args passed from caller; origin not traced",
+      "next_step": "Dynamic breakpoint on 0x1006b3e0 to capture all 16 args"
+    }
+  ],
+  "key_parameters": {
+    "size_bits": 2048,
+    "padding": "PKCS#1 v1.5",
+    "public_exponent": 65537,
+    "direction": "Client -> Server"
+  }
+}

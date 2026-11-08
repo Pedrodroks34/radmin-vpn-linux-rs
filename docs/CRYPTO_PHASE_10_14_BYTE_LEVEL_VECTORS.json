@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.14",
+    "description": "Byte-level vectors for identity hash remediation (UTF-16LE) and password encoding investigation",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4",
+        "format": "PE32 i386 DLL"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177",
+        "format": "PE32 i386 DLL"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e",
+        "format": "PE32 i386 EXE"
+      }
+    },
+    "tools_used": [
+      "cargo test (Rust unit tests)",
+      "objdump (binary verification)"
+    ],
+    "analysis_method": "Static binary analysis + Rust source modification with byte-level tests. No dynamic execution."
+  },
+  "identity_hash_remediation": {
+    "status": "COMPLETED",
+    "classification": "STRONGLY_SUPPORTED",
+    "change_summary": "Added encode_identity_le() (UTF-16LE) for SRP hash input; preserved encode_identity() (UTF-16BE) for wire",
+    "files_modified": [
+      "src/session/control_handshake.rs",
+      "src/session/mod.rs"
+    ]
+  },
+  "identity_vectors": [
+    {
+      "id": "ID-001",
+      "type": "synthetic",
+      "identity": "A",
+      "description": "ASCII - minimal identity",
+      "utf8_hex": "41",
+      "utf16le_hex": "4100",
+      "utf16be_hex": "0041",
+      "hash_input_hex": "4100",
+      "hash_encoding": "UTF-16LE",
+      "wire_hex": "0041",
+      "wire_encoding": "UTF-16BE",
+      "evidence_classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "id": "ID-002",
+      "type": "synthetic",
+      "identity": "José",
+      "description": "Accented Latin - exposes endianness with non-ASCII char (é = U+00E9)",
+      "utf8_hex": "4a6f73c3a9",
+      "utf16le_hex": "4a006f007300e900",
+      "utf16be_hex": "004a006f007300e9",
+      "hash_input_hex": "4a006f007300e900",
+      "hash_encoding": "UTF-16LE",
+      "wire_hex": "004a006f007300e9",
+      "wire_encoding": "UTF-16BE",
+      "evidence_classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "id": "ID-003",
+      "type": "synthetic",
+      "identity": "😀",
+      "unicode": "U+1F600",
+      "description": "Non-BMP supplementary plane - surrogate pair D83D DE00",
+      "utf8_hex": "f09f9880",
+      "utf16le_hex": "3dd800de",
+      "utf16be_hex": "d83dde00",
+      "hash_input_hex": "3dd800de",
+      "hash_encoding": "UTF-16LE",
+      "wire_hex": "d83dde00",
+      "wire_encoding": "UTF-16BE",
+      "evidence_classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "id": "ID-004",
+      "type": "synthetic",
+      "identity": "",
+      "description": "Empty identity edge case",
+      "utf8_hex": "",
+      "utf16le_hex": "",
+      "utf16be_hex": "",
+      "hash_input_hex": "",
+      "wire_hex": "",
+      "evidence_classification": "STRONGLY_SUPPORTED"
+    }
+  ],
+  "password_vectors": [
+    {
+      "id": "PW-001",
+      "type": "synthetic",
+      "password": "p",
+      "description": "Single ASCII - distinguishes UTF-8 (1 byte) from UTF-16LE (2 bytes: 70 00)",
+      "utf8_hex": "70",
+      "utf16le_hex": "7000",
+      "utf16be_hex": "0070",
+      "ansi_hex": "70",
+      "hash_input_hex": null,
+      "hash_encoding": "UNKNOWN",
+      "evidence_classification": "UNKNOWN - requires dynamic analysis"
+    },
+    {
+      "id": "PW-002",
+      "type": "synthetic",
+      "password": "päss",
+      "description": "Non-ASCII password - UTF-8 uses multi-byte C3 A4 for ä",
+      "utf8_hex": "70c3a47373",
+      "utf16le_hex": "7000e40073007300",
+      "utf16be_hex": "007000e400730073",
+      "ansi_hex": "70e47373",
+      "hash_input_hex": null,
+      "hash_encoding": "UNKNOWN",
+      "evidence_classification": "UNKNOWN - requires dynamic analysis"
+    }
+  ],
+  "rust_comparison": {
+    "identity_hash": {
+      "before": "UTF-16BE via encode_identity()",
+      "after": "UTF-16LE via encode_identity_le()",
+      "classification": "CORRECTED"
+    },
+    "identity_wire": {
+      "before": "UTF-16BE via encode_identity()",
+      "after": "UTF-16BE via encode_identity() (unchanged)",
+      "classification": "UNCHANGED"
+    },
+    "password": {
+      "current": "UTF-8 via password.as_bytes()",
+      "expected": "UNKNOWN (likely UTF-16LE)",
+      "classification": "UNKNOWN"
+    }
+  },
+  "test_results": {
+    "cargo_fmt_check": "PASS (exit 0)",
+    "cargo_check": "PASS",
+    "cargo_test": "152 unit tests PASS, 0 FAIL, 1 ignored (pre-existing)",
+    "integration_tests": "5 PASS, 0 FAIL",
+    "new_tests_added": 5,
+    "new_test_names": [
+      "test_identity_le_ascii",
+      "test_identity_le_accented",
+      "test_identity_le_non_bmp_surrogate_pair",
+      "test_identity_le_empty",
+      "test_identity_le_differs_from_be_for_non_ascii"
+    ]
+  },
+  "password_runtime_status": {
+    "status": "NOT_EXECUTED",
+    "classification": "UNKNOWN",
+    "vm_started": false,
+    "process_attached": false,
+    "live_capture_performed": false,
+    "authorization_required": true,
+    "proposed_breakpoint": {
+      "module": "shelper.dll",
+      "function": "0x10060340",
+      "also_check": "0x10060c80",
+      "args": {
+        "password_ptr": "EDX at 0x10060384",
+        "password_len": "EDI at 0x10060355"
+      }
+    }
+  }
+}

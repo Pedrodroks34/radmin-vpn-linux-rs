@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.18",
+    "description": "RSA constructor call graph and component provenance",
+    "method": "objdump disassembly of shelper.dll, RvROLClient.dll, RvControlSvc.exe",
+    "note": "Call edges based on static analysis. Indirect calls may not be fully traced."
+  },
+  "nodes": [
+    {
+      "id": "shelper_create_pub",
+      "name": "SHelper_RSAHelper_CreateWithPublicKey",
+      "binary": "shelper.dll",
+      "va": "0x1006b4e0",
+      "type": "export",
+      "args": ["n_ptr", "n_len", "e_ptr", "e_len"],
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "shelper_create_priv",
+      "name": "SHelper_RSAHelper_CreateWithPrivateKey",
+      "binary": "shelper.dll",
+      "va": "0x1006b3e0",
+      "type": "export",
+      "args": ["16 args (8 components)"],
+      "classification": "CONFIRMED"
+    },
+    {
+      "id": "rolclient_consumer",
+      "name": "RvROLClient.dll RSA caller",
+      "binary": "RvROLClient.dll",
+      "type": "consumer",
+      "note": "Exact dispatch site not identified (IAT at 0x10175158)"
+    },
+    {
+      "id": "controlsvc_consumer",
+      "name": "RvControlSvc.exe RSA caller",
+      "binary": "RvControlSvc.exe",
+      "type": "consumer",
+      "note": "Exact dispatch site not identified"
+    },
+    {
+      "id": "rsession_client",
+      "name": "RSession client handshake",
+      "type": "protocol",
+      "note": "Encrypts 64-byte secret with server public key"
+    },
+    {
+      "id": "rsession_server",
+      "name": "RSession server handshake",
+      "type": "protocol",
+      "note": "Decrypts 256-byte ciphertext with private key"
+    }
+  ],
+  "edges": [
+    {
+      "from": "rolclient_consumer",
+      "to": "shelper_create_pub",
+      "mechanism": "GetProcAddress + IAT dispatch",
+      "confidence": "STRONGLY_SUPPORTED",
+      "evidence": "RvROLClient.dll imports SHelper_RSAHelper_CreateWithPublicKey by name"
+    },
+    {
+      "from": "controlsvc_consumer",
+      "to": "shelper_create_priv",
+      "mechanism": "GetProcAddress + IAT dispatch",
+      "confidence": "STRONGLY_SUPPORTED",
+      "evidence": "RvControlSvc.exe imports SHelper_RSAHelper_CreateWithPrivateKey by name"
+    },
+    {
+      "from": "rsession_client",
+      "to": "rsession_server",
+      "mechanism": "RSA encryption (PKCS#1 v1.5)",
+      "confidence": "CONFIRMED",
+      "evidence": "64-byte secret encrypted to 256-byte ciphertext"
+    }
+  ],
+  "component_sources": {
+    "modulus": {
+      "origin": "Caller-provided",
+      "specific_source": "UNKNOWN",
+      "possibilities": ["Generated at runtime", "Loaded from file", "Received from server", "Hardcoded in caller"],
+      "classification": "UNKNOWN"
+    },
+    "exponent": {
+      "origin": "Caller-provided",
+      "specific_source": "UNKNOWN (likely 65537)",
+      "classification": "UNKNOWN"
+    },
+    "private_components": {
+      "origin": "Caller-provided",
+      "specific_source": "UNKNOWN",
+      "classification": "UNKNOWN"
+    }
+  },
+  "embedded_material_search": {
+    "pem_headers": "NOT FOUND in any binary",
+    "der_structures": "NOT FOUND",
+    "key_blobs": "NOT IDENTIFIED",
+    "conclusion": "Keys are not embedded in analyzed binaries"
+  },
+  "key_parameters": {
+    "size_bits": 2048,
+    "size_bytes": 256,
+    "public_exponent": 65537,
+    "padding": "PKCS#1 v1.5"
+  }
+}

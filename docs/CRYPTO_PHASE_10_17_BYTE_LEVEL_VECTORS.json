@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "repository": "https://github.com/Pedrodroks34/radmin-vpn-linux-rs",
+    "branch": "main",
+    "head": "95e304e0855a6faf4eece932484cb00e36620a6e",
+    "phase": "10.17",
+    "description": "M1 identity encoding remediation and RSA caller trace",
+    "binaries_analyzed": {
+      "shelper.dll": {
+        "sha256": "d89daf6bcd5cafa3c7f6173f835ccf045baf8e7134f868819db6fd7615959ac4"
+      },
+      "RvROLClient.dll": {
+        "sha256": "6ba7dfecd38183d4bff0fc53f1c8c05d25e636077fe753b1220912aa58938177"
+      },
+      "RvControlSvc.exe": {
+        "sha256": "546efad9ab3ff85c2a50d61524d754bec94a3f3e30d6ae8addef481a1e8daa1e"
+      }
+    },
+    "tools_used": [
+      "objdump (GNU binutils)",
+      "cargo test"
+    ],
+    "analysis_method": "Static binary analysis + Rust source modification with tests. No dynamic execution."
+  },
+  "m1_remediation": {
+    "status": "COMPLETED",
+    "change": "sha1(username.as_bytes()) -> sha1(&encode_identity_le(username))",
+    "file": "src/session/control_handshake.rs",
+    "line": 442,
+    "classification": "CONFIRMED_MISMATCH corrected",
+    "before_encoding": "UTF-8",
+    "after_encoding": "UTF-16LE",
+    "wire_preserved": "UTF-16BE via encode_identity() unchanged"
+  },
+  "identity_vectors": [
+    {
+      "id": "M1-ID-001",
+      "type": "synthetic",
+      "identity": "A",
+      "utf16le_hex": "4100",
+      "utf16be_hex": "0041",
+      "utf8_hex": "41",
+      "hash_input_hex": "4100",
+      "wire_hex": "0041",
+      "evidence_classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "id": "M1-ID-002",
+      "type": "synthetic",
+      "identity": "José",
+      "utf16le_hex": "4a006f007300e900",
+      "utf16be_hex": "004a006f007300e9",
+      "utf8_hex": "4a6f73c3a9",
+      "hash_input_hex": "4a006f007300e900",
+      "wire_hex": "004a006f007300e9",
+      "evidence_classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "id": "M1-ID-003",
+      "type": "synthetic",
+      "identity": "😀",
+      "unicode": "U+1F600",
+      "utf16le_hex": "3dd800de",
+      "utf16be_hex": "d83dde00",
+      "utf8_hex": "f09f9880",
+      "hash_input_hex": "3dd800de",
+      "wire_hex": "d83dde00",
+      "evidence_classification": "STRONGLY_SUPPORTED"
+    },
+    {
+      "id": "M1-ID-004",
+      "type": "synthetic",
+      "identity": "",
+      "utf16le_hex": "",
+      "utf16be_hex": "",
+      "utf8_hex": "",
+      "hash_input_hex": "",
+      "wire_hex": "",
+      "evidence_classification": "STRONGLY_SUPPORTED"
+    }
+  ],
+  "test_results": {
+    "cargo_fmt_check": "PASS",
+    "cargo_check": "PASS",
+    "cargo_test": "157 unit tests PASS, 0 FAIL, 1 ignored",
+    "integration_tests": "5 PASS, 0 FAIL",
+    "new_tests": [
+      "test_m1_identity_ascii",
+      "test_m1_identity_accented",
+      "test_m1_identity_non_bmp",
+      "test_m1_identity_empty",
+      "test_m1_identity_wire_be_preserved"
+    ]
+  },
+  "rsa_caller_trace": {
+    "status": "PARTIALLY_RESOLVED",
+    "constructors": {
+      "SHelper_RSAHelper_CreateWithPrivateKey": {
+        "va": "0x1006b3e0",
+        "args": 16,
+        "classification": "CONFIRMED"
+      },
+      "SHelper_RSAHelper_CreateWithPublicKey": {
+        "va": "0x1006b4e0",
+        "args": 4,
+        "arg_types": ["n_ptr", "n_len", "e_ptr", "e_len"],
+        "classification": "CONFIRMED"
+      }
+    },
+    "component_origins": {
+      "modulus": "Caller-provided (UNKNOWN exact source)",
+      "exponent": "Caller-provided (UNKNOWN exact source)",
+      "private_components": "Caller-provided (UNKNOWN exact source)"
+    },
+    "embedded_material_found": false,
+    "key_size": 2048,
+    "padding": "PKCS#1 v1.5",
+    "operation_direction": "Client -> Server",
+    "provenance_classification": "UNKNOWN"
+  },
+  "password_encoding": {
+    "status": "UNKNOWN",
+    "change_made": false,
+    "notes": "Out of scope for this phase. Requires dynamic analysis."
+  },
+  "m2_status": {
+    "status": "PARTIALLY_CONFIRMED",
+    "change_made": false,
+    "notes": "No discrepancy found. Existing implementation preserved."
+  }
+}
